@@ -1,0 +1,12 @@
+{
+  "prod": {
+    "cloud_batch_size": 500,
+    "checkpoint_files_threshold": 10000,
+    "checkpoint_time_sec": 300
+  },
+  "test": {
+    "cloud_batch_size": 100,
+    "checkpoint_files_threshold": 500,
+    "checkpoint_time_sec": 30
+  }
+}

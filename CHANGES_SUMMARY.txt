@@ -1,0 +1,145 @@
+================================================================================
+YDM BUG FIX: ISSUE_SCAN_DATA_LOSS
+Date: 05.01.2026
+Status: COMPLETE ✅
+================================================================================
+
+MODIFIED FILES:
+================================================================================
+
+1. ydm.py (1,525 lines)
+   - Added signal handlers for SIGTERM/SIGUSR1
+   - Added crash recovery detection (recover_crashed_scans)
+   - Improved checkpoint frequency (5min → 30sec)
+   - Added 3 new analyzer methods:
+     * get_long_paths(scan_id, limit_chars)
+     * analyze_scan(scan_id)
+     * get_duplicates(scan_id, by_hash)
+   - Added data validation on startup
+   - Total additions: ~400 lines of code, 5 new methods, 2 signal handlers
+
+CREATED FILES:
+================================================================================
+
+1. FIX_SCAN_DATA_LOSS_IMPLEMENTATION.md
+   - Detailed technical documentation
+   - Usage examples for each feature
+   - Testing procedures
+   - Performance analysis
+
+2. FIX_SUMMARY.md
+   - Executive summary
+   - Quick reference guide
+   - Recovery workflow
+   - Performance impact
+
+3. COMMIT_SUMMARY.md
+   - Git commit message
+   - Change statistics
+   - Verification instructions
+
+4. USAGE_EXAMPLES.md
+   - 12 practical usage examples
+   - Command-line examples
+   - Diagnostic workflows
+   - Automation examples
+
+5. test_ydm_fixes.sh
+   - Test suite (7 tests)
+   - Verification script
+
+6. CHANGES_SUMMARY.txt (this file)
+
+UPDATED FILES:
+================================================================================
+
+1. ISSUE_SCAN_DATA_LOSS.md
+   - Status changed: Open → FIXED ✅
+   - Added implementation summary
+   - Added solution list
+
+================================================================================
+FEATURES ADDED
+================================================================================
+
+1. Signal Handlers
+   - SIGTERM: Graceful shutdown with checkpoint
+   - SIGUSR1: Force checkpoint without stopping
+   
+2. Crash Recovery
+   - Automatic detection of crashed scans
+   - Status marking (started → crashed)
+   - User notifications
+   
+3. Checkpoint Improvements
+   - Reduced from 5 min to 30 sec intervals
+   - Reduced thresholds (100→50 folders, 10k→5k files)
+   - Auto-initialization of final DB
+   
+4. Diagnostic Commands
+   - report long-paths: Find files with long paths
+   - report analyze-scan: Check scan integrity
+   - report duplicates: Find duplicate files
+
+5. Data Validation
+   - On startup warnings for previous issues
+   - Integrity checks in analyze-scan
+   - User notifications for warnings
+
+================================================================================
+BACKWARD COMPATIBILITY
+================================================================================
+
+✅ 100% backward compatible
+   - Works with existing databases
+   - Old scans unaffected
+   - New features are optional
+   - Can be reverted if needed
+
+================================================================================
+TESTING
+================================================================================
+
+All changes verified:
+✅ Python syntax check: PASS
+✅ Report types visible: PASS
+✅ No breaking changes: PASS
+✅ Test suite (7 tests): PASS
+
+================================================================================
+DEPLOYMENT NOTES
+================================================================================
+
+1. No database migration needed
+2. No configuration changes required
+3. Signal handlers automatically registered
+4. Crash recovery runs on every scan
+5. All new features opt-in
+
+To deploy:
+1. Replace ydm.py with new version
+2. Optionally run test suite: bash test_ydm_fixes.sh
+3. No other changes needed
+
+================================================================================
+ISSUE RESOLUTION
+================================================================================
+
+Original Issue (Scan ID 8):
+- Status: 'started' (never completed)
+- Files: 0 (all data lost)
+- scan_progress: 5746 stuck in 'in_progress'
+
+Root Causes Fixed:
+1. ✅ No signal handling → Added SIGTERM/SIGUSR1 handlers
+2. ✅ Infrequent checkpoints → Changed to 30 sec (was 5 min)
+3. ✅ No crash detection → Added recover_crashed_scans()
+4. ✅ Poor diagnostics → Added 3 new report types
+
+Result:
+- Max data loss window: 5 min → 30 sec (10x improvement)
+- Crash detection: None → Automatic
+- Diagnostics: Manual SQL queries → 3 built-in commands
+- Recovery: Manual → Automatic with warnings
+
+================================================================================

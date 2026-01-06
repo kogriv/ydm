@@ -1,0 +1,23 @@
+# Data & Logs
+monitor.db
+*.db
+scan_*.log
+*.log
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
