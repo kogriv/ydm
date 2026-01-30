@@ -6,8 +6,10 @@ import urllib.parse
 import json
 import time
 
-DB_PATH = '/home/kogriv/infra/ya_disk/tools/monitor.db'
-ENV_PATH = '/home/kogriv/infra/ya_disk/tools/.env'
+# Use paths relative to project root
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_PATH = os.path.join(PROJECT_ROOT, 'monitor.db')
+ENV_PATH = os.path.join(PROJECT_ROOT, '.env')
 
 def load_token():
     if os.path.exists(ENV_PATH):

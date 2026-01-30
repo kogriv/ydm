@@ -1,8 +1,12 @@
 # Data & Logs
 monitor.db
 *.db
+*.db.backup
+monitor.db.backup
 scan_*.log
 *.log
+deleted.log
+deleted.log.old
 
 # Secrets
 .env
@@ -21,3 +25,10 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Service files (generated/analysis results)
+junk_list.txt
+junk_list.txt.old
+junk_analysis.json
+cleanup_paths.txt
+GITHUB_READINESS_REPORT.md

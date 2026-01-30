@@ -69,7 +69,11 @@ def is_termination_requested():
 DEFAULT_CONFIG = {
     "cloud_batch_size": 500,
     "checkpoint_files_threshold": 10000,
-    "checkpoint_time_sec": 300
+    "checkpoint_time_sec": 300,
+    # Freshness window (in days) for considering cloud scans in full-scan heuristics
+    "full_scan_fresh_window_days": 2,
+    # Optional explicit reference full scan ID (can be overridden by user/config)
+    "reference_full_scan_id": None,
 }
 
 def load_config(profile="prod"):
@@ -220,9 +224,9 @@ class StorageManager:
             
             temp_conn.execute(f"ATTACH DATABASE '{self.final_db_path}' AS disk")
             
-            # Copy scans (if not exists)
+            # Copy scans (update existing using REPLACE to avoid attached DB upsert limit)
             temp_conn.execute("""
-                INSERT OR IGNORE INTO disk.scans 
+                INSERT OR REPLACE INTO disk.scans 
                 SELECT * FROM main.scans
             """)
             
@@ -233,8 +237,9 @@ class StorageManager:
             """)
             
             # Copy files (without id - let target DB auto-increment)
+            # Use INSERT OR IGNORE to prevent duplicates when checkpoint runs multiple times
             temp_conn.execute("""
-                INSERT INTO disk.files 
+                INSERT OR IGNORE INTO disk.files 
                 (scan_id, parent_path, name, type, size, md5, created, modified)
                 SELECT scan_id, parent_path, name, type, size, md5, created, modified FROM main.files
             """)
@@ -312,6 +317,7 @@ class StorageManager:
                 );
                 """,
                 "CREATE INDEX IF NOT EXISTS idx_files_parent ON files(scan_id, parent_path);",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_unique ON files(scan_id, parent_path, name);",
                 "CREATE INDEX IF NOT EXISTS idx_scans_type ON scans(scan_type);",
                 "CREATE INDEX IF NOT EXISTS idx_progress_scan ON scan_progress(scan_id, status);"
             ]
@@ -426,6 +432,7 @@ class StorageManager:
             );
             """,
             "CREATE INDEX IF NOT EXISTS idx_files_parent ON files(scan_id, parent_path);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_unique ON files(scan_id, parent_path, name);",
             "CREATE INDEX IF NOT EXISTS idx_scans_type ON scans(scan_type);",
             "CREATE INDEX IF NOT EXISTS idx_progress_scan ON scan_progress(scan_id, status);"
         ]
@@ -972,12 +979,12 @@ class CloudScanner:
                 offset = new_offset
                 if offset >= total:
                     break
+            
+            # Mark folder as completed after processing all items
+            storage.update_folder_status(scan_id, current_path, 'completed')
         
         if batch:
             storage.save_files_batch(batch)
-
-        # Mark scan as completed
-        storage.update_folder_status(scan_id, current_path, 'completed')
         
         return files_count
 
@@ -985,6 +992,12 @@ class Analyzer:
     """Analyzes data from DB."""
     def __init__(self, storage):
         self.storage = storage
+        # Cache for composite scans: {cache_key: (composite_data, timestamp)}
+        self._composite_cache = {}
+        self._cache_ttl = 300  # 5 minutes TTL for cache
+        # Cache for composite scans: {cache_key: (composite_data, timestamp)}
+        self._composite_cache = {}
+        self._cache_ttl = 300  # 5 minutes TTL for cache
 
     def get_status(self):
         """Returns summary of recent scans."""
@@ -1007,6 +1020,160 @@ class Analyzer:
         """Returns list of all scans with brief info."""
         return self.storage.get_all_scans(limit)
 
+    # --- Full scan heuristics helpers ---
+
+    def _get_config_full_scan_window_days(self):
+        """Returns freshness window (days) from storage config or default."""
+        config = getattr(self.storage, "config", None)
+        if isinstance(config, dict):
+            return int(config.get("full_scan_fresh_window_days", DEFAULT_CONFIG["full_scan_fresh_window_days"]))
+        return DEFAULT_CONFIG["full_scan_fresh_window_days"]
+
+    def _get_config_reference_full_scan_id(self):
+        """Returns explicit reference_full_scan_id from config if set."""
+        config = getattr(self.storage, "config", None)
+        ref_id = None
+        if isinstance(config, dict):
+            ref_id = config.get("reference_full_scan_id", None)
+        return ref_id
+
+    def get_full_scan_candidates(self):
+        """
+        Returns list of recent cloud scans with heuristic metrics for full-scan selection.
+
+        Used for diagnostics (CLI) and understanding why a particular scan was chosen.
+        """
+        recent_scans = self.get_recent_cloud_scans()
+        if not recent_scans:
+            return []
+
+        # Filter only successful scans without pending/in_progress
+        candidates = []
+        for s in recent_scans:
+            if s["status"] != "success":
+                continue
+            prog = s.get("progress") or {}
+            pending = prog.get("pending", 0)
+            in_progress = prog.get("in_progress", 0)
+            if pending == 0 and in_progress == 0:
+                candidates.append(s)
+
+        if not candidates:
+            return []
+
+        max_files = max(c["files_count"] for c in candidates) or 1
+        alpha_files = 0.9  # threshold for "large enough" scans
+
+        best_id = None
+        best_score = -1.0
+
+        enriched = []
+        for c in candidates:
+            f_files = c["files_count"] / max_files
+            score = f_files
+            enriched.append({
+                "id": c["id"],
+                "timestamp": c["timestamp"],
+                "status": c["status"],
+                "files_count": c["files_count"],
+                "progress": c["progress"],
+                "top_levels": c["top_levels"],
+                "f_files": f_files,
+                "score": score,
+            })
+            if f_files >= alpha_files and score > best_score:
+                best_score = score
+                best_id = c["id"]
+
+        # If no candidate passed the threshold, pick the one with max files_count
+        if best_id is None:
+            best = max(enriched, key=lambda x: x["files_count"])
+            best_id = best["id"]
+
+        # Mark which candidate is currently considered the best
+        for item in enriched:
+            item["is_best"] = (item["id"] == best_id)
+
+        return enriched
+
+    def get_recent_cloud_scans(self):
+        """
+        Returns cloud scans within freshness window (in days) with basic metrics.
+
+        Uses full_scan_fresh_window_days from config (default: 2 days).
+        """
+        conn = self.storage.get_connection()
+        conn.row_factory = sqlite3.Row
+
+        window_days = self._get_config_full_scan_window_days()
+
+        # Select cloud scans within time window (relative to now)
+        recent_scans = conn.execute(
+            """
+            SELECT id, timestamp, scan_type, status, duration
+            FROM scans
+            WHERE scan_type = 'cloud'
+              AND timestamp >= datetime('now', ?)
+            ORDER BY id DESC
+            """,
+            (f"-{window_days} days",)
+        ).fetchall()
+
+        result = []
+        for scan in recent_scans:
+            scan_id = scan["id"]
+
+            # Files count for this scan
+            files_count = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
+                (scan_id,)
+            ).fetchone()[0]
+
+            # Progress stats from scan_progress (pending/in_progress)
+            progress = conn.execute(
+                """
+                SELECT 
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
+                FROM scan_progress
+                WHERE scan_id = ?
+                """,
+                (scan_id,)
+            ).fetchone()
+
+            # Coverage by top-level folders
+            top_levels = conn.execute(
+                """
+                SELECT DISTINCT 
+                    CASE 
+                        WHEN parent_path LIKE '/%' THEN substr(parent_path, 2, 
+                            INSTR(substr(parent_path, 2) || '/', '/') - 1)
+                        ELSE parent_path
+                    END AS top
+                FROM files
+                WHERE scan_id = ? AND type = 'file'
+                """,
+                (scan_id,)
+            ).fetchall()
+            top_set = sorted({row[0] for row in top_levels if row[0]})
+
+            result.append({
+                "id": scan_id,
+                "timestamp": scan["timestamp"],
+                "status": scan["status"],
+                "duration": scan["duration"],
+                "files_count": files_count,
+                "progress": {
+                    "completed": progress[0] or 0 if progress else 0,
+                    "in_progress": progress[1] or 0 if progress else 0,
+                    "pending": progress[2] or 0 if progress else 0,
+                },
+                "top_levels": top_set,
+            })
+
+        return result
+
     def get_scan_progress(self, scan_id):
         """Returns detailed progress info for a scan."""
         details = self.storage.get_scan_details(scan_id)
@@ -1021,8 +1188,790 @@ class Analyzer:
             "pending_folders_count": len(pending_folders)
         }
 
-    def get_diff(self):
-        """Compares last successful cloud scan vs last successful local scan."""
+    def is_full_scan(self, scan_id):
+        """
+        Determines if a cloud scan was full (started from root /) or partial.
+        
+        Args:
+            scan_id: Scan ID to check
+            
+        Returns:
+            bool: True if scan is full (has path='/' in scan_progress), False otherwise
+        """
+        conn = self.storage.get_connection()
+        
+        # Check if scan exists and is a cloud scan
+        scan = conn.execute(
+            "SELECT scan_type FROM scans WHERE id = ?",
+            (scan_id,)
+        ).fetchone()
+        
+        if not scan:
+            return None  # Scan not found
+        
+        if scan[0] != 'cloud':
+            return False  # Only cloud scans can be full/partial
+        
+        # Check if scan_progress has entry with path='/'
+        root_entry = conn.execute(
+            "SELECT COUNT(*) FROM scan_progress WHERE scan_id = ? AND path = '/'",
+            (scan_id,)
+        ).fetchone()
+        
+        return root_entry[0] > 0 if root_entry else False
+
+    def get_scan_metadata(self, scan_id):
+        """
+        Returns metadata about a scan including type (full/partial) and statistics.
+        
+        Args:
+            scan_id: Scan ID to analyze
+            
+        Returns:
+            dict: Metadata including scan info, type, files count, folders count, root path
+        """
+        conn = self.storage.get_connection()
+        
+        # Get basic scan info
+        scan = conn.execute(
+            """SELECT id, timestamp, scan_type, status, duration 
+            FROM scans WHERE id = ?""",
+            (scan_id,)
+        ).fetchone()
+        
+        if not scan:
+            return {"error": f"Scan {scan_id} not found"}
+        
+        scan_id_val, timestamp, scan_type, status, duration = scan
+        
+        # Get files count
+        files_count = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
+            (scan_id,)
+        ).fetchone()[0]
+        
+        # Get folders count from scan_progress
+        folders_count = conn.execute(
+            "SELECT COUNT(*) FROM scan_progress WHERE scan_id = ?",
+            (scan_id,)
+        ).fetchone()[0]
+        
+        # Determine if full or partial (only for cloud scans)
+        is_full = None
+        root_path = None
+        
+        if scan_type == 'cloud':
+            is_full = self.is_full_scan(scan_id)
+            # Get root path from scan_progress (first path that was scanned)
+            root_paths = conn.execute(
+                """SELECT path FROM scan_progress 
+                WHERE scan_id = ? 
+                ORDER BY last_checked ASC 
+                LIMIT 1""",
+                (scan_id,)
+            ).fetchone()
+            root_path = root_paths[0] if root_paths else None
+        
+        return {
+            "scan_id": scan_id_val,
+            "timestamp": timestamp,
+            "scan_type": scan_type,
+            "status": status,
+            "duration": duration,
+            "files_count": files_count,
+            "folders_count": folders_count,
+            "is_full": is_full,
+            "root_path": root_path
+        }
+
+    def find_last_full_scan(self, scan_id=None):
+        """
+        Finds the last full cloud scan.
+        
+        Args:
+            scan_id: Optional specific scan ID to check (if provided, validates it's full)
+            
+        Returns:
+            dict: Scan info with id, timestamp, files_count, or None if not found
+        """
+        conn = self.storage.get_connection()
+
+        # 1) Если указан scan_id явно — валидируем и используем его как эталон
+        if scan_id:
+            scan = conn.execute(
+                """
+                SELECT id, timestamp, status
+                FROM scans
+                WHERE id = ? AND scan_type = 'cloud'
+                """,
+                (scan_id,),
+            ).fetchone()
+
+            if not scan:
+                return {"error": f"Scan {scan_id} not found or is not a cloud scan"}
+
+            meta = self.get_scan_metadata(scan_id)
+            if meta.get("status") != "success":
+                return {"error": f"Scan {scan_id} is not successful (status={meta.get('status')})"}
+
+            return {
+                "id": scan[0],
+                "timestamp": scan[1],
+                "status": scan[2],
+                "files_count": meta.get("files_count", 0),
+            }
+
+        # 2) Если в конфиге задан reference_full_scan_id — пытаемся использовать его
+        ref_id = self._get_config_reference_full_scan_id()
+        if ref_id:
+            try:
+                ref_id_int = int(ref_id)
+                return self.find_last_full_scan(scan_id=ref_id_int)
+            except Exception:
+                # Плохо задан id в конфиге, игнорируем и идем дальше
+                pass
+
+        # 3) Автоматический выбор эталонного скана на основе свежих cloud-сканов
+        candidates = self.get_full_scan_candidates()
+        if not candidates:
+            # Fallback: если нет кандидатов в окне свежести - используем старое поведение
+            # Берем последний cloud scan (независимо от статуса)
+            last_cloud = conn.execute(
+                "SELECT id, timestamp, status FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not last_cloud:
+                return None
+            
+            files_count = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
+                (last_cloud[0],)
+            ).fetchone()[0]
+            
+            return {
+                "id": last_cloud[0],
+                "timestamp": last_cloud[1],
+                "status": last_cloud[2],
+                "files_count": files_count,
+            }
+
+        # Найти помеченный как лучший
+        best = None
+        for c in candidates:
+            if c.get("is_best"):
+                best = c
+                break
+
+        if not best:
+            if candidates:
+                # Safety fallback: взять самый большой по количеству файлов
+                best = max(candidates, key=lambda x: x["files_count"])
+            else:
+                # Если нет кандидатов в окне свежести - fallback на старое поведение
+                # Берем последний cloud scan (независимо от статуса)
+                last_cloud = conn.execute(
+                    "SELECT id, timestamp, status FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if not last_cloud:
+                    return None
+                
+                files_count = conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
+                    (last_cloud[0],)
+                ).fetchone()[0]
+                
+                return {
+                    "id": last_cloud[0],
+                    "timestamp": last_cloud[1],
+                    "status": last_cloud[2],
+                    "files_count": files_count,
+                }
+
+        return {
+            "id": best["id"],
+            "timestamp": best["timestamp"],
+            "status": best["status"],
+            "files_count": best["files_count"],
+        }
+
+    def get_folders_in_scan(self, scan_id):
+        """
+        Gets list of all folders (parent_paths) that were scanned in a given scan.
+        
+        Args:
+            scan_id: Scan ID to analyze
+            
+        Returns:
+            set: Set of parent_path values from files table for this scan
+        """
+        conn = self.storage.get_connection()
+        
+        # Get all distinct parent_paths from files table
+        folders = conn.execute(
+            """SELECT DISTINCT parent_path 
+            FROM files 
+            WHERE scan_id = ? AND type = 'file'""",
+            (scan_id,)
+        ).fetchall()
+        
+        return {row[0] for row in folders}
+
+    def find_partial_scans_after(self, base_scan_id):
+        """
+        Finds all partial (non-full) cloud scans that occurred after the base scan.
+        
+        Args:
+            base_scan_id: Base full scan ID (all partial scans must be after this)
+            
+        Returns:
+            list: List of dicts with scan info (id, timestamp, status, root_path)
+        """
+        conn = self.storage.get_connection()
+        
+        # Verify base scan exists and is a cloud scan
+        base_scan = conn.execute(
+            "SELECT id, timestamp FROM scans WHERE id = ? AND scan_type = 'cloud'",
+            (base_scan_id,)
+        ).fetchone()
+        
+        if not base_scan:
+            return []
+        
+        base_timestamp = base_scan[1]
+        
+        # Find all cloud scans after base scan that are NOT full scans
+        partial_scans = conn.execute("""
+            SELECT s.id, s.timestamp, s.status
+            FROM scans s
+            WHERE s.scan_type = 'cloud'
+            AND s.id > ?
+            AND s.id NOT IN (
+                SELECT DISTINCT sp.scan_id 
+                FROM scan_progress sp 
+                WHERE sp.path = '/'
+            )
+            ORDER BY s.id ASC
+        """, (base_scan_id,)).fetchall()
+        
+        result = []
+        for scan_id, timestamp, status in partial_scans:
+            # Get root path for this partial scan
+            # First try from scan_progress
+            root_paths = conn.execute(
+                """SELECT path FROM scan_progress 
+                WHERE scan_id = ? 
+                ORDER BY last_checked ASC 
+                LIMIT 1""",
+                (scan_id,)
+            ).fetchone()
+            
+            root_path = root_paths[0] if root_paths else None
+            
+            # If not found in scan_progress, try to determine from files
+            if not root_path:
+                file_paths = conn.execute(
+                    """SELECT DISTINCT parent_path 
+                    FROM files 
+                    WHERE scan_id = ? 
+                    ORDER BY parent_path 
+                    LIMIT 1""",
+                    (scan_id,)
+                ).fetchone()
+                
+                if file_paths:
+                    # Use the shortest parent_path as root (usually the top-level folder)
+                    root_path = file_paths[0]
+                    # If it's not empty, ensure it starts with /
+                    if root_path and not root_path.startswith('/'):
+                        root_path = '/' + root_path
+            
+            result.append({
+                "id": scan_id,
+                "timestamp": timestamp,
+                "status": status,
+                "root_path": root_path
+            })
+        
+        return result
+
+    def build_composite_scan(self, cloud_scan_id=None, use_cache=True):
+        """
+        Builds a composite scan from base full scan + partial scan updates.
+        Uses caching to avoid rebuilding on repeated calls.
+        
+        Args:
+            cloud_scan_id: Optional specific full scan ID to use as base
+            use_cache: If True, use cached result if available and fresh
+            
+        Returns:
+            dict: Composite scan structure with base_scan_id and folder_updates mapping
+                  {parent_path: scan_id} for folders that have newer partial scans
+        """
+        import time
+        
+        # Check cache if enabled
+        if use_cache:
+            cache_key = f"composite_{cloud_scan_id or 'auto'}"
+            if cache_key in self._composite_cache:
+                cached_data, cache_time = self._composite_cache[cache_key]
+                if time.time() - cache_time < self._cache_ttl:
+                    # Return cached data
+                    return cached_data
+                else:
+                    # Cache expired, remove it
+                    del self._composite_cache[cache_key]
+        
+        conn = self.storage.get_connection()
+        
+        # 1. Find base full scan
+        # If cloud_scan_id is provided explicitly, use it as base (validated in find_last_full_scan)
+        # Otherwise, use heuristic reference full scan based on freshness window and config.
+        base_scan = self.find_last_full_scan(cloud_scan_id)
+        if not base_scan or "error" in base_scan:
+            # Fallback: try to use the last cloud scan as base (old behavior)
+            conn = self.storage.get_connection()
+            last_cloud = conn.execute(
+                "SELECT id, timestamp, status FROM scans WHERE scan_type = 'cloud' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not last_cloud:
+                # No cloud scans at all
+                return {"error": base_scan.get("error", "No full scan found") if isinstance(base_scan, dict) else "No cloud scan found"}
+
+            # Use last cloud scan as base without heuristics
+            base_scan = {
+                "id": last_cloud[0],
+                "timestamp": last_cloud[1],
+                "status": last_cloud[2],
+                "files_count": conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
+                    (last_cloud[0],),
+                ).fetchone()[0],
+            }
+        
+        base_scan_id = base_scan["id"]
+        
+        # 2. Find all partial scans after base
+        partial_scans = self.find_partial_scans_after(base_scan_id)
+        
+        if not partial_scans:
+            # No partial scans, just return base scan
+            return {
+                "base_scan_id": base_scan_id,
+                "folder_updates": {},
+                "partial_scans_count": 0
+            }
+        
+        # 3. For each partial scan, determine which folders it covers
+        # Build mapping: folder -> latest scan_id that covers it
+        # Strategy: Process scans in order (oldest first), then apply priority rules
+        folder_to_scan = {}
+        scan_metadata = {}  # Store scan metadata for priority decisions
+        
+        # Sort partial scans by scan_id (oldest first) for proper priority handling
+        sorted_partial_scans = sorted(partial_scans, key=lambda x: x["id"])
+        
+        for partial_scan in sorted_partial_scans:
+            scan_id = partial_scan["id"]
+            root_path = partial_scan["root_path"]
+            timestamp = partial_scan.get("timestamp")
+            
+            if not root_path:
+                continue
+            
+            # Store metadata for this scan
+            scan_metadata[scan_id] = {
+                "root_path": root_path,
+                "timestamp": timestamp,
+                "scan_id": scan_id
+            }
+            
+            # Get all folders in this partial scan
+            folders = self.get_folders_in_scan(scan_id)
+            
+            # Normalize root_path for comparison
+            normalized_root = root_path.rstrip('/')
+            if not normalized_root:
+                normalized_root = ""
+            
+            # For each folder in this scan, apply priority rules
+            for folder_path in folders:
+                # Check if this folder is under the root_path of this partial scan
+                if normalized_root:
+                    # Folder must start with root_path or be equal to it
+                    if folder_path.startswith(normalized_root + '/') or folder_path == normalized_root:
+                        # Priority rules:
+                        # 1. If folder not in mapping - add it
+                        # 2. If folder already mapped - use newer scan (higher scan_id)
+                        # 3. If same scan_id - keep existing (shouldn't happen, but safe)
+                        if folder_path not in folder_to_scan:
+                            folder_to_scan[folder_path] = scan_id
+                        else:
+                            existing_scan_id = folder_to_scan[folder_path]
+                            # Use newer scan (higher scan_id = more recent)
+                            if scan_id > existing_scan_id:
+                                folder_to_scan[folder_path] = scan_id
+                            # If scan_ids are equal (shouldn't happen), keep existing
+                else:
+                    # Root scan - should not happen for partial scans, but handle it
+                    if folder_path not in folder_to_scan:
+                        folder_to_scan[folder_path] = scan_id
+                    elif scan_id > folder_to_scan[folder_path]:
+                        folder_to_scan[folder_path] = scan_id
+        
+        # 4. Handle nested folder conflicts
+        # If we have both "/Folder" and "/Folder/Sub" in folder_to_scan,
+        # prefer the more specific (deeper) path's scan
+        sorted_folders = sorted(folder_to_scan.keys(), key=len, reverse=True)  # Longest first
+        final_folder_to_scan = {}
+        
+        for folder_path in sorted_folders:
+            scan_id = folder_to_scan[folder_path]
+            # Check if this folder is a parent of any already processed folder
+            is_parent = False
+            for processed_folder, processed_scan_id in final_folder_to_scan.items():
+                # If processed folder is a subfolder of current folder
+                if processed_folder.startswith(folder_path + '/'):
+                    # Current folder is a parent - skip it (use subfolder's scan)
+                    is_parent = True
+                    break
+            
+            if not is_parent:
+                final_folder_to_scan[folder_path] = scan_id
+        
+        # If we filtered out some folders, use original mapping
+        # (This means we prefer more specific paths over parent paths)
+        if len(final_folder_to_scan) < len(folder_to_scan):
+            folder_to_scan = final_folder_to_scan
+        
+        result = {
+            "base_scan_id": base_scan_id,
+            "folder_updates": folder_to_scan,
+            "partial_scans_count": len(partial_scans),
+            "updated_folders_count": len(folder_to_scan)
+        }
+        
+        # Cache the result if enabled
+        if use_cache:
+            import time
+            cache_key = f"composite_{cloud_scan_id or 'auto'}"
+            self._composite_cache[cache_key] = (result, time.time())
+            # Limit cache size (keep only last 10 entries)
+            if len(self._composite_cache) > 10:
+                # Remove oldest entry
+                oldest_key = min(self._composite_cache.keys(), 
+                               key=lambda k: self._composite_cache[k][1])
+                del self._composite_cache[oldest_key]
+        
+        # Cache the result if enabled
+        if use_cache:
+            import time
+            cache_key = f"composite_{cloud_scan_id or 'auto'}"
+            self._composite_cache[cache_key] = (result, time.time())
+            # Limit cache size (keep only last 10 entries)
+            if len(self._composite_cache) > 10:
+                # Remove oldest entry
+                oldest_key = min(self._composite_cache.keys(), 
+                               key=lambda k: self._composite_cache[k][1])
+                del self._composite_cache[oldest_key]
+        
+        return result
+    
+    def clear_composite_cache(self):
+        """Clears the composite scan cache."""
+        self._composite_cache.clear()
+
+    def _compare_composite_scan(self, composite, local_id, exclude_dirs):
+        """
+        Compares composite cloud scan (base + partial updates) with local scan.
+        Optimized using temporary tables for better performance.
+        
+        Args:
+            composite: Result from build_composite_scan()
+            local_id: Local scan ID
+            exclude_dirs: Set of excluded directory names
+            
+        Returns:
+            dict: Comparison results
+        """
+        conn = self.storage.get_connection()
+        base_scan_id = composite["base_scan_id"]
+        folder_updates = composite["folder_updates"]
+        
+        if not folder_updates:
+            # No partial scans, use simple comparison with base scan
+            return self._compare_simple_scan(base_scan_id, local_id, exclude_dirs)
+        
+        # Optimize using temporary table for composite cloud files
+        # This avoids multiple queries and improves performance
+        
+        try:
+            # Create temporary table for composite cloud files
+            conn.execute("""
+                CREATE TEMP TABLE IF NOT EXISTS composite_cloud_files (
+                    parent_path TEXT,
+                    name TEXT,
+                    size INTEGER,
+                    PRIMARY KEY (parent_path, name)
+                )
+            """)
+            conn.execute("DELETE FROM composite_cloud_files")
+            
+            updated_folders_list = list(folder_updates.keys())
+            updated_scan_ids = list(set(folder_updates.values()))
+            
+            if updated_folders_list:
+                # Insert files from base scan (excluding updated folders)
+                if len(updated_folders_list) == 1:
+                    base_insert = """
+                        INSERT INTO composite_cloud_files (parent_path, name, size)
+                        SELECT parent_path, name, size
+                        FROM files
+                        WHERE scan_id = ? AND parent_path != ? AND type = 'file'
+                    """
+                    conn.execute(base_insert, (base_scan_id, updated_folders_list[0]))
+                else:
+                    placeholders = ','.join(['?' for _ in updated_folders_list])
+                    base_insert = f"""
+                        INSERT INTO composite_cloud_files (parent_path, name, size)
+                        SELECT parent_path, name, size
+                        FROM files
+                        WHERE scan_id = ? AND parent_path NOT IN ({placeholders}) AND type = 'file'
+                    """
+                    params = [base_scan_id] + updated_folders_list
+                    conn.execute(base_insert, tuple(params))
+                
+                # Insert files from updated scans
+                if len(updated_scan_ids) == 1 and len(updated_folders_list) == 1:
+                    updated_insert = """
+                        INSERT OR REPLACE INTO composite_cloud_files (parent_path, name, size)
+                        SELECT parent_path, name, size
+                        FROM files
+                        WHERE scan_id = ? AND parent_path = ? AND type = 'file'
+                    """
+                    conn.execute(updated_insert, (updated_scan_ids[0], updated_folders_list[0]))
+                else:
+                    scan_placeholders = ','.join(['?' for _ in updated_scan_ids])
+                    folder_placeholders = ','.join(['?' for _ in updated_folders_list])
+                    updated_insert = f"""
+                        INSERT OR REPLACE INTO composite_cloud_files (parent_path, name, size)
+                        SELECT parent_path, name, size
+                        FROM files
+                        WHERE scan_id IN ({scan_placeholders}) 
+                        AND parent_path IN ({folder_placeholders})
+                        AND type = 'file'
+                    """
+                    params = updated_scan_ids + updated_folders_list
+                    conn.execute(updated_insert, tuple(params))
+            else:
+                # No updated folders, just use base scan
+                conn.execute("""
+                    INSERT INTO composite_cloud_files (parent_path, name, size)
+                    SELECT parent_path, name, size
+                    FROM files
+                    WHERE scan_id = ? AND type = 'file'
+                """, (base_scan_id,))
+            
+            conn.commit()
+            
+            # Query missing local files using temporary table (much faster)
+            missing_local = conn.execute("""
+                SELECT c.parent_path, c.name, c.size
+                FROM composite_cloud_files c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM files l
+                    WHERE l.scan_id = ? 
+                    AND l.parent_path = c.parent_path 
+                    AND l.name = c.name
+                )
+            """, (local_id,)).fetchall()
+            
+        finally:
+            # Clean up temporary table
+            conn.execute("DROP TABLE IF EXISTS composite_cloud_files")
+            conn.commit()
+        
+        # Filter excluded directories
+        filtered_missing_local = []
+        for row in missing_local:
+            parent, name, size = row
+            full_path = f"{parent}/{name}".strip("/")
+            root_folder = full_path.split("/")[0] if full_path else ""
+            
+            if root_folder and root_folder not in exclude_dirs:
+                filtered_missing_local.append(row)
+        
+        # Query for missing cloud files (optimized)
+        # Use temporary table again for better performance
+        try:
+            conn.execute("""
+                CREATE TEMP TABLE IF NOT EXISTS composite_cloud_files_check (
+                    parent_path TEXT,
+                    name TEXT,
+                    PRIMARY KEY (parent_path, name)
+                )
+            """)
+            conn.execute("DELETE FROM composite_cloud_files_check")
+            
+            # Rebuild composite cloud files table for checking
+            if updated_folders_list:
+                if len(updated_folders_list) == 1:
+                    conn.execute("""
+                        INSERT INTO composite_cloud_files_check (parent_path, name)
+                        SELECT parent_path, name
+                        FROM files
+                        WHERE scan_id = ? AND parent_path != ? AND type = 'file'
+                    """, (base_scan_id, updated_folders_list[0]))
+                else:
+                    placeholders = ','.join(['?' for _ in updated_folders_list])
+                    conn.execute(f"""
+                        INSERT INTO composite_cloud_files_check (parent_path, name)
+                        SELECT parent_path, name
+                        FROM files
+                        WHERE scan_id = ? AND parent_path NOT IN ({placeholders}) AND type = 'file'
+                    """, tuple([base_scan_id] + updated_folders_list))
+                
+                if len(updated_scan_ids) == 1 and len(updated_folders_list) == 1:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO composite_cloud_files_check (parent_path, name)
+                        SELECT parent_path, name
+                        FROM files
+                        WHERE scan_id = ? AND parent_path = ? AND type = 'file'
+                    """, (updated_scan_ids[0], updated_folders_list[0]))
+                else:
+                    scan_placeholders = ','.join(['?' for _ in updated_scan_ids])
+                    folder_placeholders = ','.join(['?' for _ in updated_folders_list])
+                    conn.execute(f"""
+                        INSERT OR REPLACE INTO composite_cloud_files_check (parent_path, name)
+                        SELECT parent_path, name
+                        FROM files
+                        WHERE scan_id IN ({scan_placeholders}) 
+                        AND parent_path IN ({folder_placeholders})
+                        AND type = 'file'
+                    """, tuple(updated_scan_ids + updated_folders_list))
+            else:
+                conn.execute("""
+                    INSERT INTO composite_cloud_files_check (parent_path, name)
+                    SELECT parent_path, name
+                    FROM files
+                    WHERE scan_id = ? AND type = 'file'
+                """, (base_scan_id,))
+            
+            conn.commit()
+            
+            # Query missing cloud files using temporary table
+            missing_cloud = conn.execute("""
+                SELECT l.parent_path, l.name, l.size
+                FROM files l
+                WHERE l.scan_id = ? AND l.type = 'file'
+                AND NOT EXISTS (
+                    SELECT 1 FROM composite_cloud_files_check c
+                    WHERE c.parent_path = l.parent_path 
+                    AND c.name = l.name
+                )
+            """, (local_id,)).fetchall()
+            
+        finally:
+            conn.execute("DROP TABLE IF EXISTS composite_cloud_files_check")
+            conn.commit()
+        
+        # Filter .sync files
+        filtered_missing_cloud = [
+            row for row in missing_cloud 
+            if not row[1].startswith(".sync") and "/.sync" not in row[0]
+        ]
+        
+        return {
+            "compare_scans": {
+                "cloud": f"composite(base={base_scan_id}, partials={len(folder_updates)})",
+                "local": local_id
+            },
+            "missing_local_count": len(filtered_missing_local),
+            "missing_cloud_count": len(filtered_missing_cloud),
+            "missing_local_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_local[:20]],
+            "missing_cloud_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_cloud[:20]],
+            "composite_info": {
+                "base_scan_id": base_scan_id,
+                "updated_folders_count": len(folder_updates)
+            }
+        }
+
+    def _compare_simple_scan(self, cloud_id, local_id, exclude_dirs):
+        """
+        Simple comparison between two scans (non-composite).
+        
+        Args:
+            cloud_id: Cloud scan ID
+            local_id: Local scan ID
+            exclude_dirs: Set of excluded directory names
+            
+        Returns:
+            dict: Comparison results
+        """
+        conn = self.storage.get_connection()
+        
+        # 1. Missing Local
+        missing_local = conn.execute("""
+            SELECT c.parent_path, c.name, c.size 
+            FROM files c 
+            WHERE c.scan_id = ? 
+            AND c.type = 'file'
+            AND NOT EXISTS (
+                SELECT 1 FROM files l 
+                WHERE l.scan_id = ? 
+                AND l.parent_path = c.parent_path 
+                AND l.name = c.name
+            )
+        """, (cloud_id, local_id)).fetchall()
+        
+        # Фильтрация исключенных папок
+        filtered_missing_local = []
+        for row in missing_local:
+            parent, name, size = row
+            full_path = f"{parent}/{name}".strip("/")
+            root_folder = full_path.split("/")[0] if full_path else ""
+            
+            if root_folder and root_folder not in exclude_dirs:
+                filtered_missing_local.append(row)
+        
+        # 2. Missing Cloud
+        missing_cloud = conn.execute("""
+            SELECT l.parent_path, l.name, l.size 
+            FROM files l 
+            WHERE l.scan_id = ? 
+            AND l.type = 'file'
+            AND NOT EXISTS (
+                SELECT 1 FROM files c 
+                WHERE c.scan_id = ? 
+                AND c.parent_path = l.parent_path 
+                AND c.name = l.name
+            )
+        """, (local_id, cloud_id)).fetchall()
+
+        # Фильтруем системные файлы (.sync) из missing_cloud
+        filtered_missing_cloud = [
+            row for row in missing_cloud 
+            if not row[1].startswith(".sync") and "/.sync" not in row[0]
+        ]
+
+        return {
+            "compare_scans": {"cloud": cloud_id, "local": local_id},
+            "missing_local_count": len(filtered_missing_local),
+            "missing_cloud_count": len(filtered_missing_cloud),
+            "missing_local_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_local[:20]],
+            "missing_cloud_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_cloud[:20]]
+        }
+
+    def get_diff(self, cloud_scan_id=None, local_scan_id=None, use_composite=True):
+        """
+        Compares cloud scan vs local scan with optional composite scan support.
+        
+        Args:
+            cloud_scan_id: Specific cloud scan ID to use (optional, uses last if not specified)
+            local_scan_id: Specific local scan ID to use (optional, uses last successful if not specified)
+            use_composite: If True and cloud_scan_id not specified, build composite scan from base + partials
+        
+        Returns:
+            dict: Comparison results with missing files counts and samples
+        """
         # Читаем исключения из конфига
         exclude_dirs = set()
         config_path = os.path.expanduser("~/.config/yandex-disk/config.cfg")
@@ -1037,16 +1986,59 @@ class Analyzer:
 
         conn = self.storage.get_connection()
         
-        # Находим ID последних успешных (или started для cloud, если хотим тестить недокачанные) сканов
-        # Для чистоты берем последний cloud scan независимо от статуса
-        last_cloud = conn.execute("SELECT id FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1").fetchone()
-        last_local = conn.execute("SELECT id FROM scans WHERE scan_type='local' AND status='success' ORDER BY id DESC LIMIT 1").fetchone()
+        # Определяем local scan ID (независимо от режима)
+        if local_scan_id:
+            # Валидация указанного local scan
+            local_scan = conn.execute(
+                "SELECT id, scan_type, status FROM scans WHERE id = ? AND scan_type = 'local'",
+                (local_scan_id,)
+            ).fetchone()
+            if not local_scan:
+                return {"error": f"Local scan {local_scan_id} not found or is not a local scan"}
+            if local_scan[2] != 'success':
+                return {"error": f"Local scan {local_scan_id} is not successful (status: {local_scan[2]})"}
+            local_id = local_scan_id
+        else:
+            # Берем последний успешный local scan
+            last_local = conn.execute("SELECT id FROM scans WHERE scan_type='local' AND status='success' ORDER BY id DESC LIMIT 1").fetchone()
+            if not last_local:
+                return {"error": "No successful local scans found"}
+            local_id = last_local[0]
         
-        if not last_cloud or not last_local:
-            return {"error": "Need both cloud and local scans to compare"}
+        # Определяем cloud scan: композитный режим или простой
+        if cloud_scan_id:
+            # Явно указан cloud scan - используем простой режим (не композитный)
+            cloud_scan = conn.execute(
+                "SELECT id, scan_type, status FROM scans WHERE id = ? AND scan_type = 'cloud'",
+                (cloud_scan_id,)
+            ).fetchone()
+            if not cloud_scan:
+                return {"error": f"Cloud scan {cloud_scan_id} not found or is not a cloud scan"}
+            cloud_id = cloud_scan_id
+            # Простое сравнение
+            return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
+        
+        # cloud_scan_id не указан - проверяем, использовать ли композитный режим
+        if use_composite:
+            # Пытаемся построить композитный снимок
+            composite = self.build_composite_scan()
+            if "error" in composite:
+                # Не удалось построить композитный - fallback на последний скан
+                last_cloud = conn.execute("SELECT id FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1").fetchone()
+                if not last_cloud:
+                    return {"error": "No cloud scans found"}
+                cloud_id = last_cloud[0]
+                return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
             
-        cloud_id = last_cloud[0]
-        local_id = last_local[0]
+            # Используем композитный снимок
+            return self._compare_composite_scan(composite, local_id, exclude_dirs)
+        else:
+            # Композитный режим отключен - используем последний скан
+            last_cloud = conn.execute("SELECT id FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1").fetchone()
+            if not last_cloud:
+                return {"error": "No cloud scans found"}
+            cloud_id = last_cloud[0]
+            return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
         
         # 1. Missing Local
         missing_local = conn.execute(f"""
@@ -1261,6 +2253,75 @@ class Analyzer:
         result["total_duplicates"] = len(result["duplicates"])
         return result
 
+    def clean_duplicates(self, scan_id=None):
+        """Remove duplicate file entries from database.
+        
+        Args:
+            scan_id: If provided, clean duplicates only for this scan. Otherwise, clean all scans.
+            
+        Returns:
+            dict with statistics about cleaned duplicates
+        """
+        conn = self.storage.get_connection()
+        
+        # Count duplicates before cleanup
+        if scan_id:
+            count_query = """
+                SELECT COUNT(*) - COUNT(DISTINCT scan_id || '|' || parent_path || '|' || name) as duplicate_count
+                FROM files WHERE scan_id = ?
+            """
+            total_query = "SELECT COUNT(*) FROM files WHERE scan_id = ?"
+            params = (scan_id,)
+        else:
+            count_query = """
+                SELECT COUNT(*) - COUNT(DISTINCT scan_id || '|' || parent_path || '|' || name) as duplicate_count
+                FROM files
+            """
+            total_query = "SELECT COUNT(*) FROM files"
+            params = ()
+        
+        duplicate_count_before = conn.execute(count_query, params).fetchone()[0] or 0
+        total_before = conn.execute(total_query, params).fetchone()[0]
+        
+        # Delete duplicates, keeping only the first occurrence (MIN(id))
+        if scan_id:
+            delete_query = """
+                DELETE FROM files 
+                WHERE scan_id = ? AND id NOT IN (
+                    SELECT MIN(id) 
+                    FROM files 
+                    WHERE scan_id = ?
+                    GROUP BY scan_id, parent_path, name
+                )
+            """
+            params_delete = (scan_id, scan_id)
+        else:
+            delete_query = """
+                DELETE FROM files 
+                WHERE id NOT IN (
+                    SELECT MIN(id) 
+                    FROM files 
+                    GROUP BY scan_id, parent_path, name
+                )
+            """
+            params_delete = ()
+        
+        cursor = conn.execute(delete_query, params_delete)
+        deleted_count = cursor.rowcount
+        conn.commit()
+        
+        # Count total files after cleanup
+        total_after = conn.execute(total_query, params).fetchone()[0]
+        
+        return {
+            "scan_id": scan_id if scan_id else "all",
+            "deleted_duplicates": deleted_count,
+            "duplicate_count_before": duplicate_count_before,
+            "total_files_before": total_before,
+            "total_files_after": total_after,
+            "files_removed": total_before - total_after
+        }
+
 
 class YDM_CLI:
     """Command Line Interface for Yandex Disk Monitor."""
@@ -1290,10 +2351,23 @@ class YDM_CLI:
 
         # report command
         report_parser = subparsers.add_parser("report", help="Generate reports")
-        report_parser.add_argument("type", choices=["status", "diff", "scan-info", "scan-list", "scan-progress", 
-                                                     "long-paths", "analyze-scan", "duplicates"], 
-                                   help="Report type")
-        report_parser.add_argument("--scan-id", type=int, help="Scan ID for scan-info, scan-progress, long-paths, analyze-scan, and duplicates")
+        report_parser.add_argument("type", choices=[
+            "status",
+            "diff",
+            "scan-info",
+            "scan-list",
+            "scan-progress",
+            "long-paths",
+            "analyze-scan",
+            "duplicates",
+            "clean-duplicates",
+            "full-scan-info",
+            "full-scan-candidates",
+        ], help="Report type")
+        report_parser.add_argument("--scan-id", type=int, help="Scan ID for scan-info, scan-progress, long-paths, analyze-scan, duplicates, and clean-duplicates (optional for clean-duplicates)")
+        report_parser.add_argument("--cloud-scan-id", type=int, help="Specific cloud scan ID for diff comparison (optional)")
+        report_parser.add_argument("--local-scan-id", type=int, help="Specific local scan ID for diff comparison (optional)")
+        report_parser.add_argument("--no-composite", action="store_true", help="Disable composite scan mode for diff (use simple last scan comparison)")
         report_parser.add_argument("--limit", type=int, default=20, help="Limit for scan-list report")
         report_parser.add_argument("--limit-chars", type=int, default=240, help="Path length limit for long-paths report")
         report_parser.add_argument("--by-hash", action="store_true", default=True, help="Find duplicates by MD5 hash (default) or --by-name")
@@ -1357,7 +2431,9 @@ class YDM_CLI:
                     storage.save_disk_info(scan_id, info)
                     duration = time.time() - start_time
                     storage.finish_scan(scan_id, 'success', duration)
-                    
+                    # Force checkpoint to ensure scan status is saved to disk
+                    storage.checkpoint_to_disk(force=True)
+
                     self.render({
                         "scan_id": scan_id,
                         "total_space": info['total_space'],
@@ -1384,10 +2460,12 @@ class YDM_CLI:
                         
                     scanner = LocalScanner(local_path)
                     files_count = scanner.scan(scan_id, storage)
-                    
+
                     duration = time.time() - start_time
                     storage.finish_scan(scan_id, 'success', duration)
-                    
+                    # Force checkpoint to ensure scan status is saved to disk
+                    storage.checkpoint_to_disk(force=True)
+
                     self.render({
                         "scan_id": scan_id,
                         "files_scanned": files_count,
@@ -1557,6 +2635,8 @@ class YDM_CLI:
                     
                     duration = time.time() - start_time
                     storage.finish_scan(scan_id, 'success', duration)
+                    # Force checkpoint to ensure scan status is saved to disk
+                    storage.checkpoint_to_disk(force=True)
                     
                     stats = storage.get_scan_stats(scan_id)
                     self.render({
@@ -1616,7 +2696,22 @@ class YDM_CLI:
                 self.render(analyzer.get_status())
                 return True
             if self.args.type == "diff":
-                self.render(analyzer.get_diff())
+                result = analyzer.get_diff(
+                    cloud_scan_id=self.args.cloud_scan_id,
+                    local_scan_id=self.args.local_scan_id,
+                    use_composite=not self.args.no_composite
+                )
+                self.render(result)
+                return True
+            if self.args.type == "full-scan-info":
+                # Show current heuristic full scan info
+                info = analyzer.find_last_full_scan()
+                self.render(info)
+                return True
+            if self.args.type == "full-scan-candidates":
+                # Show recent cloud scans in freshness window with heuristic metrics
+                candidates = analyzer.get_full_scan_candidates()
+                self.render(candidates)
                 return True
             if self.args.type == "scan-info":
                 if not self.args.scan_id:
@@ -1662,6 +2757,10 @@ class YDM_CLI:
                     return True
                 by_hash = not self.args.by_name  # If --by-name not specified, use hash (default)
                 result = analyzer.get_duplicates(self.args.scan_id, by_hash=by_hash)
+                self.render(result)
+                return True
+            if self.args.type == "clean-duplicates":
+                result = analyzer.clean_duplicates(self.args.scan_id)
                 self.render(result)
                 return True
 

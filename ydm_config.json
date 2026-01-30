@@ -2,11 +2,15 @@
   "prod": {
     "cloud_batch_size": 500,
     "checkpoint_files_threshold": 10000,
-    "checkpoint_time_sec": 300
+    "checkpoint_time_sec": 300,
+    "full_scan_fresh_window_days": 2,
+    "reference_full_scan_id": null
   },
   "test": {
     "cloud_batch_size": 100,
     "checkpoint_files_threshold": 500,
-    "checkpoint_time_sec": 30
+    "checkpoint_time_sec": 30,
+    "full_scan_fresh_window_days": 2,
+    "reference_full_scan_id": null
   }
 }

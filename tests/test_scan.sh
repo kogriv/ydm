@@ -1,11 +1,14 @@
 #!/bin/bash
 
+# Get project root (parent of tests/)
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 echo "=== TEST: Cloud scan with checkpoint monitoring ==="
 echo ""
 
 # Start scan in background
 echo "Starting scan of / (root directory)..."
-timeout 30 python3 ydm.py scan cloud --progress 2>&1 > /tmp/full_scan.log &
+timeout 30 python3 "${PROJECT_ROOT}/ydm.py" scan cloud --progress 2>&1 > /tmp/full_scan.log &
 SCAN_PID=$!
 echo "Scan PID: $SCAN_PID"
 

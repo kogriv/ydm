@@ -5,11 +5,11 @@ import urllib.parse
 import time
 import sys
 
-# Конфигурация
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-LIST_FILE = os.path.join(TOOLS_DIR, 'junk_list.txt')
-LOG_FILE = os.path.join(TOOLS_DIR, 'deleted.log')
-ENV_FILE = os.path.join(TOOLS_DIR, '.env')
+# Конфигурация - paths relative to project root
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+LIST_FILE = os.path.join(PROJECT_ROOT, 'var', 'junk_list.txt')
+LOG_FILE = os.path.join(PROJECT_ROOT, 'var', 'deleted.log')
+ENV_FILE = os.path.join(PROJECT_ROOT, '.env')
 
 class YandexClient:
     API_URL = "https://cloud-api.yandex.net/v1/disk/resources"

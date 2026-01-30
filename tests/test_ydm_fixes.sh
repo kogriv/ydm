@@ -4,7 +4,8 @@
 
 set -e
 
-YDM_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get project root (parent of tests/)
+YDM_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_PATH="${YDM_PATH}/test_monitor.db"
 PYTHON="python3"
 

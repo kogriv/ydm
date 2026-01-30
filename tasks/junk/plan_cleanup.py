@@ -2,8 +2,10 @@
 import sqlite3
 import os
 
-DB_PATH = '/home/kogriv/infra/ya_disk/tools/monitor.db'
-OUTPUT_FILE = '/home/kogriv/infra/ya_disk/tools/junk_list.txt'
+# Use paths relative to project root
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_PATH = os.path.join(PROJECT_ROOT, 'monitor.db')
+OUTPUT_FILE = os.path.join(PROJECT_ROOT, 'var', 'junk_list.txt')
 
 def reduce_paths(paths):
     """

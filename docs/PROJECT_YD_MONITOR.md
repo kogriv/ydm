@@ -290,6 +290,8 @@ SELECT COUNT(*) FROM scan_progress WHERE scan_id = 40 AND status = 'completed';
 
 ## Быстрые команды
 
+**Важно:** Каждая команда должна выполняться отдельно. Не склеивайте команды вместе - это приведет к ошибке. Если нужно выполнить несколько команд подряд, используйте `&&` или `;`.
+
 ### Production (стабильная работа - по умолчанию)
 ```bash
 # Начать новое сканирование с корня (prod профиль: checkpoints каждые 10K файлов или 5 минут)
@@ -303,6 +305,10 @@ python3 ydm.py scan cloud --path "/Архив" --progress
 
 # Безопасное прерывание (Ctrl+C или kill -TERM)
 # Данные автоматически сохранятся на диск перед выходом
+# 
+# Пример безопасного прерывания:
+# SCAN_PID=$(ps aux | grep "python3 ydm.py scan cloud" | grep -v grep | awk '{print $2}')
+# kill -TERM $SCAN_PID  # Graceful shutdown с сохранением checkpoint
 ```
 
 ### Test/Development (быстрая разработка и тестирование)
