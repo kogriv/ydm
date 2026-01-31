@@ -2,6 +2,7 @@
 
 *Дата:* 2026-01-30  
 *Подход:* сначала полноценный рефакторинг кода, затем реализация задач Smart Diff 2 и Sync Manager.  
+*Промежуточно:* реализованы переходные CLI‑тулы `tools/sync_tree.py` и `tools/sync_exclude.py` (см. `tasks/sync_manager/simple_sync/`) для быстрой работы без рефакторинга.
 *Принципы:* код в отдельном каталоге (src), разбиение на подпакеты, лёгкие паттерны для расширяемости, без оверхеда.
 
 Архитектурные слои и паттерны описаны в [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -166,6 +167,7 @@ if __name__ == "__main__":
 - **sync tree** — run_sync вызывает analysis.tree + sync.logic.build_tree_with_sync_status, вывод по --format (JSON/text с [S]/[P]/[-]), --path, --depth. Метаданные о свежести снимка из analyzer.
 - **sync inspect** — поддерево по --path, проверка опасных имён (логика из TASK_SYNC_MANAGER), вывод с предупреждениями.
 - **sync add** — проверка папки в снимке (БД), расчёт нового exclude-dirs (sync.logic или отдельная функция), dry-run по умолчанию, запись по --apply через sync.config.set_exclude_dirs. Метаданные о свежести после изменения.
+  - Прототипы уже доступны как `tools/sync_tree.py` и `tools/sync_exclude.py` (см. `tasks/sync_manager/simple_sync/`).
 
 ---
 

@@ -97,6 +97,62 @@ kill -TERM <PID>  # или просто Ctrl+C
 python3 ydm.py --format json report scan-info --scan-id <ID> | jq '.data | {status, files_count}'
 ```
 
+---
+
+## Simple Sync Tools (переходные, CLI‑friendly)
+
+Эти утилиты работают **только по снимку БД** (`monitor.db`) и не запускают сканирование
+облака при выполнении. Подходят для автоматизации и ассистентов.
+
+### 1) Просмотр дерева синхронизации (`sync_tree`)
+```bash
+# Свернутое дерево (JSON по умолчанию)
+python3 tools/sync_tree.py --path /DAO --depth 2
+
+# Полное дерево с ветками (text)
+python3 tools/sync_tree.py --path /DAO --depth 2 --format text --text-tree --show-all
+
+# Без заголовка в text
+python3 tools/sync_tree.py --format text --text-tree --no-text-header
+
+# Отключить локальный скан и sync_percent
+python3 tools/sync_tree.py --no-local-scan --no-sync-percent
+```
+
+### 2) Управление `exclude-dirs` (`sync_exclude`)
+```bash
+# Список exclude-dirs
+python3 tools/sync_exclude.py list
+
+# Dry-run: включить подпапку
+python3 tools/sync_exclude.py add --path /DAO/2
+
+# Применить изменения
+python3 tools/sync_exclude.py add --path /DAO/2 --apply
+
+# Исключить папку
+python3 tools/sync_exclude.py remove --path /DAO/2 --apply
+
+# Текстовый вывод без заголовка
+python3 tools/sync_exclude.py add --path /DAO/2 --format text --no-text-header
+
+# Отключить рестарт демона и локальный скан
+python3 tools/sync_exclude.py add --path /DAO/2 --apply --no-restart-daemon --no-local-scan
+```
+
+### 3) JSON‑контракты (для автоматизации)
+```bash
+# sync_tree JSON
+python3 tools/sync_tree.py --path /DAO --depth 2 --format json --show-all | jq '.schema, .root_path, .root_depth, .local_scan_started'
+
+# sync_exclude JSON (dry-run)
+python3 tools/sync_exclude.py add --path /DAO/2 --format json | jq '.data.schema, .data.plan, .data.daemon'
+```
+
+JSON‑версии:
+- `sync_tree` → `"schema": "sync_tree:v1"`
+- `sync_exclude` → `"schema": "sync_exclude:v1"`
+
 ## Handling Long Scans (Работа с долгими сканами)
 
 ### Запуск долгого сканирования безопасно

@@ -14,6 +14,29 @@
 3.  **Анализатор (Analyzer):** Модуль сравнения снимков (Облако vs Локально, Вчера vs Сегодня).
 4.  **CLI Интерфейс:** Команды управления.
 
+### Переходные CLI‑утилиты (simple_sync)
+Для управления синхронизацией без рефакторинга добавлены отдельные тулзы:
+- `tools/sync_tree.py` — дерево синхронизации по снимку из `monitor.db`,
+  с опциональным локальным сканом и расчётом `sync_percent`.
+- `tools/sync_exclude.py` — add/remove/list для `exclude-dirs`,
+  с опциональным рестартом демона и локальным сканом.
+- `tools/sync_common.py` — общий код для sync‑утилит (демон, локальный скан, snapshot).
+
+Документация: `tasks/sync_manager/simple_sync/sync_tree.md`,
+`tasks/sync_manager/simple_sync/exclude.md`.
+
+JSON‑контракт:
+- `sync_tree` → `"schema": "sync_tree:v1"`
+- `sync_exclude` → `"schema": "sync_exclude:v1"`
+
+Поведение по умолчанию:
+- `sync_tree` запускает локальный скан и считает `sync_percent`.
+- `sync_exclude --apply` перезапускает демон и запускает локальный скан.
+
+Ключевые поля JSON:
+- `sync_tree`: `root.sync_percent`, `local_scan_started`, `local_scan_error`
+- `sync_exclude`: `daemon`, `local_scan_started`, `local_scan_error`
+
 ### Принципы работы
 *   **Offline-first:** Большинство команд работают с локальной базой данных (быстро).
 *   **On-demand Scan:** Обращение к API и полное сканирование происходят только по явной команде.

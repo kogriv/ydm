@@ -2,6 +2,19 @@
 
 Инструмент для глубокого анализа состояния Яндекс.Диска, сверки локальной копии с облаком и отслеживания динамики изменений.
 
+## Быстрая памятка (алиасы)
+
+```bash
+ydm-scan-cloud
+ydm-scan-cloud-path /video
+ydm-scan-local
+ydm-tree
+ydm-tree-path /video 3
+ydm-sync-add /DAO/2
+ydm-sync-rm /DAO/2
+ydm-help
+```
+
 ## Features
 
 - 🔍 **Полное сканирование облака** - рекурсивный обход всех файлов и папок через Yandex Disk API
@@ -148,11 +161,91 @@ python3 ydm.py report duplicates --scan-id 5
 python3 ydm.py report analyze-scan --scan-id 5
 ```
 
+## Simple Sync Tools (переходные)
+
+Переходные CLI‑утилиты для управления синхронизацией через `exclude-dirs`
+и просмотра дерева синхронизации (работают по снимку из `monitor.db`,
+без сканирования облака во время выполнения).
+
+### Просмотр дерева синхронизации
+```bash
+# Свернутое дерево (JSON по умолчанию)
+python3 tools/sync_tree.py --path /DAO --depth 2
+
+# Полное дерево с ветками (text)
+python3 tools/sync_tree.py --path /DAO --depth 2 --format text --text-tree --show-all
+
+# Без заголовка в text
+python3 tools/sync_tree.py --format text --text-tree --no-text-header
+
+# Отключить локальный скан и sync_percent
+python3 tools/sync_tree.py --no-local-scan --no-sync-percent
+```
+
+### Управление exclude-dirs
+```bash
+# Список exclude-dirs
+python3 tools/sync_exclude.py list
+
+# Dry-run: включить подпапку
+python3 tools/sync_exclude.py add --path /DAO/2
+
+# Применить изменения
+python3 tools/sync_exclude.py add --path /DAO/2 --apply
+
+# Исключить папку
+python3 tools/sync_exclude.py remove --path /DAO/2 --apply
+
+# Текстовый вывод без заголовка
+python3 tools/sync_exclude.py add --path /DAO/2 --format text --no-text-header
+
+# Отключить рестарт демона и локальный скан
+python3 tools/sync_exclude.py add --path /DAO/2 --apply --no-restart-daemon --no-local-scan
+```
+
+JSON‑контракт (версии):
+- `sync_tree` → `"schema": "sync_tree:v1"`
+- `sync_exclude` → `"schema": "sync_exclude:v1"`
+
+Примечания:
+- По умолчанию `sync_tree` запускает локальный скан и считает `sync_percent`.
+- По умолчанию `sync_exclude --apply` перезапускает демон и запускает локальный скан.
+
+## Алиасы (system ~/.bashrc)
+
+### Что добавлено
+Алиасы и функции добавлены в `~/.bashrc` для частых сценариев:
+- `ydm-scan-cloud` — полный cloud scan
+- `ydm-scan-cloud-path <path>` — cloud scan папки
+- `ydm-scan-local` — local scan для `/data/ya_disk`
+- `ydm-tree` — дерево синка (text + ветки)
+- `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
+- `ydm-sync-add <path>` — добавить папку в sync
+- `ydm-sync-rm <path>` — убрать папку из sync
+- `ydm-help` — краткая подсказка
+
+### Важно
+- `ydm-sync-add` и `ydm-sync-rm` **выполняют `--apply` напрямую**.  
+  Это значит, что изменение `exclude-dirs` применяется сразу, а затем
+  запускается рестарт демона и локальный скан (по умолчанию в `sync_exclude`).
+
+### Примеры
+```bash
+ydm-tree-path /video 3
+ydm-scan-cloud-path /DAO
+ydm-sync-add /DAO/2
+```
+
+### Как применить
+```bash
+source ~/.bashrc
+```
 ## Documentation
 
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Полная документация проекта, архитектура, детали реализации
 - **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Быстрый старт для AI-ассистентов и автоматизации
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Дополнительные примеры использования
+- **[Sync Manager](tasks/sync_manager/README.md)** - Переходные инструменты sync_tree/sync_exclude и планы Sync Manager
 
 ## Файловая структура проекта
 
@@ -181,6 +274,9 @@ python3 ydm.py report analyze-scan --scan-id 5
     - `ISSUE_LONG_FILENAMES.md`, `RESULTS_AND_PLAN.md`
 - `tools/` — вспомогательные утилиты
   - `gen_exclude_list.py` — генерация строки `exclude-dirs=` для конфига Yandex.Disk
+  - `sync_tree.py` — дерево синхронизации по снимку (JSON/text)
+  - `sync_exclude.py` — add/remove/list для `exclude-dirs` (dry-run по умолчанию)
+  - `sync_common.py` — общий код для sync‑утилит
 - `tests/` — тестовые скрипты:
   - `test_scan.sh` — интеграционный тест сканирования с tmpfs
   - `test_ydm_fixes.sh` — набор регрессионных тестов для `ydm.py`
