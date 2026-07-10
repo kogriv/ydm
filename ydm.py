@@ -11,6 +11,8 @@ import signal
 
 import urllib.request
 import time
+import subprocess
+from abc import ABC, abstractmethod
 
 # Global state for signal handling
 _storage_for_signal = None
@@ -74,6 +76,13 @@ DEFAULT_CONFIG = {
     "full_scan_fresh_window_days": 2,
     # Optional explicit reference full scan ID (can be overridden by user/config)
     "reference_full_scan_id": None,
+    # Default local mirror path used by `scan local` when --path is omitted
+    "local_root": "/data/ya_disk",
+    # rclone remote name used by --backend rclone (see tasks/rclone_backend/README.md)
+    "rclone_remote": "yandex",
+    # yandex-disk daemon's exclude-dirs config; on --backend rclone this is
+    # meaningless (no daemon) — Этап 4 introduces the filter-file equivalent.
+    "exclude_config": "~/.config/yandex-disk/config.cfg",
 }
 
 def load_config(profile="prod"):
@@ -815,7 +824,27 @@ class LocalScanner:
         return count
 
 
-class YandexClient:
+class CloudResourceClient(ABC):
+    """
+    Backend interface for CloudScanner/scan-meta: whatever fetches Yandex
+    Disk resource listings, regardless of transport (REST API vs rclone).
+    Item dicts returned by get_resources() must have the same shape the
+    Yandex API returns: name, type ('dir'|'file'), size, md5, created,
+    modified (ISO 8601 strings, 'Z' suffix, microsecond precision or less).
+    """
+
+    @abstractmethod
+    def get_disk_info(self):
+        """Returns dict with total_space, used_space, trash_size (bytes)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_resources(self, path, limit=1000, offset=0):
+        """Returns {"items": [...], "total": N} for one folder (non-recursive)."""
+        raise NotImplementedError
+
+
+class YandexClient(CloudResourceClient):
     """Yandex Disk REST API Client."""
     API_URL = "https://cloud-api.yandex.net/v1/disk"
 
@@ -853,6 +882,74 @@ class YandexClient:
             # Если папка пустая или недоступна
             print(f"Warning: Failed to list {path}: {e}")
             return {"items": [], "total": 0}
+
+
+class RcloneClient(CloudResourceClient):
+    """
+    Yandex Disk client via rclone subprocess calls. For environments where
+    the official yandex-disk daemon can't run (e.g. arm64/Android — see
+    tasks/rclone_backend/README.md). Needs an authorized `rclone.conf`
+    remote (default name "yandex"), not YANDEX_DISK_TOKEN/.env.
+
+    Caveat: rclone's ModTime is the only timestamp exposed across backends,
+    Yandex Disk's REST API separately reports created vs modified — here
+    both fields are set to the same ModTime value.
+    """
+
+    def __init__(self, remote="yandex"):
+        self.remote = remote
+        self._folder_cache = {}  # path -> full normalized item list (rclone lsjson has no offset/limit)
+
+    def get_disk_info(self):
+        result = subprocess.run(
+            ["rclone", "about", f"{self.remote}:", "--json"],
+            capture_output=True, text=True, check=True
+        )
+        data = json.loads(result.stdout)
+        return {
+            "total_space": data.get("total", 0),
+            "used_space": data.get("used", 0),
+            "trash_size": data.get("trashed", 0),
+        }
+
+    def get_resources(self, path, limit=1000, offset=0):
+        if path not in self._folder_cache:
+            self._folder_cache[path] = self._list_folder(path)
+        items = self._folder_cache[path]
+        return {"items": items[offset:offset + limit], "total": len(items)}
+
+    def _list_folder(self, path):
+        remote_path = f"{self.remote}:" if path in ("", "/") else f"{self.remote}:{path}"
+        try:
+            result = subprocess.run(
+                ["rclone", "lsjson", remote_path, "--hash"],
+                capture_output=True, text=True, check=True
+            )
+            entries = json.loads(result.stdout)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            print(f"Warning: Failed to list {path} via rclone: {e}")
+            return []
+
+        items = []
+        for entry in entries:
+            # Truncate rclone's nanosecond ModTime to microseconds for
+            # datetime.fromisoformat() compatibility (CloudScanner parses
+            # this with .replace('Z', '+00:00')).
+            mod_time = entry.get("ModTime", "")
+            if "." in mod_time:
+                head, frac_and_zone = mod_time.split(".", 1)
+                frac = frac_and_zone.rstrip("Z")[:6]
+                mod_time = f"{head}.{frac}Z"
+            is_dir = entry.get("IsDir", False)
+            items.append({
+                "name": entry["Name"],
+                "type": "dir" if is_dir else "file",
+                "size": 0 if is_dir else entry.get("Size", 0),
+                "md5": (entry.get("Hashes") or {}).get("md5"),
+                "created": mod_time,
+                "modified": mod_time,
+            })
+        return items
 
 
 class CloudScanner:
@@ -1974,7 +2071,7 @@ class Analyzer:
         """
         # Читаем исключения из конфига
         exclude_dirs = set()
-        config_path = os.path.expanduser("~/.config/yandex-disk/config.cfg")
+        config_path = os.path.expanduser(DEFAULT_CONFIG["exclude_config"])
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
@@ -2334,6 +2431,10 @@ class YDM_CLI:
         self.parser.add_argument("--db-path", default="monitor.db", help="Path to SQLite database")
         self.parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
         self.parser.add_argument("--config-profile", default="prod", help="Config profile to use (prod/test/custom)")
+        self.parser.add_argument("--backend", choices=["api", "rclone"], default="api",
+                                  help="Cloud client backend: 'api' (YANDEX_DISK_TOKEN, default) or "
+                                       "'rclone' (rclone.conf remote, for environments without the "
+                                       "yandex-disk daemon — see tasks/rclone_backend/README.md)")
         
         subparsers = self.parser.add_subparsers(dest="command", help="Available commands")
         
@@ -2407,11 +2508,23 @@ class YDM_CLI:
             return True
         
         if self.args.command == "scan":
-            token = load_token_from_env()
-            if not token:
-                self.render("Error: YANDEX_DISK_TOKEN not found in .env", success=False)
-                return True
-            
+            # Only meta/cloud targets talk to a cloud client; local scan
+            # never needed one and shouldn't require credentials for either backend.
+            client = None
+            if self.args.target in ("meta", "cloud"):
+                if self.args.backend == "rclone":
+                    if shutil.which("rclone") is None:
+                        self.render("Error: rclone not found in PATH (required for --backend rclone)", success=False)
+                        return True
+                    remote = self.args.config.get("rclone_remote", "yandex")
+                    client = RcloneClient(remote=remote)
+                else:
+                    token = load_token_from_env()
+                    if not token:
+                        self.render("Error: YANDEX_DISK_TOKEN not found in .env", success=False)
+                        return True
+                    client = YandexClient(token)
+
             # Recover any crashed scans before starting
             crashed = storage.recover_crashed_scans()
             if crashed:
@@ -2419,8 +2532,7 @@ class YDM_CLI:
                 for scan in crashed:
                     print(f"  - Scan {scan['id']} ({scan['type']}) at {scan['timestamp']}", file=sys.stderr)
                 print(f"They have been marked as 'crashed'. Use 'report scan-info --scan-id <ID>' to check.", file=sys.stderr)
-            
-            client = YandexClient(token)
+
             scan_success = False
             
             if self.args.target == "meta":
@@ -2453,7 +2565,7 @@ class YDM_CLI:
             if self.args.target == "local":
                 start_time = time.time()
                 scan_id = storage.start_scan("local")
-                local_path = self.args.path if self.args.path else "/data/ya_disk"
+                local_path = self.args.path if self.args.path else self.args.config.get("local_root", "/data/ya_disk")
                 try:
                     if not os.path.exists(local_path):
                         raise Exception(f"Path not found: {local_path}")

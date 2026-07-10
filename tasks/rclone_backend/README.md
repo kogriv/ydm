@@ -1,7 +1,7 @@
 # Rclone Backend — синхронизация и мониторинг Yandex Disk без демона yandex-disk
 
 *Дата регистрации:* 10.01.2026
-*Статус:* **In Progress** (Этап 0 закрыт 10.01.2026, приступаем к Этапу 1)
+*Статус:* **In Progress** (Этапы 0-1 закрыты 10.01.2026, приступаем к Этапу 2)
 *Приоритет:* High (единственный рабочий путь для запуска ydm на arm64/Android)
 
 ---
@@ -211,32 +211,52 @@ subprocess-per-folder (`rclone lsjson` на каждую папку — прос
 **Этап 0 закрыт (10.01.2026).**
 
 ### Этап 1 — Backend abstraction в `ydm.py`
-- [ ] Выделить интерфейс `Backend` (методы вроде `list_folder(path) -> [Entry]`,
-      `delete(path)`, `get_meta()`)
-- [ ] Обернуть существующий REST-код в `YandexApiBackend(Backend)` —
-      **без изменения поведения** для amd64-машины
-- [ ] `--backend {api,rclone}` флаг или профиль в `ydm_config.json`
-      (по аналогии с `prod`/`test` профилями)
+- [x] Выделить интерфейс `Backend` — реализовано как `CloudResourceClient(ABC)`
+      с методами `get_disk_info()` / `get_resources(path, limit, offset)`
+      (уже, чем предполагалось в дизайне: `CloudScanner` в реальности зависит
+      только от этих двух методов, отдельный `list_folder`/`delete` не нужны
+      на этом этапе — `delete` появится в Этапе 5 вместе с junk cleanup)
+- [x] Обернуть существующий REST-код — `YandexClient` теперь наследует
+      `CloudResourceClient`, тело класса не тронуто →
+      **поведение amd64-машины не изменилось** (проверено: `scan` без
+      `--backend` при отсутствующем токене падает с тем же сообщением,
+      что и раньше)
+- [x] `--backend {api,rclone}` флаг (глобальный, дефолт `api`) +
+      `RcloneClient(CloudResourceClient)` через `rclone lsjson --hash`/
+      `rclone about --json`. Сквозной прогон подтверждён:
+      `--backend rclone scan meta` (квота совпадает с `rclone about`),
+      `--backend rclone scan cloud --path /tst` (2 файла, размер сошёлся
+      с `rclone lsf`), `report scan-info`/`scan-list` отработали без
+      единого изменения в `Analyzer` — данные из `RcloneClient` полностью
+      совместимы по форме с данными из `YandexClient`.
+      Побочный эффект (безопасный): `scan local` раньше требовал
+      `YANDEX_DISK_TOKEN`, хотя вообще не пользовался клиентом — исправлено,
+      токен/клиент теперь запрашиваются только для `target in (meta, cloud)`.
 
-#### 1.1. Хардкоды, которые нужно вынести в конфиг/параметры (только то, что
-напрямую упирается в `Backend`-интерфейс; остальной хардкод в проекте —
-вне скоупа этой задачи, трогать отдельно):
+#### 1.1. Хардкоды, которые нужно вынести в конфиг/параметры
 
-| Где | Что сейчас | Почему мешает |
+**Закрыто (10.01.2026).** Четыре из пяти мест сведены к одному источнику
+дефолтов — `DEFAULT_CONFIG` в `ydm.py` (`local_root`, `exclude_config`),
+импортируемому в `tools/*.py` вместо независимых литералов:
+
+| Где | Было | Стало |
 |---|---|---|
-| `ydm.py:1977` | `config_path = os.path.expanduser("~/.config/yandex-disk/config.cfg")` (в логике `report diff` — чтение `exclude-dirs`) | `RcloneBackend` источник исключений — filter-file, а не `config.cfg`; нужен единый метод `Backend.get_excluded_dirs()`, а не чтение конкретного файла инлайном |
-| `ydm.py:2456` | `local_path = self.args.path if self.args.path else "/data/ya_disk"` (дефолт для `scan local`) | На этой машине `/data/ya_disk` не существует и не будет; дефолт должен браться из `ydm_config.json` (`local_root`), а не быть литералом в коде |
-| `tools/sync_tree.py:290`, `tools/sync_exclude.py:434,468` | `--local-root` c дефолтом `"/data/ya_disk"` (три независимых копии одного и того же литерала) | Тройное дублирование; должно читаться из одного места (общий конфиг), иначе на rclone-машине придётся синхронно менять в трёх файлах |
-| `tools/sync_common.py:64` | `config_path or "~/.config/yandex-disk/config.cfg"` | То же самое, что и `ydm.py:1977`, но отдельная копия литерала — источник конфига исключений должен быть один на весь проект, не три |
-| `tools/sync_common.py:120-130` | `run_command(["yandex-disk", "stop"/"start"/"status"])`, `run_command(["systemctl", "--user", "restart", "yandex-disk"])` | Жёстко привязано к демону; `RcloneBackend` вместо "рестарт демона" делает `rclone copy`-материализацию — нужен единый метод `Backend.apply_sync_change()`, под которым каждый backend делает своё |
+| `ydm.py` (`Analyzer.get_diff`, чтение `exclude-dirs` для `report diff`) | `os.path.expanduser("~/.config/yandex-disk/config.cfg")` | `os.path.expanduser(DEFAULT_CONFIG["exclude_config"])` |
+| `ydm.py` (`scan local`, дефолт `--path`) | `local_path = ... else "/data/ya_disk"` | `... else self.args.config.get("local_root", "/data/ya_disk")` |
+| `tools/sync_tree.py`, `tools/sync_exclude.py` (×2) | `--local-root` c литералом `"/data/ya_disk"` в трёх местах независимо | `default=DEFAULT_CONFIG["local_root"]`, импортировано из `ydm` |
+| `tools/sync_common.py` (`load_exclude_dirs`) | свой независимый литерал `"~/.config/yandex-disk/config.cfg"` | `DEFAULT_CONFIG["exclude_config"]` — тот же источник, что и в `ydm.py` |
 
-**Как выносим:** один источник дефолтов — новая секция в `ydm_config.json`
-(например `"paths": {"local_root": ..., "exclude_config": ...}`), плюс
-метод `Backend.get_excluded_dirs()` / `Backend.apply_sync_change()`, за
-которым уже прячется чтение `config.cfg` (API-backend) или filter-file
-(rclone-backend). Цель — после этого этапа ни одно из пяти мест выше не
-должно содержать литерал `/data/ya_disk` или `yandex-disk`/`config.cfg`
-напрямую.
+Пятое место — **`tools/sync_common.py:120-130`** (`run_command(["yandex-disk", ...])`,
+`restart_daemon_systemctl`) — **сознательно не тронуто**: это не хардкод-литерал,
+а целиком другая реализация (демон vs `rclone copy`-материализация). Параметризовать
+здесь нечего — `RcloneBackend` не будет вызывать `yandex-disk` ни в каком виде.
+Настоящая абстракция (`Backend.apply_sync_change()`, единая точка, за которой каждый
+backend делает своё) — предмет **Этапа 4**, реализуется вместе с реальной
+rclone-логикой синка, не раньше.
+
+Проверено: `python3 -m py_compile` на всех изменённых файлах, `tools/sync_tree.py --help`
+и `tools/sync_exclude.py add --help` показывают корректный дефолт `--local-root`,
+импорт `tools.sync_common`/`tools.sync_tree`/`tools.sync_exclude` не сломан.
 
 **Явно вне скоупа** (чтобы не раздувать этот заход): любой другой хардкод
 в проекте, не связанный с выбором backend'а (например, пороги `checkpoint_*`

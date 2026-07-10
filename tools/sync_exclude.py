@@ -28,7 +28,7 @@ from tools.sync_common import (  # noqa: E402
     sleep_sec,
     stop_start_daemon,
 )
-from ydm import Analyzer  # noqa: E402
+from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
 
 
 @dataclass
@@ -431,7 +431,7 @@ def parse_args() -> argparse.Namespace:
         help="Run local scan after restart (default)",
     )
     add_parser.add_argument("--local-scan-delay-sec", type=int, default=3)
-    add_parser.add_argument("--local-root", default="/data/ya_disk")
+    add_parser.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
     add_parser.add_argument("--apply", action="store_true", help="Apply changes")
 
     remove_parser = subparsers.add_parser("remove", help="Exclude folder from sync")
@@ -465,7 +465,7 @@ def parse_args() -> argparse.Namespace:
         help="Run local scan after restart (default)",
     )
     remove_parser.add_argument("--local-scan-delay-sec", type=int, default=3)
-    remove_parser.add_argument("--local-root", default="/data/ya_disk")
+    remove_parser.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
     remove_parser.add_argument("--apply", action="store_true", help="Apply changes")
 
     list_parser = subparsers.add_parser("list", help="List exclude-dirs")

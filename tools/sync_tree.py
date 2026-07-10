@@ -24,7 +24,7 @@ from tools.sync_common import (  # noqa: E402
     select_scan_id_for_path,
     sleep_sec,
 )
-from ydm import Analyzer  # noqa: E402
+from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
 
 
 STATUS_FULL = "full"
@@ -287,7 +287,7 @@ def parse_args() -> argparse.Namespace:
         help="Run local scan before building tree (default)",
     )
     parser.add_argument("--local-scan-delay-sec", type=int, default=3)
-    parser.add_argument("--local-root", default="/data/ya_disk")
+    parser.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
     parser.add_argument(
         "--sync-percent",
         action=argparse.BooleanOptionalAction,

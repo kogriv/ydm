@@ -7,7 +7,7 @@ import os
 import subprocess
 import time
 
-from ydm import Analyzer, LocalScanner, StorageManager, load_config
+from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CONFIG
 
 
 @dataclass
@@ -61,7 +61,7 @@ def normalize_db_parent_path(path: Optional[str]) -> str:
 
 def load_exclude_dirs(config_path: Optional[str] = None) -> ExcludeDirsResult:
     resolved_path = os.path.expanduser(
-        config_path or "~/.config/yandex-disk/config.cfg"
+        config_path or DEFAULT_CONFIG["exclude_config"]
     )
     exclude_dirs: List[str] = []
     warnings: List[str] = []
