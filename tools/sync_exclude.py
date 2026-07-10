@@ -22,6 +22,7 @@ from tools.sync_common import (  # noqa: E402
     fetch_child_dirs,
     load_exclude_dirs,
     normalize_path,
+    path_exists_in_snapshot,
     restart_daemon_systemctl,
     run_local_scan,
     select_scan_id_for_path,
@@ -81,66 +82,6 @@ def command_result_to_dict(result) -> dict:
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
-
-
-def path_exists_in_snapshot(
-    analyzer: Analyzer, snapshot, path: str
-) -> bool:
-    scan_id = select_scan_id_for_path(path, snapshot)
-    storage = analyzer.storage
-    normalized = normalize_path(path)
-    if normalized == "/":
-        parent_db = ""
-        target_name = ""
-    else:
-        parent_db = normalize_path(str(Path(normalized).parent))
-        if parent_db == "/.":
-            parent_db = "/"
-        if parent_db == "/":
-            parent_db = ""
-        target_name = Path(normalized).name
-    conn = storage.get_connection()
-    try:
-        if parent_db == "":
-            if target_name == "":
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM files
-                    WHERE scan_id = ?
-                    LIMIT 1
-                    """,
-                    (scan_id,),
-                ).fetchone()
-                return row is not None
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM files
-                WHERE scan_id = ?
-                  AND parent_path = ''
-                  AND name = ?
-                  AND type = 'dir'
-                LIMIT 1
-                """,
-                (scan_id, target_name),
-            ).fetchone()
-            return row is not None
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM files
-            WHERE scan_id = ?
-              AND parent_path = ?
-              AND name = ?
-              AND type = 'dir'
-            LIMIT 1
-            """,
-            (scan_id, parent_db, target_name),
-        ).fetchone()
-    finally:
-        conn.close()
-    return row is not None
 
 
 def compute_add(

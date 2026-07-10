@@ -16,9 +16,11 @@ if str(ROOT_DIR) not in sys.path:
 from tools.sync_common import (  # noqa: E402
     build_composite_snapshot,
     create_storage,
+    default_filter_path,
     fetch_child_dirs,
     get_latest_successful_scan_id,
     load_exclude_dirs,
+    load_sync_filters,
     normalize_path,
     run_local_scan,
     select_scan_id_for_path,
@@ -87,6 +89,22 @@ def is_path_excluded(path: str, exclude_dirs: Set[str]) -> bool:
         prefix.append(part)
         candidate = "/".join(prefix)
         if candidate in exclude_dirs:
+            return True
+    return False
+
+
+def is_path_included(path: str, include_dirs: Set[str]) -> bool:
+    """Whitelist counterpart of is_path_excluded: True if `path` itself or
+    any ancestor prefix has an explicit rclone filter-file `+` entry."""
+    normalized = normalize_path(path)
+    relative = normalized[1:] if normalized != "/" else ""
+    if relative == "":
+        return False
+    parts = relative.split("/")
+    prefix = []
+    for part in parts:
+        prefix.append(part)
+        if "/".join(prefix) in include_dirs:
             return True
     return False
 
@@ -222,6 +240,40 @@ def compute_status(node: TreeNode, exclude_dirs: Set[str], collapse: bool) -> bo
     return node.sync_status in {STATUS_FULL, STATUS_PARTIAL} or has_synced_descendants
 
 
+def _mark_full_subtree(node: TreeNode, collapse: bool) -> None:
+    """Whitelist model: once a folder is itself included (`+ /path/**`),
+    every descendant is synced too — no partial state below that point."""
+    node.sync_status = STATUS_FULL
+    node.has_synced_descendants = bool(node.children)
+    for child in node.children:
+        _mark_full_subtree(child, collapse)
+    node.visible_children_count = len(node.children)
+
+
+def compute_status_whitelist(node: TreeNode, include_dirs: Set[str], collapse: bool) -> bool:
+    """rclone filter-file counterpart of compute_status: default is
+    EXCLUDED, a folder becomes FULL only if it (or an ancestor) has an
+    explicit `+` entry, PARTIAL if some descendant does."""
+    if is_path_included(node.path, include_dirs):
+        _mark_full_subtree(node, collapse)
+        return True
+
+    has_synced_descendants = False
+    visible_children: List[TreeNode] = []
+    for child in node.children:
+        child_has_synced = compute_status_whitelist(child, include_dirs, collapse)
+        if child_has_synced:
+            visible_children.append(child)
+        has_synced_descendants = has_synced_descendants or child_has_synced
+
+    node.sync_status = STATUS_PARTIAL if has_synced_descendants else STATUS_EXCLUDED
+    node.has_synced_descendants = has_synced_descendants
+    if collapse:
+        node.children = visible_children
+    node.visible_children_count = len(visible_children)
+    return has_synced_descendants
+
+
 def render_text(node: TreeNode, indent: str = "") -> List[str]:
     marker = {
         STATUS_FULL: "[S]",
@@ -295,6 +347,13 @@ def parse_args() -> argparse.Namespace:
         help="Compute sync percent per node (default)",
     )
     parser.add_argument("--db-path", default="monitor.db", help="Path to SQLite DB")
+    parser.add_argument("--backend", choices=["api", "rclone"], default="api",
+                         help="'api' reads exclude-dirs from config.cfg (default, unchanged "
+                              "behavior); 'rclone' reads the filter-file whitelist instead "
+                              "(see tasks/rclone_backend/README.md)")
+    parser.add_argument("--filter-path", default=None,
+                         help="rclone filter-file path (--backend rclone only); "
+                              "defaults to <local-root>.filters")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--collapse-synced",
@@ -313,8 +372,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root_path = normalize_path(args.path)
-    exclude_result = load_exclude_dirs()
-    exclude_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
+
+    if args.backend == "rclone":
+        filter_path = args.filter_path or default_filter_path(args.local_root)
+        filters_result = load_sync_filters(filter_path)
+        membership_dirs = set(filters_result.include_dirs)
+        source_path = filters_result.filter_path
+        source_warnings = filters_result.warnings
+    else:
+        exclude_result = load_exclude_dirs()
+        membership_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
+        source_path = exclude_result.config_path
+        source_warnings = exclude_result.warnings
 
     storage = create_storage(args.db_path)
     analyzer = Analyzer(storage)
@@ -333,7 +402,10 @@ def main() -> None:
             local_scan_id = local_result.scan_id
 
     node = build_tree(analyzer, snapshot, root_path, args.depth)
-    compute_status(node, exclude_dirs, collapse=collapse)
+    if args.backend == "rclone":
+        compute_status_whitelist(node, membership_dirs, collapse=collapse)
+    else:
+        compute_status(node, membership_dirs, collapse=collapse)
 
     if args.sync_percent:
         apply_sync_percent(node, analyzer, snapshot, local_scan_id)
@@ -346,8 +418,8 @@ def main() -> None:
             "root_depth": args.depth,
             "root_children_count": node.children_count,
             "root_visible_children_count": node.visible_children_count,
-            "config_path": exclude_result.config_path,
-            "warnings": exclude_result.warnings,
+            "config_path": source_path,
+            "warnings": source_warnings,
             "collapsed": collapse,
             "local_scan_started": local_scan_started,
             "local_scan_error": local_scan_error,
@@ -360,10 +432,10 @@ def main() -> None:
             print(f"root_depth: {args.depth}")
             print(f"root_children_count: {node.children_count}")
             print(f"root_visible_children_count: {node.visible_children_count}")
-            print(f"config_path: {exclude_result.config_path}")
-            if exclude_result.warnings:
+            print(f"config_path: {source_path}")
+            if source_warnings:
                 print("warnings:")
-                for warning in exclude_result.warnings:
+                for warning in source_warnings:
                     print(f"- {warning}")
             print(f"collapsed: {collapse}")
             if local_scan_started is not None:

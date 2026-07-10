@@ -1,7 +1,10 @@
 # Rclone Backend — синхронизация и мониторинг Yandex Disk без демона yandex-disk
 
 *Дата регистрации:* 10.01.2026
-*Статус:* **In Progress** (Этапы 0-2 закрыты 10.01.2026, приступаем к Этапу 3)
+*Статус:* **In Progress** (Этапы 0-2, 4 закрыты 10.01.2026; Этап 3
+покрыт частично — реальная селективная локальная копия работает и
+проверена в рамках Этапа 4, "нет локали"/"импорт bisync .lst" режимы
+не реализованы; далее — Этап 5)
 *Приоритет:* High (единственный рабочий путь для запуска ydm на arm64/Android)
 
 ---
@@ -297,27 +300,69 @@ rclone-логикой синка, не раньше.
 ### Этап 3 — `RcloneBackend`: локальная сторона
 - [ ] Режим "нет локали" — `report diff` явно сообщает, что сравнение
       недоступно, остальные отчёты (`duplicates`/`long-paths`) работают
-- [ ] Режим "реальная селективная копия" — `LocalScanner` без изменений,
-      просто сканирует `/root/notes/ya_disk` (или сколько там материализовано)
+      (не проверялось: `report diff` не гоняли без локального скана вообще)
+- [x] Режим "реальная селективная копия" — фактически реализован и проверен
+      в рамках Этапа 4: `LocalScanner`/`run_local_scan` без единой правки
+      сканирует `/sdcard/Download/ya_disk` (путь изменён с `/root/notes/ya_disk`
+      по просьбе пользователя — портативность бинда, см. обновлённый
+      `notes/infra/proot_debian/rclone/README.md`), куда `sync_filters.py add`
+      материализует только явно включённые папки. `ydm-tree`/`sync_percent`
+      подтвердили корректный подсчёт (DAO 100%, остальное 0%).
 - [ ] Режим "импорт bisync .lst" — парсер формата `rclone bisync` listing
-      в те же нормализованные записи
+      в те же нормализованные записи (не требовался для текущего сценария —
+      здесь используется `rclone copy`, не `bisync`)
 
 ### Этап 4 — Sync management
-- [ ] `FilterFileManager` — чтение/запись rclone filter-file (аналог
-      `ConfigManager` из `tasks/sync_manager/TASK_SYNC_MANAGER.md`, но для
-      filter-file вместо `config.cfg`)
-- [ ] `ydm.py sync add --path X [--apply]` — dry-run по умолчанию (план: что
-      добавится в filter-file), `--apply` → правка файла + `rclone copy`
-      материализация
-- [ ] `ydm.py sync remove --path X [--apply]` — dry-run → план, `--apply` →
-      правка файла + подтверждение удаления локальной копии (`rclone check`
-      перед удалением — та же схема, что для Telegram/`ALL_RECOVERED_DOCUMENT`)
-- [ ] Обновить `tools/sync_tree.py`, чтобы источником "что включено" мог быть
-      либо `config.cfg` (старое, amd64), либо filter-file (новое, rclone) —
-      через параметр/автоопределение backend'а
-- [ ] Обновить алиасы `ydm-sync-add`/`ydm-sync-rm` в `~/.bashrc` (или
-      завести отдельные `ydm-sync-add`/`rm` для rclone-режима, если алиасы
-      должны остаться машинно-специфичными)
+
+**Закрыто (10.01.2026).** Реализовано как отдельный CLI-инструмент
+`tools/sync_filters.py` (по образцу `tools/sync_exclude.py`: dry-run по
+умолчанию, JSON-схема `sync_filters:v1`, никаких интерактивных промптов —
+только флаги), а не как подкоманда `ydm.py sync` — чтобы не переизобретать
+диспетчер команд и не трогать работающий `--backend api` путь ради
+симметрии. На этой машине `--backend api` не используется вообще —
+`tools/sync_exclude.py` остаётся нетронутым для amd64/демон-машины.
+
+- [x] `FilterFileManager` — реализовано как набор функций в
+      `tools/sync_common.py` (`load_sync_filters`/`write_sync_filters`/
+      `default_filter_path` + `rclone_copy_materialize`/`rclone_check_entry`/
+      `delete_local_entry_contents`), аналогично `load_exclude_dirs` для
+      `config.cfg`. `path_exists_in_snapshot` заодно вынесена из
+      `sync_exclude.py` в `sync_common.py` — теперь используется обоими
+      инструментами вместо дублирования.
+- [x] `tools/sync_filters.py add --path X [--apply]` — dry-run по умолчанию
+      (показывает план: что добавится в filter-file, что станет избыточным
+      среди уже включённых потомков), `--apply` → правка файла + `rclone copy`
+      материализация. **Проверено на реальном `yandex:`**: добавление `/tst`
+      (2 файла) реально скачало их в `/sdcard/Download/ya_disk/tst`, `DAO` не
+      тронута.
+- [x] `tools/sync_filters.py remove --path X [--apply] [--delete-local]` —
+      dry-run → план, `--apply` правит filter-file (без удаления), отдельный
+      флаг `--delete-local` — только после `rclone check` с 0 расхождений
+      реально чистит локальное содержимое (та же схема verify-then-delete,
+      что для Telegram/`ALL_RECOVERED_DOCUMENT`, но через явный флаг вместо
+      диалога, т.к. промпты запрещены дизайном). **Проверено**: `remove /tst
+      --apply --delete-local` дал "0 differences found" → контент удалён,
+      папка осталась пустой.
+      Честно обработан краевой случай: попытка убрать подпапку внутри уже
+      включённого предка (`DAO/1` при включённом `DAO`) даёт понятную ошибку
+      вместо тихого не-действия — зеркально проблеме exclude-dirs с
+      сиблингами (см. §9.2 `TASK_SYNC_MANAGER.md`), только в обратную сторону.
+- [x] `tools/sync_tree.py` расширен флагом `--backend {api,rclone}` (дефолт
+      `api` — поведение для amd64/демон-машины не изменилось). При
+      `--backend rclone` — новая `compute_status_whitelist()`/
+      `is_path_included()` (whitelist-логика: сам путь или предок явно
+      включён → весь поддерева `[S]`, иначе `[P]`/`[-]` по потомкам) вместо
+      blacklist-логики `compute_status()`. **Проверено на реальном дереве**:
+      `--show-all` корректно показал 32 папки корня с единственной `[S] DAO`
+      среди них; `--path /DAO --depth 3` показал `[S]` на всех уровнях
+      поддерева; `sync_percent` посчитался верно (DAO 100%, корень 0%).
+- [x] Алиасы в `~/.bashrc` — на этой машине их не было вообще (только в
+      документации), заведены с нуля под rclone-режим: `ydm-scan-cloud`,
+      `ydm-scan-cloud-path`, `ydm-scan-local`, `ydm-tree`, `ydm-tree-path`,
+      `ydm-sync-add`, `ydm-sync-rm`, `ydm-help` — все с зашитыми
+      `--backend rclone`/`--local-root /sdcard/Download/ya_disk`/абсолютным
+      `--db-path`, так что работают из любой директории. Не git-tracked
+      (`~/.bashrc` — не часть репозитория), машинно-специфичны по дизайну.
 
 ### Этап 5 — Junk cleanup на rclone
 - [ ] `tasks/junk/run_cleanup.py` — добавить ветку удаления через
