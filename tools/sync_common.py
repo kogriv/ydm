@@ -177,13 +177,20 @@ def write_sync_filters(filter_path: str, include_dirs: List[str]) -> None:
 def rclone_copy_materialize(remote: str, local_root: str, filter_path: str) -> CommandResult:
     """Runs `rclone copy` for the whole filter-file — materializes every
     currently-included top-level entry (adding one more just re-copies the
-    ones already present, which is a fast no-op check for rclone)."""
+    ones already present, which is a fast no-op check for rclone).
+
+    Streams rclone's own `-P` progress bar straight to the terminal instead
+    of capturing+buffering it (this can run for many minutes on large
+    folders — capturing output would make the command look hung until it
+    fully completes, with no visible progress in between)."""
     resolved_root = os.path.expanduser(local_root)
     os.makedirs(resolved_root, exist_ok=True)
-    return run_command([
+    cmd = [
         "rclone", "copy", f"{remote}:", resolved_root,
-        "--filter-from", os.path.expanduser(filter_path), "-v",
-    ])
+        "--filter-from", os.path.expanduser(filter_path), "-P",
+    ]
+    result = subprocess.run(cmd)  # inherits stdout/stderr — live progress, not captured
+    return CommandResult(cmd=cmd, returncode=result.returncode, stdout="", stderr="")
 
 
 def rclone_check_entry(remote: str, entry: str, local_root: str) -> CommandResult:
