@@ -34,13 +34,17 @@ class RcloneJunkClient:
     which *does* give a distinguishable 404 for genuinely-missing paths.
     """
 
-    def __init__(self, remote):
+    def __init__(self, remote, hard_delete=False):
         self.remote = remote
+        # --yandex-hard-delete: skip Trash, delete permanently and
+        # unrecoverably. Off by default — matches the API backend's
+        # permanently=false unless the caller explicitly opts in.
+        self.extra_flags = ["--yandex-hard-delete"] if hard_delete else []
 
     def delete(self, path):
         remote_path = f"{self.remote}:{path.lstrip('/')}"
         result = subprocess.run(
-            ["rclone", "deletefile", remote_path],
+            ["rclone", "deletefile", remote_path] + self.extra_flags,
             capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -49,7 +53,7 @@ class RcloneJunkClient:
         stderr = result.stderr
         if "is a directory" in stderr or "doesn't exist" in stderr:
             purge_result = subprocess.run(
-                ["rclone", "purge", remote_path],
+                ["rclone", "purge", remote_path] + self.extra_flags,
                 capture_output=True, text=True,
             )
             if purge_result.returncode == 0:
@@ -115,6 +119,10 @@ def parse_args():
                               "(see tasks/rclone_backend/README.md)")
     parser.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"],
                          help="rclone remote name (--backend rclone only)")
+    parser.add_argument("--hard-delete", action="store_true",
+                         help="--backend rclone only: skip Trash, delete permanently "
+                              "and unrecoverably (passes --yandex-hard-delete to rclone). "
+                              "Default is Trash, same as the API backend's permanently=false.")
     return parser.parse_args()
 
 
@@ -123,7 +131,7 @@ def main():
 
     # 1. Проверки
     if args.backend == "rclone":
-        client = RcloneJunkClient(args.remote)
+        client = RcloneJunkClient(args.remote, hard_delete=args.hard_delete)
     else:
         token = load_token()
         if not token:

@@ -131,6 +131,7 @@ def main():
         print("No nested paths found. All paths are distinct roots.")
 
     # Сохранение
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
     with open(OUTPUT_FILE, 'w') as f:
         for path in optimized_list:
             f.write(path + '\n')
