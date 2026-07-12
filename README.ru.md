@@ -292,6 +292,9 @@ source ~/.bashrc
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Дополнительные примеры использования
 - **[Sync Manager](tasks/sync_manager/README.md)** - Переходные инструменты sync_tree/sync_exclude и планы Sync Manager
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Альтернатива демону `yandex-disk` для окружений без него (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup через rclone
+- **[Smart Diff](tasks/smart_diff/README.md)** - Как `report diff` строит композитный снимок (полный скан + свежие частичные) вместо сравнения двух последних сканов
+- **[CHANGELOG.md](CHANGELOG.md)** - Заметные изменения, начиная с последних
+- **[Known Issues](docs/KNOWN_ISSUES.md)** - Текущие неисправленные ограничения
 
 ## Файловая структура проекта
 
@@ -308,16 +311,16 @@ source ~/.bashrc
   - `PROJECT_YD_MONITOR.md` — архитектура и детали реализации
   - `QUICKSTART_AI.md` — быстрый старт для AI/скриптов
   - `USAGE_EXAMPLES.md` — примеры использования
-  - `issues/` — исторические отчеты и разбор проблем
-  - `long_names/` — вспомогательные материалы для задачи длинных путей
+  - `KNOWN_ISSUES.md` — текущие неисправленные ограничения
 - `tasks/` — задачи/подпроекты поверх ядра
   - `tasks/junk/` — задача очистки мусора:
     - `plan_cleanup.py` — генерация плана удаления (`var/junk_list.txt`)
     - `run_cleanup.py` — выполнение плана (`--backend api|rclone`, `var/deleted.log`)
     - `smart_clean.py` — комбинированный скрипт анализа и очистки
-    - `analyze_junk.py`, `CLEANUP_GUIDE.md`, `JUNK_REPORT.md` — аналитика и документация по cleanup
-  - `tasks/long_names/` — задача про длинные пути:
-    - `ISSUE_LONG_FILENAMES.md`, `RESULTS_AND_PLAN.md`
+    - `analyze_junk.py`, `CLEANUP_GUIDE.md` — аналитика и документация по cleanup
+  - `tasks/smart_diff/` — композитный снимок для diff (см. Documentation выше)
+  - `tasks/long_names/` — AI-переименование длинных имён, незавершённый
+    прототип (`smart_renamer.py`) — статус в его README
   - `tasks/rclone_backend/` — альтернатива демону `yandex-disk` через rclone
     (для окружений вроде arm64, где официальный клиент не работает)
 - `tools/` — вспомогательные утилиты
@@ -362,13 +365,15 @@ source ~/.bashrc
 
 ### Report Commands
 - `report status` - последние сканы
-- `report diff` - сравнение cloud vs local
+- `report diff` - сравнение cloud vs local (композитный снимок по умолчанию, см. [Smart Diff](tasks/smart_diff/README.md))
 - `report scan-list [--limit N]` - список всех сканов
 - `report scan-info --scan-id ID` - детали скана
 - `report scan-progress --scan-id ID` - прогресс скана
 - `report long-paths --scan-id ID [--limit-chars N]` - файлы с длинными путями
 - `report duplicates --scan-id ID [--by-hash|--by-name]` - поиск дубликатов
+- `report clean-duplicates [--scan-id ID]` - убрать дублирующиеся строки от старого бага (см. [CHANGELOG.md](CHANGELOG.md))
 - `report analyze-scan --scan-id ID` - анализ целостности
+- `report full-scan-info` / `report full-scan-candidates` - какой скан используется как база композитного diff и почему
 
 Полный список команд: `python3 ydm.py --help`
 
@@ -379,6 +384,12 @@ MIT License - см. [LICENSE](LICENSE) файл для деталей.
 ## Contributing
 
 Вклад приветствуется! См. [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Known Issues
+
+См. [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — сейчас там одна:
+SIGTERM во время инициализации скана (до старта основного цикла) может
+подвесить процесс; в этом случае используйте `kill -9`.
 
 ## Notes
 

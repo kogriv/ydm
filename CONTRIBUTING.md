@@ -34,6 +34,11 @@ the real CLI:
 
 Both scripts create and clean up their own temporary database/files.
 
+There's also [`tests/TEST_concurrent_protection.md`](tests/TEST_concurrent_protection.md)
+— a manual QA runbook (not automated) for the lock-file/tmpfs concurrency
+protection described in `docs/ARCHITECTURE.md` §12. Worth running by hand
+if you're touching scan locking or checkpoint recovery.
+
 ## Code style
 
 - Stdlib only — don't add a dependency without discussing it first in an

@@ -18,30 +18,29 @@
 
 ## Документация
 
-- [TASK_SYNC_MANAGER.md](./TASK_SYNC_MANAGER.md) - полное описание задачи, проблемы и решения
-- [simple_sync/](./simple_sync/) - переходные дизайны и быстрые CLI‑тулы
+- [TASK_SYNC_MANAGER.md](./TASK_SYNC_MANAGER.md) - design notes и проверенные особенности поведения `yandex-disk` (не полное описание того, что реализовано — см. "Статус" ниже)
 
 ## Быстрые примеры
 
 ```bash
 # Дерево синхронизации (JSON по умолчанию)
-python3 tools/sync_tree.py --path /DAO --depth 2
+python3 tools/sync_tree.py --path /Projects --depth 2
 
 # Полное дерево с ветками
-python3 tools/sync_tree.py --path /DAO --depth 2 --format text --text-tree --show-all
+python3 tools/sync_tree.py --path /Projects --depth 2 --format text --text-tree --show-all
 
 # Управление exclude-dirs (dry-run)
-python3 tools/sync_exclude.py add --path /DAO/2
+python3 tools/sync_exclude.py add --path /Projects/2024
 
 # Применить изменения
-python3 tools/sync_exclude.py add --path /DAO/2 --apply
+python3 tools/sync_exclude.py add --path /Projects/2024 --apply
 
 # Текстовый вывод без заголовка
 python3 tools/sync_tree.py --format text --text-tree --no-text-header
-python3 tools/sync_exclude.py add --path /DAO/2 --format text --no-text-header
+python3 tools/sync_exclude.py add --path /Projects/2024 --format text --no-text-header
 
 # Отключить рестарт демона и локальный скан
-python3 tools/sync_exclude.py add --path /DAO/2 --apply --no-restart-daemon --no-local-scan
+python3 tools/sync_exclude.py add --path /Projects/2024 --apply --no-restart-daemon --no-local-scan
 
 # Отключить локальный скан и sync_percent
 python3 tools/sync_tree.py --no-local-scan --no-sync-percent

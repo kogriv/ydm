@@ -43,8 +43,8 @@ python3 ydm.py --format json report diff
 Comparing cloud scan composite(base=47, partials=4) with local scan 2
 
 Missing on local (3565 files):
-  /DAO/Popov_V._Dao_Kniga_Nachalo.a4-1.pdf
-  /DAO/Popov_V._Dao_Kniga_Nachalo.a6-1.pdf
+  /Projects/report_2024.pdf
+  /Projects/report_2024_v2.pdf
   ...
 
 Missing in cloud (25735 files):
@@ -193,7 +193,6 @@ python3 ydm.py report full-scan-candidates
 
 ## Дополнительная информация
 
-- Полное описание: `tasks/smart_diff/TASK_SMART_DIFF.md`
-- Эвристика: `tasks/smart_diff/FULL_SCAN_HEURISTICS.md`
-- Результаты тестов: `tasks/smart_diff/HEURISTICS_TEST_RESULTS.md`
+- Проблема и решение: `tasks/smart_diff/TASK_SMART_DIFF.md`
+- Эвристика определения полного скана (с результатами валидации): `tasks/smart_diff/FULL_SCAN_HEURISTICS.md`
 

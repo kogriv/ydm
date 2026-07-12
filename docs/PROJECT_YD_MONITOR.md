@@ -22,8 +22,7 @@
   с опциональным рестартом демона и локальным сканом.
 - `tools/sync_common.py` — общий код для sync‑утилит (демон, локальный скан, snapshot).
 
-Документация: `tasks/sync_manager/simple_sync/sync_tree.md`,
-`tasks/sync_manager/simple_sync/exclude.md`.
+Документация: [`tasks/sync_manager/README.md`](../tasks/sync_manager/README.md).
 
 JSON‑контракт:
 - `sync_tree` → `"schema": "sync_tree:v1"`
@@ -763,6 +762,13 @@ python3 ydm.py [ГЛОБАЛЬНЫЕ_ФЛАГИ] КОМАНДА [ФЛАГИ_КО
   - **Важно:** Влияет только на **вывод в терминал**, НЕ на сохранение в БД!
   - `text` — человекочитаемый формат
   - `json` — для автоматизации и парсинга
+- `--config-profile {prod|test}` — профиль конфигурации из `ydm_config.json`
+  (по умолчанию: `prod`)
+- `--backend {api|rclone}` — источник облачных данных для `scan meta`/
+  `scan cloud` (по умолчанию: `api`, требует `YANDEX_DISK_TOKEN`;
+  `rclone` — альтернатива без демона `yandex-disk`, добавлена
+  2026-01-10/11, см. [`tasks/rclone_backend/README.md`](../tasks/rclone_backend/README.md)
+  и `docs/ARCHITECTURE.md` §11)
 - `-h, --help` — Показать справку
 
 ### Команды

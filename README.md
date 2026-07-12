@@ -294,6 +294,9 @@ source ~/.bashrc
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples
 - **[Sync Manager](tasks/sync_manager/README.md)** - Transitional sync_tree/sync_exclude tools and Sync Manager plans
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Alternative to the `yandex-disk` daemon for environments without it (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup via rclone
+- **[Smart Diff](tasks/smart_diff/README.md)** - How `report diff` builds a composite snapshot (full scan + newer partial scans) instead of just comparing the two latest scans
+- **[CHANGELOG.md](CHANGELOG.md)** - Notable changes, newest first
+- **[Known Issues](docs/KNOWN_ISSUES.md)** - Current limitations that aren't fixed yet
 
 ## Project layout
 
@@ -310,16 +313,16 @@ Top-level folders:
   - `PROJECT_YD_MONITOR.md` — architecture and implementation details
   - `QUICKSTART_AI.md` — quick start for AI/automation
   - `USAGE_EXAMPLES.md` — usage examples
-  - `issues/` — historical reports and issue write-ups
-  - `long_names/` — supporting materials for the long-paths task
+  - `KNOWN_ISSUES.md` — current, unfixed limitations
 - `tasks/` — tasks/subprojects built on the core
   - `tasks/junk/` — junk-cleanup task:
     - `plan_cleanup.py` — generates a deletion plan (`var/junk_list.txt`)
     - `run_cleanup.py` — executes the plan (`--backend api|rclone`, `var/deleted.log`)
     - `smart_clean.py` — combined analyze+clean script
-    - `analyze_junk.py`, `CLEANUP_GUIDE.md`, `JUNK_REPORT.md` — cleanup analytics and docs
-  - `tasks/long_names/` — long-paths task:
-    - `ISSUE_LONG_FILENAMES.md`, `RESULTS_AND_PLAN.md`
+    - `analyze_junk.py`, `CLEANUP_GUIDE.md` — cleanup analytics and docs
+  - `tasks/smart_diff/` — composite-snapshot diff (see Documentation above)
+  - `tasks/long_names/` — AI-assisted long-filename renaming, unfinished
+    proof-of-concept (`smart_renamer.py`) — see its README for status
   - `tasks/rclone_backend/` — `yandex-disk` daemon alternative via rclone
     (for environments like arm64 where the official client doesn't work)
 - `tools/` — supporting utilities
@@ -364,13 +367,15 @@ See [PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md) for more on the architec
 
 ### Report Commands
 - `report status` - recent scans
-- `report diff` - cloud vs local diff
+- `report diff` - cloud vs local diff (composite snapshot by default, see [Smart Diff](tasks/smart_diff/README.md))
 - `report scan-list [--limit N]` - list all scans
 - `report scan-info --scan-id ID` - scan details
 - `report scan-progress --scan-id ID` - scan progress
 - `report long-paths --scan-id ID [--limit-chars N]` - files with long paths
 - `report duplicates --scan-id ID [--by-hash|--by-name]` - find duplicates
+- `report clean-duplicates [--scan-id ID]` - remove duplicate rows left by an older bug (see [CHANGELOG.md](CHANGELOG.md))
 - `report analyze-scan --scan-id ID` - integrity analysis
+- `report full-scan-info` / `report full-scan-candidates` - inspect which scan is used as the composite-diff base and why
 
 Full command list: `python3 ydm.py --help`
 
@@ -381,6 +386,12 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Known Issues
+
+See [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — currently one: SIGTERM
+sent during scan initialization (before the main loop starts) can hang
+the process; use `kill -9` if that happens.
 
 ## Notes
 

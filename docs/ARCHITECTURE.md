@@ -497,3 +497,58 @@ class CLI:
         """
         ...
 ```
+
+---
+
+## 11. Backend Abstraction (`--backend api|rclone`)
+
+*Добавлено 2026-01-10/11, см. [`tasks/rclone_backend/README.md`](../tasks/rclone_backend/README.md)
+для полной истории и обоснования.*
+
+Официальный демон `yandex-disk` собирается только под `amd64`/`i386` — на
+arm64 (например, Android/Termux) он не работает. Вместо переписывания
+ядра под конкретную среду облачный транспорт вынесен за интерфейс:
+
+```python
+class CloudResourceClient(ABC):
+    """Общий интерфейс источника облачных данных."""
+    def get_disk_info(self): ...
+    def get_resources(self, path): ...
+
+class YandexClient(CloudResourceClient):
+    """Прямые вызовы Yandex Disk REST API (исходная реализация)."""
+    ...
+
+class RcloneClient(CloudResourceClient):
+    """Обёртка над `rclone` (subprocess: lsjson/about) — не требует
+    демона yandex-disk, работает через настроенный remote в rclone.conf."""
+    ...
+```
+
+Обе реализации отдают одинаковые нормализованные записи в тот же
+`StorageManager`/`Analyzer` — весь остальной код (`report diff`,
+`duplicates`, `long-paths` и т.д.) не знает и не должен знать, какой
+бэкенд использовался. Выбирается глобальным флагом `--backend
+{api,rclone}` (default `api`).
+
+## 12. Concurrent-Scan Protection
+
+*Добавлено 2026-01-06 как фикс гонки, при которой второй параллельный
+`scan cloud` удалял общую tmpfs-БД первого скана
+(`sqlite3.OperationalError: no such table: scan_progress`). Три уровня
+защиты:*
+
+1. **Lock file (предотвращение)** — `/tmp/ydm_cloud_scan.lock` с PID
+   текущего процесса; перед стартом скана проверяется, жив ли процесс
+   из lock-файла (`/proc/<pid>`); мёртвые/битые локи самоочищаются.
+2. **Auto-recovery (устойчивость)** — если tmpfs-схема пропала посреди
+   скана, `get_connection()` восстанавливает её из последнего
+   checkpoint на диске вместо падения.
+3. **Process isolation (defense in depth)** — путь tmpfs-БД
+   привязан к PID (`/dev/shm/ydm_scan_<pid>.db`), а не общий
+   `/dev/shm/ydm_scan.db` — конфликт невозможен, даже если lock
+   почему-то не сработал.
+
+Тот же lock-паттерн (PID-файл + `/proc`-проверка + самоочистка)
+переиспользован позже для `tools/sync_bisync.py` (см. Этап 7,
+[`tasks/rclone_backend/README.md`](../tasks/rclone_backend/README.md)).

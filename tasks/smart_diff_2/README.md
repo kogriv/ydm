@@ -1,14 +1,20 @@
-# Smart Diff 2: Дифф в рамках синхронизируемого подмножества
+# Smart Diff 2: sync-only diff (proposed, not implemented)
 
-## Краткое описание
+**Status: proposed, not built.** This is an open idea, not documentation
+of existing behavior — there's no `--sync-only` flag or equivalent
+command in the codebase today.
 
-Расширение отчёта о расхождениях: режим **sync-only** для `report diff` — показывать только пути, входящие в синхронизируемое подмножество (с учётом `exclude-dirs` конфига Yandex Disk).
+**Idea:** a filtered mode for `report diff` (`--sync-only` or similar)
+that only shows paths within the currently *synced* subset — i.e.
+respecting `exclude-dirs` (API backend) / the filter-file (rclone
+backend), so the diff only surfaces genuinely unexpected discrepancies
+rather than "missing" files in folders that were never meant to sync
+locally in the first place. Output shape would stay identical to the
+current `report diff` — just fewer records and adjusted counts.
 
-## Задача
+**Depends on:**
+- `tasks/smart_diff/` — the composite-snapshot diff this would filter.
+- `tasks/sync_manager/` — the exclude-dirs/filter-file logic for
+  determining what's "in scope" for sync.
 
-См. [TASK_SMART_DIFF_2.md](TASK_SMART_DIFF_2.md).
-
-## Связи
-
-- **smart_diff** (`tasks/smart_diff`) — источник снимка облака и логики диффа.
-- **sync_manager** (`tasks/sync_manager`) — общая логика exclude-dirs и статусов sync (full/partial/excluded).
+If you want to pick this up, see [CONTRIBUTING.md](../../CONTRIBUTING.md).
