@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor is 3.9, not the README's historical "3.6+" claim: the
+        # sync_* tools use argparse.BooleanOptionalAction (added in 3.9).
+        python-version: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile every .py file (syntax check)
+        run: find . -name "*.py" -not -path "./.git/*" -print0 | xargs -0 python -m py_compile
+
+      - name: --help smoke test (catches broken argparse config)
+        run: |
+          python ydm.py --help
+          python tools/sync_tree.py --help
+          python tools/sync_exclude.py --help
+          python tools/sync_filters.py --help
+          python tools/sync_bisync.py --help
+          python tasks/junk/plan_cleanup.py --help
+          python tasks/junk/run_cleanup.py --help
+
+      - name: Regression suite (tests/test_ydm_fixes.sh)
+        run: bash tests/test_ydm_fixes.sh
+
+      # tests/test_scan.sh and tests/test_rclone_backend.sh are NOT run
+      # here on purpose: the former scans the real Yandex Disk API
+      # (needs YANDEX_DISK_TOKEN), the latter needs a live, authorized
+      # `rclone` remote. Neither is safe or meaningful against a
+      # throwaway CI runner with no cloud account attached. See
+      # CONTRIBUTING.md for how to run them locally.

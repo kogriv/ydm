@@ -28,7 +28,8 @@ ydm-help
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.9+ (утилиты `sync_*` используют `argparse.BooleanOptionalAction`,
+  появившийся в 3.9 — проверяется в CI на 3.9/3.11/3.13)
 - Один из двух способов доступа к Yandex Disk:
   - **API-бэкенд (по умолчанию)** — токен Yandex Disk OAuth (получить можно
     [здесь](https://yandex.ru/dev/disk/poligon/)); нужен также демон

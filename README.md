@@ -29,7 +29,8 @@ ydm-help
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.9+ (the `sync_*` tools use `argparse.BooleanOptionalAction`,
+  added in 3.9 — tested in CI on 3.9/3.11/3.13)
 - One of two ways to talk to Yandex Disk:
   - **API backend (default)** — a Yandex Disk OAuth token (get one
     [here](https://yandex.ru/dev/disk/poligon/)); also needs the
