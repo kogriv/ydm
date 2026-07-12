@@ -209,15 +209,14 @@ class TestCompositeScan(AnalyzerTestCase):
         self.assertIn("/A/old.txt", result["missing_cloud_sample"])
         self.assertEqual(result["composite_info"]["base_scan_id"], 1)
 
-    def test_nested_folder_conflict_drops_the_parent_entry(self):
-        """Real (and slightly surprising) behavior: when both a folder and
-        a more specific nested folder end up in folder_updates (e.g. "/A"
-        and "/A/B"), the code does not "let the child win while keeping
-        the parent" -- it drops the parent entry entirely. Files whose
-        parent_path is exactly "/A" (not "/A/B") silently fall back to the
-        base scan's version even though a newer partial scan touched "/A"
-        too. Asserting actual behavior here, not the more intuitive
-        behavior the code's own comments describe."""
+    def test_parent_and_nested_folder_updates_both_kept(self):
+        """A folder ("/A") and a more specific nested folder ("/A/B") are
+        independent keys in folder_updates -- they refer to disjoint sets
+        of files (parent_path exactly "/A" vs exactly "/A/B"), so both
+        should survive. (This used to be tested as "the parent gets
+        dropped", which was real but wrong behavior -- fixed in
+        build_composite_scan() to keep every distinct folder_path entry;
+        see CHANGELOG.md.)"""
         self.make_full_scan(1, [("/A", "root.txt", "file", 1, None)])
         self.make_partial_scan(2, "/A", [
             ("/A", "a.txt", "file", 1, None),
@@ -227,17 +226,9 @@ class TestCompositeScan(AnalyzerTestCase):
 
         composite = self.analyzer.build_composite_scan(use_cache=False)
 
-        self.assertEqual(composite["folder_updates"], {"/A/B": 3})
+        self.assertEqual(composite["folder_updates"], {"/A": 2, "/A/B": 3})
 
     def test_cache_returns_stale_result_until_cleared(self):
-        # NOTE: caching only actually engages once folder_updates is
-        # non-empty -- build_composite_scan() has an early `return` for
-        # the "no partial scans yet" case that happens *before* the
-        # cache-store code at the bottom of the function, so that specific
-        # result is never cached (a real, pre-existing quirk, not
-        # something this test is trying to paper over). So this fixture
-        # starts with one partial scan already present (caching engages),
-        # then adds a second to prove the *cached* result goes stale.
         self.make_full_scan(1, [
             ("/A", "old.txt", "file", 1, None),
             ("/C", "c_old.txt", "file", 1, None),
@@ -254,6 +245,23 @@ class TestCompositeScan(AnalyzerTestCase):
         self.analyzer.clear_composite_cache()
         fresh = self.analyzer.build_composite_scan(use_cache=True)
         self.assertEqual(fresh["folder_updates"], {"/A": 2, "/C": 3})
+
+    def test_empty_result_is_also_cached(self):
+        """Regression test: build_composite_scan() used to `return` its
+        "no partial scans yet" result *before* the cache-store code ran,
+        so that specific (empty) result was silently never cached -- fixed
+        so every outcome goes through the same cache path."""
+        self.make_full_scan(1, [("/A", "only.txt", "file", 1, None)])
+
+        first = self.analyzer.build_composite_scan(use_cache=True)
+        self.assertEqual(first["folder_updates"], {})
+        self.assertIn("composite_auto", self.analyzer._composite_cache)
+
+        # A new partial scan appears, but the cached (stale, empty) result
+        # should still be returned since nothing cleared the cache.
+        self.make_partial_scan(2, "/A", [("/A", "new.txt", "file", 1, None)])
+        stale = self.analyzer.build_composite_scan(use_cache=True)
+        self.assertEqual(stale["folder_updates"], {}, "expected the cached (stale, empty) result")
 
 
 class TestFindLastFullScan(AnalyzerTestCase):

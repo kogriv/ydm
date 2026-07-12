@@ -37,13 +37,11 @@ cover.
   duplicate/long-paths logic and `StorageManager` basics against an
   isolated on-disk SQLite fixture — no tmpfs, no cloud. If you're
   changing anything in those classes, add or update a case here rather
-  than only relying on the black-box scripts below. A few genuinely
-  surprising bits of current behavior are captured (and explained inline)
-  rather than "fixed" in passing — e.g. `build_composite_scan()`'s
-  nested-folder-conflict resolution drops the parent folder's override
-  entirely instead of just deferring to the child, and its cache is
-  silently never populated for the "no partial scans yet" result. See the
-  comments in the test file itself.
+  than only relying on the black-box scripts below. Two real
+  `build_composite_scan()` bugs were found and fixed while writing these
+  tests (dropped parent-folder overrides on nested-folder updates; the
+  result cache was silently never populated for the "no partial scans
+  yet" case) — see CHANGELOG.md.
 - The rest are bash scripts that drive the real CLI end-to-end:
   - `bash tests/test_ydm_fixes.sh` — regression suite, pure local, no
     credentials or network needed. Runs in CI; run it locally too before

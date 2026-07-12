@@ -1645,131 +1645,107 @@ class Analyzer:
             }
         
         base_scan_id = base_scan["id"]
-        
+
         # 2. Find all partial scans after base
         partial_scans = self.find_partial_scans_after(base_scan_id)
-        
+
         if not partial_scans:
-            # No partial scans, just return base scan
-            return {
-                "base_scan_id": base_scan_id,
-                "folder_updates": {},
-                "partial_scans_count": 0
-            }
-        
-        # 3. For each partial scan, determine which folders it covers
-        # Build mapping: folder -> latest scan_id that covers it
-        # Strategy: Process scans in order (oldest first), then apply priority rules
-        folder_to_scan = {}
-        scan_metadata = {}  # Store scan metadata for priority decisions
-        
-        # Sort partial scans by scan_id (oldest first) for proper priority handling
-        sorted_partial_scans = sorted(partial_scans, key=lambda x: x["id"])
-        
-        for partial_scan in sorted_partial_scans:
-            scan_id = partial_scan["id"]
-            root_path = partial_scan["root_path"]
-            timestamp = partial_scan.get("timestamp")
-            
-            if not root_path:
-                continue
-            
-            # Store metadata for this scan
-            scan_metadata[scan_id] = {
-                "root_path": root_path,
-                "timestamp": timestamp,
-                "scan_id": scan_id
-            }
-            
-            # Get all folders in this partial scan
-            folders = self.get_folders_in_scan(scan_id)
-            
-            # Normalize root_path for comparison
-            normalized_root = root_path.rstrip('/')
-            if not normalized_root:
-                normalized_root = ""
-            
-            # For each folder in this scan, apply priority rules
-            for folder_path in folders:
-                # Check if this folder is under the root_path of this partial scan
-                if normalized_root:
-                    # Folder must start with root_path or be equal to it
-                    if folder_path.startswith(normalized_root + '/') or folder_path == normalized_root:
-                        # Priority rules:
-                        # 1. If folder not in mapping - add it
-                        # 2. If folder already mapped - use newer scan (higher scan_id)
-                        # 3. If same scan_id - keep existing (shouldn't happen, but safe)
+            # No partial scans -- just the base scan. Falls through to the
+            # single cache+return path below (this used to `return` here
+            # directly, which meant this specific result was never cached).
+            folder_to_scan = {}
+        else:
+            # 3. For each partial scan, determine which folders it covers
+            # Build mapping: folder -> latest scan_id that covers it
+            # Strategy: Process scans in order (oldest first), then apply priority rules
+            folder_to_scan = {}
+            scan_metadata = {}  # Store scan metadata for priority decisions
+
+            # Sort partial scans by scan_id (oldest first) for proper priority handling
+            sorted_partial_scans = sorted(partial_scans, key=lambda x: x["id"])
+
+            for partial_scan in sorted_partial_scans:
+                scan_id = partial_scan["id"]
+                root_path = partial_scan["root_path"]
+                timestamp = partial_scan.get("timestamp")
+
+                if not root_path:
+                    continue
+
+                # Store metadata for this scan
+                scan_metadata[scan_id] = {
+                    "root_path": root_path,
+                    "timestamp": timestamp,
+                    "scan_id": scan_id
+                }
+
+                # Get all folders in this partial scan
+                folders = self.get_folders_in_scan(scan_id)
+
+                # Normalize root_path for comparison
+                normalized_root = root_path.rstrip('/')
+                if not normalized_root:
+                    normalized_root = ""
+
+                # For each folder in this scan, apply priority rules
+                for folder_path in folders:
+                    # Check if this folder is under the root_path of this partial scan
+                    if normalized_root:
+                        # Folder must start with root_path or be equal to it
+                        if folder_path.startswith(normalized_root + '/') or folder_path == normalized_root:
+                            # Priority rules:
+                            # 1. If folder not in mapping - add it
+                            # 2. If folder already mapped - use newer scan (higher scan_id)
+                            # 3. If same scan_id - keep existing (shouldn't happen, but safe)
+                            if folder_path not in folder_to_scan:
+                                folder_to_scan[folder_path] = scan_id
+                            else:
+                                existing_scan_id = folder_to_scan[folder_path]
+                                # Use newer scan (higher scan_id = more recent)
+                                if scan_id > existing_scan_id:
+                                    folder_to_scan[folder_path] = scan_id
+                                # If scan_ids are equal (shouldn't happen), keep existing
+                    else:
+                        # Root scan - should not happen for partial scans, but handle it
                         if folder_path not in folder_to_scan:
                             folder_to_scan[folder_path] = scan_id
-                        else:
-                            existing_scan_id = folder_to_scan[folder_path]
-                            # Use newer scan (higher scan_id = more recent)
-                            if scan_id > existing_scan_id:
-                                folder_to_scan[folder_path] = scan_id
-                            # If scan_ids are equal (shouldn't happen), keep existing
-                else:
-                    # Root scan - should not happen for partial scans, but handle it
-                    if folder_path not in folder_to_scan:
-                        folder_to_scan[folder_path] = scan_id
-                    elif scan_id > folder_to_scan[folder_path]:
-                        folder_to_scan[folder_path] = scan_id
-        
-        # 4. Handle nested folder conflicts
-        # If we have both "/Folder" and "/Folder/Sub" in folder_to_scan,
-        # prefer the more specific (deeper) path's scan
-        sorted_folders = sorted(folder_to_scan.keys(), key=len, reverse=True)  # Longest first
-        final_folder_to_scan = {}
-        
-        for folder_path in sorted_folders:
-            scan_id = folder_to_scan[folder_path]
-            # Check if this folder is a parent of any already processed folder
-            is_parent = False
-            for processed_folder, processed_scan_id in final_folder_to_scan.items():
-                # If processed folder is a subfolder of current folder
-                if processed_folder.startswith(folder_path + '/'):
-                    # Current folder is a parent - skip it (use subfolder's scan)
-                    is_parent = True
-                    break
-            
-            if not is_parent:
-                final_folder_to_scan[folder_path] = scan_id
-        
-        # If we filtered out some folders, use original mapping
-        # (This means we prefer more specific paths over parent paths)
-        if len(final_folder_to_scan) < len(folder_to_scan):
-            folder_to_scan = final_folder_to_scan
-        
+                        elif scan_id > folder_to_scan[folder_path]:
+                            folder_to_scan[folder_path] = scan_id
+
+            # NOTE: folder_to_scan is keyed by each folder's own exact
+            # parent_path, and _compare_composite_scan() consumes it by
+            # exact parent_path match, not by hierarchy/prefix -- so a
+            # parent folder ("/A") and a nested folder ("/A/B") are
+            # independent keys referring to disjoint sets of files (files
+            # directly in /A vs files directly in /A/B), not a "conflict"
+            # to resolve. A previous version of this method had a "nested
+            # folder conflict" pass here that dropped the parent entry
+            # whenever a more specific nested entry was also present,
+            # which silently discarded legitimate updates to files
+            # directly in the parent folder. Removed -- keeping every
+            # distinct folder_path entry is correct; genuine collisions
+            # (two scans claiming the *same* folder_path) are already
+            # resolved above by preferring the higher/more recent scan_id.
+
         result = {
             "base_scan_id": base_scan_id,
             "folder_updates": folder_to_scan,
             "partial_scans_count": len(partial_scans),
-            "updated_folders_count": len(folder_to_scan)
+            "updated_folders_count": len(folder_to_scan),
         }
-        
-        # Cache the result if enabled
+
+        # Cache the result if enabled -- covers every outcome above,
+        # including the "no partial scans" case.
         if use_cache:
-            import time
             cache_key = f"composite_{cloud_scan_id or 'auto'}"
             self._composite_cache[cache_key] = (result, time.time())
             # Limit cache size (keep only last 10 entries)
             if len(self._composite_cache) > 10:
                 # Remove oldest entry
-                oldest_key = min(self._composite_cache.keys(), 
+                oldest_key = min(self._composite_cache.keys(),
                                key=lambda k: self._composite_cache[k][1])
                 del self._composite_cache[oldest_key]
-        
-        # Cache the result if enabled
-        if use_cache:
-            import time
-            cache_key = f"composite_{cloud_scan_id or 'auto'}"
-            self._composite_cache[cache_key] = (result, time.time())
-            # Limit cache size (keep only last 10 entries)
-            if len(self._composite_cache) > 10:
-                # Remove oldest entry
-                oldest_key = min(self._composite_cache.keys(), 
-                               key=lambda k: self._composite_cache[k][1])
-                del self._composite_cache[oldest_key]
-        
+
         return result
     
     def clear_composite_cache(self):

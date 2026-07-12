@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-07-13 — Two `build_composite_scan()` bugs, found while writing unit tests
+
+Added `tests/test_analyzer.py` (stdlib `unittest`, no new dependency) —
+synthetic-data coverage for `Analyzer`/`StorageManager` that CI didn't
+have before. Writing it against real behavior surfaced two bugs, both
+fixed:
+
+- **Nested-folder-conflict resolution dropped legitimate parent-folder
+  updates.** When a composite scan's `folder_updates` contained both a
+  folder and a more specific nested folder (e.g. `/A` and `/A/B`), the
+  code treated this as a conflict and discarded the parent entry
+  entirely — files directly in `/A` silently kept the stale base-scan
+  version even though a newer partial scan had touched `/A` too. In
+  reality there's no conflict: `_compare_composite_scan` matches on exact
+  `parent_path`, so `/A` and `/A/B` are independent keys covering
+  disjoint files. The whole "nested folder conflict" step was removed.
+- **The composite-scan cache was never populated for the "no partial
+  scans yet" result** — an early `return` skipped the cache-store code
+  at the bottom of the function, so that specific (empty) result was
+  silently recomputed on every call regardless of `use_cache`. Fixed by
+  routing every outcome through a single cache-then-return path (which
+  also removed an accidental verbatim duplicate of the cache-store code).
+
 ## 2026-07-12 — OSS readiness
 
 Cleaned up the repository for a public release: removed personal example
