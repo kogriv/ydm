@@ -26,6 +26,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Scratch (e.g. screenshots pulled in during AI-assisted debugging sessions)
+tmp/
+
 # Service files (generated/analysis results)
 junk_list.txt
 junk_list.txt.old
