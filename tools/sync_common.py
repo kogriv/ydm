@@ -5,12 +5,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+import hashlib
+import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CONFIG
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @dataclass
@@ -47,6 +52,12 @@ class LocalScanResult:
     scan_id: Optional[int]
     error: Optional[str]
     duration_sec: Optional[float]
+
+
+@dataclass
+class LockResult:
+    acquired: bool
+    holder_pid: Optional[int] = None
 
 
 def normalize_path(path: Optional[str]) -> str:
@@ -412,3 +423,141 @@ def fetch_child_dirs(
     finally:
         conn.close()
     return [row[0] for row in rows]
+
+
+# --- rclone bisync (tasks/rclone_backend, bidirectional sync) ---------------
+
+def var_path(*parts: str) -> str:
+    """Resolves a path under the project's var/ dir, regardless of cwd."""
+    return os.path.join(PROJECT_ROOT, "var", *parts)
+
+
+def rclone_bisync_run(
+    remote: str,
+    local_root: str,
+    filter_path: str,
+    *,
+    resync: bool = False,
+    max_delete: int = 20,
+    check_access: bool = True,
+    workdir: Optional[str] = None,
+) -> CommandResult:
+    """Runs `rclone bisync` between the local mirror and the cloud remote,
+    scoped via bisync's own --filters-file (a distinct flag from `copy`'s
+    --filter-from). Captured, not streamed: this is meant to run unattended
+    (scheduled job) and its output needs to be logged, not watched live.
+
+    --max-delete is a *global* rclone flag (must precede the `bisync`
+    subcommand), not a bisync-specific one in this rclone build — it defaults
+    to -1 (unlimited) if omitted, so callers should always pass an explicit
+    cap."""
+    resolved_root = os.path.expanduser(local_root)
+    cmd = ["rclone", "--max-delete", str(max_delete), "bisync",
+           resolved_root, f"{remote}:",
+           "--filters-file", os.path.expanduser(filter_path)]
+    if resync:
+        cmd.append("--resync")
+    if check_access:
+        cmd.append("--check-access")
+    if workdir:
+        cmd.extend(["--workdir", os.path.expanduser(workdir)])
+    cmd.append("-v")
+    return run_command(cmd)
+
+
+def filter_file_hash(filter_path: str) -> Optional[str]:
+    """sha256 of the filter-file's contents, used to detect 'filters changed
+    since the last --resync' before invoking rclone (which would otherwise
+    just refuse to bisync with an opaque internal error)."""
+    resolved_path = os.path.expanduser(filter_path)
+    if not os.path.exists(resolved_path):
+        return None
+    with open(resolved_path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def bisync_state_path() -> str:
+    return var_path("bisync_state.json")
+
+
+def load_bisync_state() -> Dict[str, object]:
+    path = bisync_state_path()
+    if not os.path.exists(path):
+        return {
+            "last_resync_filter_hash": None,
+            "last_resync_at": None,
+            "last_run_at": None,
+            "last_status": None,
+        }
+    try:
+        with open(path, "r") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {
+            "last_resync_filter_hash": None,
+            "last_resync_at": None,
+            "last_run_at": None,
+            "last_status": None,
+        }
+
+
+def save_bisync_state(state: Dict[str, object]) -> None:
+    path = bisync_state_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+
+
+def acquire_lock(lock_path: str) -> LockResult:
+    """Same pattern as ydm.py's cloud-scan lock (ydm.py ~2635-2670): PID file,
+    liveness checked via /proc/<pid>, stale/corrupted locks self-heal."""
+    if os.path.exists(lock_path):
+        try:
+            with open(lock_path, "r") as handle:
+                lock_pid = int(handle.read().strip())
+            if os.path.exists(f"/proc/{lock_pid}"):
+                return LockResult(acquired=False, holder_pid=lock_pid)
+            os.remove(lock_path)  # stale lock — process is dead
+        except (ValueError, IOError):
+            try:
+                os.remove(lock_path)  # corrupted lock file
+            except OSError:
+                pass
+
+    try:
+        with open(lock_path, "w") as handle:
+            handle.write(str(os.getpid()))
+    except OSError:
+        return LockResult(acquired=False, holder_pid=None)
+    return LockResult(acquired=True)
+
+
+def release_lock(lock_path: str) -> None:
+    """Mirrors ydm.py's lock release (ydm.py ~2796-2802): best-effort, never
+    raises — meant to be called from a `finally` block."""
+    if os.path.exists(lock_path):
+        try:
+            os.remove(lock_path)
+        except OSError as exc:
+            print(f"Warning: failed to remove lock file: {exc}", file=sys.stderr)
+
+
+def append_text_log(path: str, line: str) -> None:
+    """Plain-text, append-only, line-buffered — matches var/deleted.log's
+    convention (tasks/junk/run_cleanup.py)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", buffering=1) as handle:
+        handle.write(line.rstrip("\n") + "\n")
+
+
+def notify(title: str, message: str) -> None:
+    """Best-effort termux-notification wrapper — no-op (never raises) if the
+    binary isn't available or the call fails."""
+    binary = shutil.which("termux-notification")
+    if not binary:
+        return
+    try:
+        subprocess.run([binary, "--title", title, "--content", message],
+                        capture_output=True)
+    except OSError:
+        pass
