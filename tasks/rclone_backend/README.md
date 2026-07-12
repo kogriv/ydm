@@ -502,6 +502,41 @@ rclone-логикой синка, не раньше.
       30-минутный период джоба даёт запас (6 мин << 30 мин) для
       одиночных удалений; поведение при нескольких одновременных
       удалениях в одном прогоне не проверялось (см. §8).
+- [x] **Найден и исправлен баг в wrapper-скрипте при реальной проверке
+      пользователем.** Первая версия `ydm_bisync_job.sh` вызывала голый
+      `proot-distro login debian -- bash -c "cd /root/notes/pro/ydm && ..."`
+      — без `--bind`. `/root/notes` внутри debian-proot **не часть
+      rootfs**, а bind-mount `/storage/emulated/0/Documents` (алиас `d` в
+      `~/.bashrc`: `proot-distro login debian --bind
+      /storage/emulated/0/Documents:/root/notes --bind
+      /storage/emulated/0/Download:/root/download`); без явного `--bind`
+      путь просто не существует. Это не поймалось при автономном
+      тестировании, потому что все мои проверки шли уже изнутри
+      правильно смонтированной debian-сессии — тест «голого» входа
+      изнутри той же сессии сам оказался вложенным (`proot-distro login`
+      из-под уже активного proot) и падал на другой, не относящейся к
+      делу ошибке (`execve(/usr/bin/env): No such file or directory`).
+      Реальная причина нашлась только когда пользователь запустил
+      `bash ~/ydm_bisync_job.sh` из настоящего, свежего Termux-шелла и
+      получил honest `cd: /root/notes/pro/ydm: No such file or
+      directory`. Исправлено: wrapper теперь передаёт оба `--bind` explicitly,
+      как в алиасе `d`.
+- [x] **Вторая, независимая находка при повторной проверке пользователем.**
+      После фикса `--bind` скрипт доходил до `sync_bisync.py`, но каждый
+      прогон логировался как `run BLOCKED ... Filter-file changed since
+      the last resync` — при том что содержимое `ya_disk.filters`
+      фактически не менялось (хэш совпадал с сохранённым в
+      `bisync_state.json`). Причина: wrapper вызывал `sync_bisync.py run
+      --apply` **без `--local-root`**, поэтому подставлялся стухший
+      default из `ydm.py` (`DEFAULT_CONFIG["local_root"] =
+      "/data/ya_disk"`, путь с другой, amd64-машины) вместо реального
+      `/sdcard/Download/ya_disk`. `filter-path` резолвился в
+      несуществующий `/data/ya_disk.filters` →
+      `filter_file_hash()` возвращал `None` → не совпадало с сохранённым
+      хэшем → guard срабатывал (по правильной логике, но по неверной
+      причине). Страховка отработала как задумано — просто повод для неё
+      был другой, чем предполагался. Исправлено: wrapper теперь явно
+      передаёт `--local-root /sdcard/Download/ya_disk`.
 
 ---
 
