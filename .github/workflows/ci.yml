@@ -38,6 +38,9 @@ jobs:
       - name: Regression suite (tests/test_ydm_fixes.sh)
         run: bash tests/test_ydm_fixes.sh
 
+      - name: Unit tests (Analyzer/StorageManager on synthetic data)
+        run: python tests/test_analyzer.py -v
+
       # tests/test_scan.sh and tests/test_rclone_backend.sh are NOT run
       # here on purpose: the former scans the real Yandex Disk API
       # (needs YANDEX_DISK_TOKEN), the latter needs a live, authorized

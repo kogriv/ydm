@@ -24,30 +24,41 @@ existing DB) need neither.
 
 Every push/PR runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 on Python 3.9/3.11/3.13: a syntax check (`py_compile`) of every `.py`
-file, a `--help` smoke test of each CLI entry point, and
-`tests/test_ydm_fixes.sh`. That's deliberately the minimum — it catches
-syntax errors, broken `argparse` setup, and the regression suite, without
-needing any credentials in CI. See below for what CI does *not* cover.
+file, a `--help` smoke test of each CLI entry point,
+`tests/test_ydm_fixes.sh`, and `tests/test_analyzer.py` (unit tests for
+`Analyzer`/`StorageManager` against synthetic data). All of it runs
+without needing any credentials in CI. See below for what CI does *not*
+cover.
 
 ## Running the tests locally
 
-There's no unit-test framework here — tests are bash scripts that drive
-the real CLI:
-
-- `bash tests/test_ydm_fixes.sh` — regression suite, pure local, no
-  credentials or network needed. Runs in CI; run it locally too before
-  opening a PR.
-- `bash tests/test_rclone_backend.sh` — smoke test for `--backend rclone`.
-  **Not run in CI** (needs a real, authorized `yandex:` remote in
-  `rclone.conf`); it self-skips cleanly (`SKIP: ...`) if `rclone` isn't
-  installed or no `yandex:` remote is configured, rather than failing.
-- `bash tests/test_scan.sh` — integration test of cloud scanning on
-  tmpfs. **Not run in CI** (hits the real Yandex Disk API via
-  `--backend api`, needs `YANDEX_DISK_TOKEN`). Also has a known,
-  pre-existing, out-of-scope bug: it monitors a hardcoded
-  `/dev/shm/ydm_scan.db` path instead of the actual PID-namespaced
-  `/dev/shm/ydm_scan_<pid>.db` — the scan itself still works, only the
-  script's own progress-monitoring loop is watching the wrong file.
+- `python tests/test_analyzer.py -v` — stdlib `unittest`, no pytest (kept
+  dependency-free on purpose). Covers `Analyzer`'s diff/composite-scan/
+  duplicate/long-paths logic and `StorageManager` basics against an
+  isolated on-disk SQLite fixture — no tmpfs, no cloud. If you're
+  changing anything in those classes, add or update a case here rather
+  than only relying on the black-box scripts below. A few genuinely
+  surprising bits of current behavior are captured (and explained inline)
+  rather than "fixed" in passing — e.g. `build_composite_scan()`'s
+  nested-folder-conflict resolution drops the parent folder's override
+  entirely instead of just deferring to the child, and its cache is
+  silently never populated for the "no partial scans yet" result. See the
+  comments in the test file itself.
+- The rest are bash scripts that drive the real CLI end-to-end:
+  - `bash tests/test_ydm_fixes.sh` — regression suite, pure local, no
+    credentials or network needed. Runs in CI; run it locally too before
+    opening a PR.
+  - `bash tests/test_rclone_backend.sh` — smoke test for `--backend rclone`.
+    **Not run in CI** (needs a real, authorized `yandex:` remote in
+    `rclone.conf`); it self-skips cleanly (`SKIP: ...`) if `rclone` isn't
+    installed or no `yandex:` remote is configured, rather than failing.
+  - `bash tests/test_scan.sh` — integration test of cloud scanning on
+    tmpfs. **Not run in CI** (hits the real Yandex Disk API via
+    `--backend api`, needs `YANDEX_DISK_TOKEN`). Also has a known,
+    pre-existing, out-of-scope bug: it monitors a hardcoded
+    `/dev/shm/ydm_scan.db` path instead of the actual PID-namespaced
+    `/dev/shm/ydm_scan_<pid>.db` — the scan itself still works, only the
+    script's own progress-monitoring loop is watching the wrong file.
 
 All three scripts create and clean up their own temporary database/files.
 

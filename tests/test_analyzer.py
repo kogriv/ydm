@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""
+Unit tests for Analyzer/StorageManager against synthetic data — no
+network, no credentials, no tmpfs (StorageManager(use_temp_storage=False)
+is a plain on-disk SQLite file, the same mode tools/sync_common.py's
+create_storage() uses).
+
+Run directly: python tests/test_analyzer.py -v
+Or via CI: see .github/workflows/ci.yml
+
+Fixtures insert rows directly through StorageManager.get_connection()
+rather than replaying the full scan/checkpoint lifecycle — confirmed
+equivalent for analysis purposes, and avoids depending on tmpfs/
+checkpoint timing entirely.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# NOTE: importing ydm has a real, process-wide side effect — it registers
+# SIGTERM/SIGUSR1 handlers and an atexit hook at module level (not gated
+# behind `if __name__ == "__main__"`). Harmless for unittest, but worth
+# knowing if this module is ever imported alongside something that relies
+# on default signal handling.
+from ydm import Analyzer, StorageManager, DEFAULT_CONFIG  # noqa: E402
+
+
+class AnalyzerTestCase(unittest.TestCase):
+    """Base fixture: an isolated on-disk SQLite DB, fresh schema, a bound
+    Analyzer, and exclude_config pointed at a guaranteed-nonexistent path
+    so get_diff()'s exclude-dirs filtering can't pick up a real
+    ~/.config/yandex-disk/config.cfg that happens to exist on whoever's
+    machine runs these tests."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="ydm_test_")
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        self.config = dict(DEFAULT_CONFIG)
+        self.storage = StorageManager(self.db_path, use_temp_storage=False, config=self.config)
+        ok, msg = self.storage.init_db()
+        self.assertTrue(ok, msg)
+        self.analyzer = Analyzer(self.storage)
+        self.conn = self.storage.get_connection()
+
+        self._orig_exclude_config = DEFAULT_CONFIG["exclude_config"]
+        DEFAULT_CONFIG["exclude_config"] = os.path.join(self.tmpdir, "nonexistent-yandex-disk-config.cfg")
+
+    def tearDown(self):
+        DEFAULT_CONFIG["exclude_config"] = self._orig_exclude_config
+        self.conn.close()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # --- fixture helpers -----------------------------------------------
+
+    def insert_scan(self, scan_id, scan_type, status, timestamp=None, duration=0):
+        if timestamp is not None:
+            self.conn.execute(
+                "INSERT INTO scans (id, timestamp, scan_type, status, duration) VALUES (?, ?, ?, ?, ?)",
+                (scan_id, timestamp, scan_type, status, duration),
+            )
+        else:
+            self.conn.execute(
+                "INSERT INTO scans (id, scan_type, status, duration) VALUES (?, ?, ?, ?)",
+                (scan_id, scan_type, status, duration),
+            )
+        self.conn.commit()
+
+    def insert_files(self, scan_id, rows):
+        """rows: iterable of (parent_path, name, type, size, md5)."""
+        self.conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size, md5) VALUES (?, ?, ?, ?, ?, ?)",
+            [(scan_id, p, n, t, s, m) for (p, n, t, s, m) in rows],
+        )
+        self.conn.commit()
+
+    def insert_progress(self, scan_id, path, status="completed", last_checked=None):
+        self.conn.execute(
+            "INSERT INTO scan_progress (scan_id, path, status, last_checked) VALUES (?, ?, ?, ?)",
+            (scan_id, path, status, last_checked),
+        )
+        self.conn.commit()
+
+
+class TestStorageManagerBasics(AnalyzerTestCase):
+    def test_init_db_creates_all_tables(self):
+        tables = {
+            row[0]
+            for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        for expected in ("scans", "disk_info", "files", "scan_progress"):
+            self.assertIn(expected, tables)
+
+    def test_start_scan_and_finish_scan(self):
+        scan_id = self.storage.start_scan("cloud")
+        self.assertIsInstance(scan_id, int)
+        row = self.conn.execute(
+            "SELECT scan_type, status, duration FROM scans WHERE id=?", (scan_id,)
+        ).fetchone()
+        self.assertEqual(row, ("cloud", "started", 0))
+
+        self.storage.finish_scan(scan_id, "success", 12.5)
+        row = self.conn.execute("SELECT status, duration FROM scans WHERE id=?", (scan_id,)).fetchone()
+        self.assertEqual(row, ("success", 12.5))
+
+    def test_get_status_orders_most_recent_first_and_caps_at_5(self):
+        for i in range(1, 8):
+            self.insert_scan(i, "cloud", "success")
+        status = self.analyzer.get_status()
+        self.assertEqual(len(status), 5)
+        self.assertEqual([s["id"] for s in status], [7, 6, 5, 4, 3])
+
+
+class TestDiffSimple(AnalyzerTestCase):
+    def test_missing_local_and_missing_cloud(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_scan(2, "local", "success")
+        self.insert_files(1, [
+            ("/A", "only_cloud.txt", "file", 10, None),
+            ("/A", "shared.txt", "file", 20, None),
+        ])
+        self.insert_files(2, [
+            ("/A", "shared.txt", "file", 20, None),
+            ("/A", "only_local.txt", "file", 30, None),
+        ])
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["missing_local_count"], 1)
+        self.assertEqual(result["missing_local_sample"], ["/A/only_cloud.txt"])
+        self.assertEqual(result["missing_cloud_count"], 1)
+        self.assertEqual(result["missing_cloud_sample"], ["/A/only_local.txt"])
+
+    def test_exclude_dirs_filters_top_level(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_scan(2, "local", "success")
+        self.insert_files(1, [
+            ("/Excluded", "secret.txt", "file", 5, None),
+            ("/Kept", "visible.txt", "file", 5, None),
+        ])
+        with open(DEFAULT_CONFIG["exclude_config"], "w") as f:
+            f.write("exclude-dirs=Excluded\n")
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["missing_local_sample"], ["/Kept/visible.txt"])
+
+    def test_local_scan_id_must_be_successful_local_scan(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_scan(2, "local", "started")
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2)
+        self.assertIn("error", result)
+
+    def test_no_local_scans_at_all(self):
+        self.insert_scan(1, "cloud", "success")
+        result = self.analyzer.get_diff(cloud_scan_id=1)
+        self.assertIn("error", result)
+
+
+class TestCompositeScan(AnalyzerTestCase):
+    # Bulks up "full" cloud scans well past any partial scan's file count,
+    # so find_last_full_scan()'s size-based heuristic reliably picks the
+    # intended base scan -- without it, a "full" scan with only 1-2 files
+    # under test is indistinguishable (by file count) from a small partial
+    # scan and the heuristic can pick the wrong one. Also seeded into any
+    # local scan compared against a padded cloud scan, so the padding
+    # files match on both sides and don't show up as spurious diff noise.
+    PADDING_FILES = [("/_padding", f"pad{i}.bin", "file", 1, None) for i in range(20)]
+
+    def make_full_scan(self, scan_id, files):
+        self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(scan_id, list(files) + self.PADDING_FILES)
+        self.insert_progress(scan_id, "/", status="completed")
+
+    def make_partial_scan(self, scan_id, root_path, files):
+        self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(scan_id, files)
+        self.insert_progress(scan_id, root_path, status="completed")
+
+    def make_local_scan(self, scan_id, files):
+        self.insert_scan(scan_id, "local", "success")
+        self.insert_files(scan_id, list(files) + self.PADDING_FILES)
+
+    def test_folder_updates_maps_only_the_partial_scans_folder(self):
+        self.make_full_scan(1, [
+            ("/A", "old.txt", "file", 1, None),
+            ("/B", "stable.txt", "file", 1, None),
+        ])
+        self.make_partial_scan(2, "/A", [("/A", "new.txt", "file", 1, None)])
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertEqual(composite["base_scan_id"], 1)
+        self.assertEqual(composite["folder_updates"], {"/A": 2})
+
+    def test_diff_uses_composite_version_of_updated_folder(self):
+        self.make_full_scan(1, [("/A", "old.txt", "file", 1, None)])
+        self.make_partial_scan(2, "/A", [("/A", "new.txt", "file", 1, None)])
+        self.make_local_scan(3, [("/A", "old.txt", "file", 1, None)])
+
+        result = self.analyzer.get_diff(local_scan_id=3, use_composite=True)
+
+        # The partial scan's new.txt supersedes the base's old.txt entirely
+        # for parent_path "/A" (composite comparison works by exact
+        # parent_path match, not by merging file lists within a folder).
+        self.assertIn("/A/new.txt", result["missing_local_sample"])
+        self.assertIn("/A/old.txt", result["missing_cloud_sample"])
+        self.assertEqual(result["composite_info"]["base_scan_id"], 1)
+
+    def test_nested_folder_conflict_drops_the_parent_entry(self):
+        """Real (and slightly surprising) behavior: when both a folder and
+        a more specific nested folder end up in folder_updates (e.g. "/A"
+        and "/A/B"), the code does not "let the child win while keeping
+        the parent" -- it drops the parent entry entirely. Files whose
+        parent_path is exactly "/A" (not "/A/B") silently fall back to the
+        base scan's version even though a newer partial scan touched "/A"
+        too. Asserting actual behavior here, not the more intuitive
+        behavior the code's own comments describe."""
+        self.make_full_scan(1, [("/A", "root.txt", "file", 1, None)])
+        self.make_partial_scan(2, "/A", [
+            ("/A", "a.txt", "file", 1, None),
+            ("/A/B", "b_old.txt", "file", 1, None),
+        ])
+        self.make_partial_scan(3, "/A/B", [("/A/B", "b_new.txt", "file", 1, None)])
+
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+
+        self.assertEqual(composite["folder_updates"], {"/A/B": 3})
+
+    def test_cache_returns_stale_result_until_cleared(self):
+        # NOTE: caching only actually engages once folder_updates is
+        # non-empty -- build_composite_scan() has an early `return` for
+        # the "no partial scans yet" case that happens *before* the
+        # cache-store code at the bottom of the function, so that specific
+        # result is never cached (a real, pre-existing quirk, not
+        # something this test is trying to paper over). So this fixture
+        # starts with one partial scan already present (caching engages),
+        # then adds a second to prove the *cached* result goes stale.
+        self.make_full_scan(1, [
+            ("/A", "old.txt", "file", 1, None),
+            ("/C", "c_old.txt", "file", 1, None),
+        ])
+        self.make_partial_scan(2, "/A", [("/A", "new.txt", "file", 1, None)])
+
+        first = self.analyzer.build_composite_scan(use_cache=True)
+        self.assertEqual(first["folder_updates"], {"/A": 2})
+
+        self.make_partial_scan(3, "/C", [("/C", "c_new.txt", "file", 1, None)])
+        stale = self.analyzer.build_composite_scan(use_cache=True)
+        self.assertEqual(stale["folder_updates"], {"/A": 2}, "expected the cached (stale) result, missing /C")
+
+        self.analyzer.clear_composite_cache()
+        fresh = self.analyzer.build_composite_scan(use_cache=True)
+        self.assertEqual(fresh["folder_updates"], {"/A": 2, "/C": 3})
+
+
+class TestFindLastFullScan(AnalyzerTestCase):
+    def test_explicit_scan_id_success(self):
+        self.insert_scan(1, "cloud", "success")
+        result = self.analyzer.find_last_full_scan(scan_id=1)
+        self.assertEqual(result["id"], 1)
+
+    def test_explicit_scan_id_not_successful(self):
+        self.insert_scan(1, "cloud", "started")
+        result = self.analyzer.find_last_full_scan(scan_id=1)
+        self.assertIn("error", result)
+
+    def test_heuristic_picks_fresh_successful_scan(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("/A", f"f{i}.txt", "file", 1, None) for i in range(5)])
+        result = self.analyzer.find_last_full_scan()
+        self.assertEqual(result["id"], 1)
+        self.assertEqual(result["files_count"], 5)
+
+    def test_reference_full_scan_id_config_wins_over_heuristic(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("/A", f"f{i}.txt", "file", 1, None) for i in range(100)])
+        self.insert_scan(2, "cloud", "success")
+        self.insert_files(2, [("/A", "only_one.txt", "file", 1, None)])
+
+        self.config["reference_full_scan_id"] = 2
+        result = self.analyzer.find_last_full_scan()
+
+        self.assertEqual(result["id"], 2)
+
+
+class TestDuplicates(AnalyzerTestCase):
+    def test_get_duplicates_by_hash_groups_matching_md5(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [
+            ("/A", "a.txt", "file", 10, "hash1"),
+            ("/B", "b.txt", "file", 10, "hash1"),
+            ("/C", "c.txt", "file", 5, "hash2"),
+            ("/D", "d.txt", "file", 5, None),
+        ])
+        result = self.analyzer.get_duplicates(1, by_hash=True)
+        self.assertEqual(result["total_duplicates"], 1)
+        dup = result["duplicates"][0]
+        self.assertEqual(dup["hash"], "hash1")
+        self.assertEqual(dup["file_count"], 2)
+        self.assertEqual(set(dup["files"]), {"/A/a.txt", "/B/b.txt"})
+
+    def test_get_duplicates_by_name_groups_size_and_name(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [
+            ("/A", "same.txt", "file", 10, None),
+            ("/B", "same.txt", "file", 10, None),
+            ("/C", "same.txt", "file", 99, None),
+        ])
+        result = self.analyzer.get_duplicates(1, by_hash=False)
+        self.assertEqual(result["total_duplicates"], 1)
+        self.assertEqual(result["duplicates"][0]["occurrence_count"], 2)
+
+    def test_clean_duplicates_keeps_min_id_per_group(self):
+        self.insert_scan(1, "cloud", "success")
+        # The schema's UNIQUE(scan_id, parent_path, name) index blocks
+        # normal duplicate inserts -- drop it to simulate a legacy
+        # pre-index DB, exactly the scenario `report clean-duplicates`
+        # was built for (see CHANGELOG.md).
+        self.conn.execute("DROP INDEX idx_files_unique")
+        self.conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size, md5) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (1, "/A", "dup.txt", "file", 1, None),
+                (1, "/A", "dup.txt", "file", 1, None),
+                (1, "/A", "dup.txt", "file", 1, None),
+                (1, "/A", "unique.txt", "file", 1, None),
+            ],
+        )
+        self.conn.commit()
+        min_id = self.conn.execute(
+            "SELECT MIN(id) FROM files WHERE parent_path='/A' AND name='dup.txt'"
+        ).fetchone()[0]
+
+        result = self.analyzer.clean_duplicates(scan_id=1)
+
+        self.assertEqual(result["deleted_duplicates"], 2)
+        self.assertEqual(result["total_files_after"], 2)
+        remaining_ids = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT id FROM files WHERE parent_path='/A' AND name='dup.txt'"
+            ).fetchall()
+        }
+        self.assertEqual(remaining_ids, {min_id})
+
+
+class TestLongPaths(AnalyzerTestCase):
+    def test_threshold_and_sorting(self):
+        self.insert_scan(1, "cloud", "success")
+        short_name = "short.txt"
+        long_name = "x" * 250 + ".txt"
+        longer_name = "y" * 300 + ".txt"
+        self.insert_files(1, [
+            ("/A", short_name, "file", 1, None),
+            ("/A", long_name, "file", 1, None),
+            ("/A", longer_name, "file", 1, None),
+        ])
+        result = self.analyzer.get_long_paths(1, limit_chars=240)
+        self.assertEqual(result["long_paths_count"], 2)
+        self.assertEqual(result["long_paths"][0]["path"], f"A/{longer_name}")
+        self.assertEqual(result["long_paths"][1]["path"], f"A/{long_name}")
+
+
+if __name__ == "__main__":
+    unittest.main()
