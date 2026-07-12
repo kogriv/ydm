@@ -206,12 +206,12 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
 
     add_parser = subparsers.add_parser("add", help="Include folder in sync (rclone filter-file)")
-    add_parser.add_argument("--path", required=True, help="Path to include (e.g., /DAO)")
+    add_parser.add_argument("--path", required=True, help="Path to include (e.g., /Projects)")
     common_flags(add_parser)
     add_parser.add_argument("--apply", action="store_true", help="Write filter-file and materialize via rclone copy")
 
     remove_parser = subparsers.add_parser("remove", help="Exclude folder from sync (rclone filter-file)")
-    remove_parser.add_argument("--path", required=True, help="Path to exclude (e.g., /DAO)")
+    remove_parser.add_argument("--path", required=True, help="Path to exclude (e.g., /Projects)")
     common_flags(remove_parser)
     remove_parser.add_argument("--apply", action="store_true", help="Write filter-file")
     remove_parser.add_argument("--delete-local", action="store_true",

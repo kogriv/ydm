@@ -7,6 +7,18 @@
 отдельные режимы, но полноценный `bisync` реализован в Этапе 7)
 *Приоритет:* High (единственный рабочий путь для запуска ydm на arm64/Android)
 
+> **Дисклеймер (для внешних читателей):** этот документ и весь код в
+> `tools/sync_filters.py`/`sync_bisync.py`/связанные wrapper-скрипты
+> написаны и проверены на одном конкретном устройстве — arm64
+> proot-debian под Termux на Android, с конкретными путями
+> (`/sdcard/Download/ya_disk`, `/data/data/com.termux/...`) и конкретным
+> механизмом автоматизации (`termux-job-scheduler`). Это не
+> универсальный кросс-платформенный рецепт — на другом Linux/macOS/Android
+> устройстве пути, способ входа в окружение и механизм периодического
+> запуска почти наверняка будут другими. Считайте это подробно
+> задокументированным примером одного рабочего решения, а не готовым
+> "из коробки" инструментом.
+
 ---
 
 ## 1. Проблема
@@ -94,18 +106,18 @@ rclone lsjson yandex:path/to/folder --hash
 ### 3.3. Sync management — замена `tools/sync_exclude.py --apply`
 
 `exclude-dirs` в конфиге демона заменяется **filter-file** rclone
-(`+ /DAO/2/**` / `- **`, синтаксис уже описан в `notes/infra/proot_debian/rclone/README.md`).
+(`+ /Projects/2024/**` / `- **`, синтаксис уже описан в `notes/infra/proot_debian/rclone/README.md`).
 Вместо "правим конфиг → демон сам разбирается" — два явных шага на команду:
 
 ```
-ydm-sync-add /DAO/2
-  1. добавить "+ /DAO/2/**" в filter-file
-  2. rclone copy yandex:/DAO/2 /root/notes/ya_disk/DAO/2 --filter-from ... -P
+ydm-sync-add /Projects/2024
+  1. добавить "+ /Projects/2024/**" в filter-file
+  2. rclone copy yandex:/Projects/2024 /root/notes/ya_disk/Projects/2024 --filter-from ... -P
      (реально материализует папку локально)
 
-ydm-sync-rm /DAO/2
+ydm-sync-rm /Projects/2024
   1. убрать правило из filter-file
-  2. find /root/notes/ya_disk/DAO/2 -mindepth 1 -delete (после подтверждения,
+  2. find /root/notes/ya_disk/Projects/2024 -mindepth 1 -delete (после подтверждения,
      та же схема "удалять только после rclone check", что уже отработана
      для Telegram-папки и ALL_RECOVERED_DOCUMENT)
 ```
@@ -158,7 +170,7 @@ md5 (для дублей — сейчас `Analyzer` вероятно опира
 
 Синтаксис как в `notes/infra/proot_debian/rclone/README.md`:
 ```
-+ /DAO/2/**
++ /Projects/2024/**
 + /Docs/**
 - **
 ```
@@ -554,9 +566,9 @@ python3 ydm.py report duplicates --scan-id 1
 python3 ydm.py report long-paths --scan-id 1
 
 # Управление синком (материализует/убирает локальную копию)
-python3 ydm.py sync add --path /DAO/2
-python3 ydm.py sync add --path /DAO/2 --apply
-python3 ydm.py sync remove --path /DAO/2 --apply
+python3 ydm.py sync add --path /Projects/2024
+python3 ydm.py sync add --path /Projects/2024 --apply
+python3 ydm.py sync remove --path /Projects/2024 --apply
 ```
 
 ---

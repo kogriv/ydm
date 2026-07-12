@@ -107,10 +107,10 @@ python3 ydm.py --format json report scan-info --scan-id <ID> | jq '.data | {stat
 ### 1) Просмотр дерева синхронизации (`sync_tree`)
 ```bash
 # Свернутое дерево (JSON по умолчанию)
-python3 tools/sync_tree.py --path /DAO --depth 2
+python3 tools/sync_tree.py --path /Projects --depth 2
 
 # Полное дерево с ветками (text)
-python3 tools/sync_tree.py --path /DAO --depth 2 --format text --text-tree --show-all
+python3 tools/sync_tree.py --path /Projects --depth 2 --format text --text-tree --show-all
 
 # Без заголовка в text
 python3 tools/sync_tree.py --format text --text-tree --no-text-header
@@ -125,28 +125,28 @@ python3 tools/sync_tree.py --no-local-scan --no-sync-percent
 python3 tools/sync_exclude.py list
 
 # Dry-run: включить подпапку
-python3 tools/sync_exclude.py add --path /DAO/2
+python3 tools/sync_exclude.py add --path /Projects/2024
 
 # Применить изменения
-python3 tools/sync_exclude.py add --path /DAO/2 --apply
+python3 tools/sync_exclude.py add --path /Projects/2024 --apply
 
 # Исключить папку
-python3 tools/sync_exclude.py remove --path /DAO/2 --apply
+python3 tools/sync_exclude.py remove --path /Projects/2024 --apply
 
 # Текстовый вывод без заголовка
-python3 tools/sync_exclude.py add --path /DAO/2 --format text --no-text-header
+python3 tools/sync_exclude.py add --path /Projects/2024 --format text --no-text-header
 
 # Отключить рестарт демона и локальный скан
-python3 tools/sync_exclude.py add --path /DAO/2 --apply --no-restart-daemon --no-local-scan
+python3 tools/sync_exclude.py add --path /Projects/2024 --apply --no-restart-daemon --no-local-scan
 ```
 
 ### 3) JSON‑контракты (для автоматизации)
 ```bash
 # sync_tree JSON
-python3 tools/sync_tree.py --path /DAO --depth 2 --format json --show-all | jq '.schema, .root_path, .root_depth, .local_scan_started'
+python3 tools/sync_tree.py --path /Projects --depth 2 --format json --show-all | jq '.schema, .root_path, .root_depth, .local_scan_started'
 
 # sync_exclude JSON (dry-run)
-python3 tools/sync_exclude.py add --path /DAO/2 --format json | jq '.data.schema, .data.plan, .data.daemon'
+python3 tools/sync_exclude.py add --path /Projects/2024 --format json | jq '.data.schema, .data.plan, .data.daemon'
 ```
 
 JSON‑версии:

@@ -1,8 +1,11 @@
+*Читать по-русски: [README.ru.md](README.ru.md).*
+
 # YDM - Yandex Disk Monitor
 
-Инструмент для глубокого анализа состояния Яндекс.Диска, сверки локальной копии с облаком и отслеживания динамики изменений.
+A tool for deep auditing of a Yandex Disk account: comparing the cloud
+against a local mirror and tracking changes over time.
 
-## Быстрая памятка (алиасы)
+## Quick reference (shell aliases)
 
 ```bash
 ydm-scan-cloud
@@ -10,51 +13,54 @@ ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
-ydm-sync-add /DAO/2
-ydm-sync-rm /DAO/2
+ydm-sync-add /Projects/2024
+ydm-sync-rm /Projects/2024
 ydm-help
 ```
 
 ## Features
 
-- 🔍 **Полное сканирование облака** - рекурсивный обход всех файлов и папок через Yandex Disk API
-- 💾 **Локальное сканирование** - сканирование локальной файловой системы
-- 📊 **Сравнение облако vs локально** - выявление расхождений и проблем синхронизации
-- 🔄 **Resumable сканирование** - возможность прервать и продолжить сканирование с места остановки
-- ⚡ **Оптимизированная производительность** - использование tmpfs для быстрой работы с большими объемами данных
-- 📈 **Детальная аналитика** - поиск дубликатов, длинных путей, анализ структуры
+- 🔍 **Full cloud scan** - recursive walk of every file/folder via the Yandex Disk API
+- 💾 **Local scan** - scans the local filesystem mirror
+- 📊 **Cloud vs local diff** - finds discrepancies and sync problems
+- 🔄 **Resumable scanning** - interrupt and resume a scan from where it left off
+- ⚡ **Optimized for scale** - uses tmpfs for fast handling of large datasets
+- 📈 **Detailed analytics** - duplicate detection, overly-long paths, structure analysis
 
 ## Requirements
 
 - Python 3.6+
-- Один из двух способов доступа к Yandex Disk:
-  - **API-бэкенд (по умолчанию)** — токен Yandex Disk OAuth (получить можно
-    [здесь](https://yandex.ru/dev/disk/poligon/)); нужен также демон
-    `yandex-disk` для `scan local`/`report diff`/управления синком.
-  - **rclone-бэкенд** (`--backend rclone`) — авторизованный remote в
-    `rclone.conf` (`rclone config`), без демона и без `.env`. Нужен для
-    окружений, где официальный `yandex-disk` не работает (например, arm64 —
-    подробности и весь набор инструментов в
-    [`tasks/rclone_backend/README.md`](tasks/rclone_backend/README.md)).
+- One of two ways to talk to Yandex Disk:
+  - **API backend (default)** — a Yandex Disk OAuth token (get one
+    [here](https://yandex.ru/dev/disk/poligon/)); also needs the
+    `yandex-disk` daemon for `scan local`/`report diff`/sync management.
+  - **rclone backend** (`--backend rclone`) — an authorized remote in
+    `rclone.conf` (`rclone config`), no daemon, no `.env` needed. For
+    environments where the official `yandex-disk` daemon doesn't work
+    (e.g. arm64) — details and the full toolset in
+    [`tasks/rclone_backend/README.md`](tasks/rclone_backend/README.md).
+    Note: that workstream was built for one specific Android/Termux
+    device — see the disclaimer at the top of that file before assuming
+    it works unmodified on yours.
 
 ## Installation
 
-1. Клонируйте репозиторий:
+1. Clone the repository:
 ```bash
 git clone <repository-url>
 cd ydm
 ```
 
-2. Настройте доступ (один из двух):
+2. Configure access (pick one):
 ```bash
-# Вариант А — API-бэкенд: файл .env
+# Option A — API backend: .env file
 echo "YANDEX_DISK_TOKEN=your_token_here" > .env
 
-# Вариант Б — rclone-бэкенд: remote в rclone.conf, .env не нужен
+# Option B — rclone backend: remote in rclone.conf, no .env needed
 rclone config   # storage> yandex
 ```
 
-3. (Опционально) Настройте конфигурацию в `ydm_config.json`:
+3. (Optional) Configure profiles in `ydm_config.json`:
 ```json
 {
   "prod": {
@@ -67,318 +73,317 @@ rclone config   # storage> yandex
 
 ## Quick Start
 
-### Инициализация базы данных
+### Initialize the database
 ```bash
 python3 ydm.py init
 ```
 
-### Сканирование облака
+### Scan the cloud
 ```bash
-# Полное сканирование с прогрессом
+# Full scan with progress
 python3 ydm.py scan cloud --progress
 
-# Сканирование конкретной папки
-python3 ydm.py scan cloud --path "/Архив" --progress
+# Scan one folder
+python3 ydm.py scan cloud --path "/Archive" --progress
 
-# Продолжить прерванное сканирование
+# Resume an interrupted scan
 python3 ydm.py scan cloud --resume --progress
 ```
 
-### Сканирование локальной файловой системы
+### Scan the local filesystem
 ```bash
 python3 ydm.py scan local --path /path/to/local/directory
 ```
 
-### Получение отчетов
+### Get reports
 ```bash
-# Статус последних сканов
+# Status of recent scans
 python3 ydm.py report status
 
-# Сравнение облако vs локально
+# Cloud vs local diff
 python3 ydm.py report diff
 
-# Детальная информация о скане
+# Details of one scan
 python3 ydm.py report scan-info --scan-id 5
 
-# Список всех сканов
+# List all scans
 python3 ydm.py report scan-list --limit 20
 ```
 
 ## Configuration
 
-### Переменные окружения
+### Environment variables
 
-Создайте файл `.env` в корне проекта:
+Create a `.env` file at the project root:
 ```
 YANDEX_DISK_TOKEN=your_oauth_token_here
 ```
 
-### Конфигурационные профили
+### Configuration profiles
 
-Проект поддерживает профили конфигурации в `ydm_config.json`:
+The project supports configuration profiles in `ydm_config.json`:
 
-- **prod** (по умолчанию) - для стабильной работы с редкими checkpoints
-- **test** - для быстрого тестирования с частыми checkpoints
+- **prod** (default) - stable operation with infrequent checkpoints
+- **test** - fast testing with frequent checkpoints
 
-Использование:
+Usage:
 ```bash
-# Production профиль (по умолчанию)
+# Production profile (default)
 python3 ydm.py scan cloud --progress
 
-# Test профиль (быстрые checkpoints)
+# Test profile (fast checkpoints)
 python3 ydm.py --config-profile test scan cloud --progress
 ```
 
 ## Usage Examples
 
-### Полный workflow сканирования
+### Full scan workflow
 
 ```bash
-# 1. Начать новое сканирование
+# 1. Start a new scan
 python3 ydm.py scan cloud --progress 2>&1 | tee scan.log &
 
-# 2. Мониторить прогресс
+# 2. Monitor progress
 tail -f scan.log | jq -r 'select(.status=="progress") | "\(.scanned) files - \(.current)"'
 
-# 3. При необходимости - безопасно прервать (Ctrl+C или kill -TERM)
-# Данные автоматически сохранятся на диск
+# 3. Safely interrupt if needed (Ctrl+C or kill -TERM)
+# Data is checkpointed to disk automatically
 
-# 4. Продолжить позже
+# 4. Resume later
 python3 ydm.py scan cloud --resume --progress
 ```
 
-### Сравнение облако vs локально
+### Cloud vs local diff
 
 ```bash
-# 1. Сканировать облако
+# 1. Scan the cloud
 python3 ydm.py scan cloud --progress
 
-# 2. Сканировать локальную копию
+# 2. Scan the local mirror
 python3 ydm.py scan local --path /data/ya_disk
 
-# 3. Сравнить результаты
+# 3. Compare results
 python3 ydm.py report diff
 ```
 
-### Поиск проблем
+### Finding problems
 
 ```bash
-# Найти файлы с длинными путями (>240 символов)
+# Find files with long paths (>240 chars)
 python3 ydm.py report long-paths --scan-id 5 --limit-chars 240
 
-# Найти дубликаты файлов
+# Find duplicate files
 python3 ydm.py report duplicates --scan-id 5
 
-# Анализ целостности скана
+# Analyze scan integrity
 python3 ydm.py report analyze-scan --scan-id 5
 ```
 
-## Simple Sync Tools (переходные)
+## Simple Sync Tools (transitional)
 
-Переходные CLI‑утилиты для управления синхронизацией через `exclude-dirs`
-и просмотра дерева синхронизации (работают по снимку из `monitor.db`,
-без сканирования облака во время выполнения).
+Transitional CLI utilities for managing sync via `exclude-dirs` and
+viewing the sync tree (work off a `monitor.db` snapshot, no cloud scan
+during execution).
 
-### Просмотр дерева синхронизации
+### View the sync tree
 ```bash
-# Свернутое дерево (JSON по умолчанию)
-python3 tools/sync_tree.py --path /DAO --depth 2
+# Collapsed tree (JSON by default)
+python3 tools/sync_tree.py --path /Projects --depth 2
 
-# Полное дерево с ветками (text)
-python3 tools/sync_tree.py --path /DAO --depth 2 --format text --text-tree --show-all
+# Full tree with branches (text)
+python3 tools/sync_tree.py --path /Projects --depth 2 --format text --text-tree --show-all
 
-# Без заголовка в text
+# Without the text header
 python3 tools/sync_tree.py --format text --text-tree --no-text-header
 
-# Отключить локальный скан и sync_percent
+# Disable the local scan and sync_percent
 python3 tools/sync_tree.py --no-local-scan --no-sync-percent
 ```
 
-### Управление exclude-dirs
+### Managing exclude-dirs
 ```bash
-# Список exclude-dirs
+# List exclude-dirs
 python3 tools/sync_exclude.py list
 
-# Dry-run: включить подпапку
-python3 tools/sync_exclude.py add --path /DAO/2
+# Dry-run: include a subfolder
+python3 tools/sync_exclude.py add --path /Projects/2024
 
-# Применить изменения
-python3 tools/sync_exclude.py add --path /DAO/2 --apply
+# Apply the change
+python3 tools/sync_exclude.py add --path /Projects/2024 --apply
 
-# Исключить папку
-python3 tools/sync_exclude.py remove --path /DAO/2 --apply
+# Exclude a folder
+python3 tools/sync_exclude.py remove --path /Projects/2024 --apply
 
-# Текстовый вывод без заголовка
-python3 tools/sync_exclude.py add --path /DAO/2 --format text --no-text-header
+# Text output without the header
+python3 tools/sync_exclude.py add --path /Projects/2024 --format text --no-text-header
 
-# Отключить рестарт демона и локальный скан
-python3 tools/sync_exclude.py add --path /DAO/2 --apply --no-restart-daemon --no-local-scan
+# Skip the daemon restart and local scan
+python3 tools/sync_exclude.py add --path /Projects/2024 --apply --no-restart-daemon --no-local-scan
 ```
 
-### Управление синком без демона (`--backend rclone`)
+### Managing sync without a daemon (`--backend rclone`)
 
-Для окружений без `yandex-disk` (см. [Rclone Backend](tasks/rclone_backend/README.md))
-`tools/sync_exclude.py` заменяется на `tools/sync_filters.py` — тот же UX
-(dry-run по умолчанию, `--apply` для применения), но вместо правки
-`config.cfg`+рестарта демона — правка rclone filter-file + `rclone copy`
-материализация:
+For environments without `yandex-disk` (see [Rclone Backend](tasks/rclone_backend/README.md)),
+`tools/sync_exclude.py` is replaced by `tools/sync_filters.py` — same UX
+(dry-run by default, `--apply` to apply), but instead of editing
+`config.cfg` + restarting the daemon, it edits an rclone filter-file and
+materializes via `rclone copy`:
 
 ```bash
-# Список включённых в синк папок
+# List folders currently included in sync
 python3 tools/sync_filters.py list --local-root /path/to/local/mirror
 
-# Dry-run: включить папку
-python3 tools/sync_filters.py add --path /DAO --local-root /path/to/local/mirror
+# Dry-run: include a folder
+python3 tools/sync_filters.py add --path /Projects --local-root /path/to/local/mirror
 
-# Применить — материализует локально через rclone copy
-python3 tools/sync_filters.py add --path /DAO --local-root /path/to/local/mirror --apply
+# Apply — materializes locally via rclone copy
+python3 tools/sync_filters.py add --path /Projects --local-root /path/to/local/mirror --apply
 
-# Убрать из синка; --delete-local чистит содержимое только после
-# чистого `rclone check` (0 расхождений)
-python3 tools/sync_filters.py remove --path /DAO --local-root /path/to/local/mirror --apply --delete-local
+# Remove from sync; --delete-local only clears local contents after a
+# clean `rclone check` (0 differences)
+python3 tools/sync_filters.py remove --path /Projects --local-root /path/to/local/mirror --apply --delete-local
 ```
 
-`tools/sync_tree.py` тоже поддерживает `--backend rclone` (по умолчанию —
-`api`, поведение не меняется): при `--backend rclone` дерево строится по
-filter-file вместо `config.cfg`.
+`tools/sync_tree.py` also supports `--backend rclone` (default is `api`,
+unchanged behavior): with `--backend rclone` the tree is built from the
+filter-file instead of `config.cfg`.
 
-JSON‑контракт (версии):
+JSON contract (schema versions):
 - `sync_tree` → `"schema": "sync_tree:v1"`
 - `sync_exclude` → `"schema": "sync_exclude:v1"`
 - `sync_filters` → `"schema": "sync_filters:v1"`
 
-Примечания:
-- По умолчанию `sync_tree` запускает локальный скан и считает `sync_percent`.
-- По умолчанию `sync_exclude --apply` перезапускает демон и запускает локальный скан.
-- `sync_filters --apply` ничего не перезапускает (демона нет) — сразу гоняет `rclone copy`.
+Notes:
+- By default `sync_tree` runs a local scan and computes `sync_percent`.
+- By default `sync_exclude --apply` restarts the daemon and runs a local scan.
+- `sync_filters --apply` never restarts anything (no daemon) — it runs `rclone copy` directly.
 
-## Алиасы (system ~/.bashrc)
+## Shell aliases (`~/.bashrc`)
 
-### Что добавлено
-Алиасы и функции добавлены в `~/.bashrc` для частых сценариев:
-- `ydm-scan-cloud` — полный cloud scan
-- `ydm-scan-cloud-path <path>` — cloud scan папки
-- `ydm-scan-local` — local scan для `/data/ya_disk`
-- `ydm-tree` — дерево синка (text + ветки)
-- `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
-- `ydm-sync-add <path>` — добавить папку в sync
-- `ydm-sync-rm <path>` — убрать папку из sync
-- `ydm-help` — краткая подсказка
+### What's added
+Aliases and functions for common workflows, added to `~/.bashrc`:
+- `ydm-scan-cloud` — full cloud scan
+- `ydm-scan-cloud-path <path>` — cloud scan of one folder
+- `ydm-scan-local` — local scan of `/data/ya_disk`
+- `ydm-tree` — sync tree (text + branches)
+- `ydm-tree-path <path> [depth]` — sync tree for one folder, with depth
+- `ydm-sync-add <path>` — add a folder to sync
+- `ydm-sync-rm <path>` — remove a folder from sync
+- `ydm-help` — short cheat sheet
 
-### Важно
-- `ydm-sync-add` и `ydm-sync-rm` **выполняют `--apply` напрямую**.  
-  Это значит, что изменение `exclude-dirs` применяется сразу, а затем
-  запускается рестарт демона и локальный скан (по умолчанию в `sync_exclude`).
+### Important
+- `ydm-sync-add` and `ydm-sync-rm` **run with `--apply` directly**.
+  The `exclude-dirs` change is applied immediately, followed by a daemon
+  restart and a local scan (the `sync_exclude` defaults).
 
-### Примеры
+### Examples
 ```bash
 ydm-tree-path /video 3
-ydm-scan-cloud-path /DAO
-ydm-sync-add /DAO/2
+ydm-scan-cloud-path /Projects
+ydm-sync-add /Projects/2024
 ```
 
-### Как применить
+### Applying changes
 ```bash
 source ~/.bashrc
 ```
 ## Documentation
 
-- **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Полная документация проекта, архитектура, детали реализации
-- **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Быстрый старт для AI-ассистентов и автоматизации
-- **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Дополнительные примеры использования
-- **[Sync Manager](tasks/sync_manager/README.md)** - Переходные инструменты sync_tree/sync_exclude и планы Sync Manager
-- **[Rclone Backend](tasks/rclone_backend/README.md)** - Альтернатива демону `yandex-disk` для окружений без него (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup через rclone
+- **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Full project documentation, architecture, implementation details
+- **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Quick start for AI assistants and automation
+- **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples
+- **[Sync Manager](tasks/sync_manager/README.md)** - Transitional sync_tree/sync_exclude tools and Sync Manager plans
+- **[Rclone Backend](tasks/rclone_backend/README.md)** - Alternative to the `yandex-disk` daemon for environments without it (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup via rclone
 
-## Файловая структура проекта
+## Project layout
 
-Основные директории и файлы:
+Main files:
 
-- `ydm.py` — основной CLI-инструмент (инициализация БД, сканы, отчеты)
-- `ydm_config.json` — конфигурация профилей (prod/test)
-- `monitor.db` — основная SQLite-база (результаты сканирования)
-- `README.md`, `LICENSE`, `.env.example` — документация и пример конфига
+- `ydm.py` — the core CLI tool (DB init, scans, reports)
+- `ydm_config.json` — profile configuration (prod/test)
+- `monitor.db` — the main SQLite database (scan results)
+- `README.md`, `LICENSE`, `.env.example` — docs and a sample config
 
-Папки верхнего уровня:
+Top-level folders:
 
-- `docs/` — общая документация по проекту
-  - `PROJECT_YD_MONITOR.md` — архитектура и детали реализации
-  - `QUICKSTART_AI.md` — быстрый старт для AI/скриптов
-  - `USAGE_EXAMPLES.md` — примеры использования
-  - `issues/` — исторические отчеты и разбор проблем
-  - `long_names/` — вспомогательные материалы для задачи длинных путей
-- `tasks/` — задачи/подпроекты поверх ядра
-  - `tasks/junk/` — задача очистки мусора:
-    - `plan_cleanup.py` — генерация плана удаления (`var/junk_list.txt`)
-    - `run_cleanup.py` — выполнение плана (`--backend api|rclone`, `var/deleted.log`)
-    - `smart_clean.py` — комбинированный скрипт анализа и очистки
-    - `analyze_junk.py`, `CLEANUP_GUIDE.md`, `JUNK_REPORT.md` — аналитика и документация по cleanup
-  - `tasks/long_names/` — задача про длинные пути:
+- `docs/` — general project documentation
+  - `PROJECT_YD_MONITOR.md` — architecture and implementation details
+  - `QUICKSTART_AI.md` — quick start for AI/automation
+  - `USAGE_EXAMPLES.md` — usage examples
+  - `issues/` — historical reports and issue write-ups
+  - `long_names/` — supporting materials for the long-paths task
+- `tasks/` — tasks/subprojects built on the core
+  - `tasks/junk/` — junk-cleanup task:
+    - `plan_cleanup.py` — generates a deletion plan (`var/junk_list.txt`)
+    - `run_cleanup.py` — executes the plan (`--backend api|rclone`, `var/deleted.log`)
+    - `smart_clean.py` — combined analyze+clean script
+    - `analyze_junk.py`, `CLEANUP_GUIDE.md`, `JUNK_REPORT.md` — cleanup analytics and docs
+  - `tasks/long_names/` — long-paths task:
     - `ISSUE_LONG_FILENAMES.md`, `RESULTS_AND_PLAN.md`
-  - `tasks/rclone_backend/` — альтернатива демону `yandex-disk` через rclone
-    (для окружений вроде arm64, где официальный клиент не работает)
-- `tools/` — вспомогательные утилиты
-  - `gen_exclude_list.py` — генерация строки `exclude-dirs=` для конфига Yandex.Disk
-  - `sync_tree.py` — дерево синхронизации по снимку (JSON/text; `--backend api|rclone`)
-  - `sync_exclude.py` — add/remove/list для `exclude-dirs` (демон, dry-run по умолчанию)
-  - `sync_filters.py` — add/remove/list для rclone filter-file (без демона, dry-run по умолчанию)
-  - `sync_common.py` — общий код для sync‑утилит
-- `tests/` — тестовые скрипты:
-  - `test_scan.sh` — интеграционный тест сканирования с tmpfs
-  - `test_ydm_fixes.sh` — набор регрессионных тестов для `ydm.py`
-- `assets/` — медиа/схемы:
-  - `poligon_endpoints.png` — схема эндпоинтов (исторически)
-- `var/` — рабочие данные и артефакты:
-  - `junk_list.txt` — текущий план очистки
-  - `deleted.log` — журнал фактически удаленных путей
-  - вспомогательные файлы (`*.db`, `*.json`, `*.old`) — временные и диагностические данные
+  - `tasks/rclone_backend/` — `yandex-disk` daemon alternative via rclone
+    (for environments like arm64 where the official client doesn't work)
+- `tools/` — supporting utilities
+  - `gen_exclude_list.py` — generates an `exclude-dirs=` config string for Yandex Disk
+  - `sync_tree.py` — sync tree from a snapshot (JSON/text; `--backend api|rclone`)
+  - `sync_exclude.py` — add/remove/list for `exclude-dirs` (daemon, dry-run by default)
+  - `sync_filters.py` — add/remove/list for the rclone filter-file (no daemon, dry-run by default)
+  - `sync_common.py` — shared code for the sync utilities
+- `tests/` — test scripts:
+  - `test_scan.sh` — integration test of scanning on tmpfs
+  - `test_ydm_fixes.sh` — regression suite for `ydm.py`
+- `assets/` — media/diagrams:
+  - `poligon_endpoints.png` — API endpoint diagram (historical)
+- `var/` — runtime data and artifacts:
+  - `junk_list.txt` — the current cleanup plan
+  - `deleted.log` — log of actually-deleted paths
+  - other files (`*.db`, `*.json`, `*.old`) — temporary/diagnostic data
 
 ## Architecture
 
-Проект использует двухуровневое хранилище для баланса производительности и безопасности:
+The project uses a two-tier storage design to balance performance and safety:
 
-1. **RAM DB (tmpfs)** - временное хранилище в памяти для быстрого сканирования
-2. **Disk DB (monitor.db)** - постоянное хранилище с периодическими checkpoints
+1. **RAM DB (tmpfs)** - temporary in-memory storage for fast scanning
+2. **Disk DB (monitor.db)** - persistent storage with periodic checkpoints
 
-Подробнее об архитектуре см. [PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md).
+See [PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md) for more on the architecture.
 
 ## Command Reference
 
 ### Global Flags
-- `--db-path PATH` - путь к базе данных (по умолчанию: `monitor.db`)
-- `--format {text|json}` - формат вывода (по умолчанию: `text`)
-- `--config-profile {prod|test}` - профиль конфигурации (по умолчанию: `prod`)
-- `--backend {api|rclone}` - источник данных для `scan meta`/`scan cloud`
-  (по умолчанию: `api`, требует `YANDEX_DISK_TOKEN`; `rclone` — через
-  `rclone.conf`, см. [`tasks/rclone_backend/README.md`](tasks/rclone_backend/README.md))
+- `--db-path PATH` - path to the database (default: `monitor.db`)
+- `--format {text|json}` - output format (default: `text`)
+- `--config-profile {prod|test}` - configuration profile (default: `prod`)
+- `--backend {api|rclone}` - data source for `scan meta`/`scan cloud`
+  (default: `api`, requires `YANDEX_DISK_TOKEN`; `rclone` — via
+  `rclone.conf`, see [`tasks/rclone_backend/README.md`](tasks/rclone_backend/README.md))
 
 ### Scan Commands
-- `scan meta` - быстрая метаинформация о диске
-- `scan cloud [--path PATH] [--progress] [--resume] [--scan-id ID]` - сканирование облака
-- `scan local [--path PATH]` - сканирование локальной файловой системы
+- `scan meta` - quick disk metadata
+- `scan cloud [--path PATH] [--progress] [--resume] [--scan-id ID]` - scan the cloud
+- `scan local [--path PATH]` - scan the local filesystem
 
 ### Report Commands
-- `report status` - последние сканы
-- `report diff` - сравнение cloud vs local
-- `report scan-list [--limit N]` - список всех сканов
-- `report scan-info --scan-id ID` - детали скана
-- `report scan-progress --scan-id ID` - прогресс скана
-- `report long-paths --scan-id ID [--limit-chars N]` - файлы с длинными путями
-- `report duplicates --scan-id ID [--by-hash|--by-name]` - поиск дубликатов
-- `report analyze-scan --scan-id ID` - анализ целостности
+- `report status` - recent scans
+- `report diff` - cloud vs local diff
+- `report scan-list [--limit N]` - list all scans
+- `report scan-info --scan-id ID` - scan details
+- `report scan-progress --scan-id ID` - scan progress
+- `report long-paths --scan-id ID [--limit-chars N]` - files with long paths
+- `report duplicates --scan-id ID [--by-hash|--by-name]` - find duplicates
+- `report analyze-scan --scan-id ID` - integrity analysis
 
-Полный список команд: `python3 ydm.py --help`
+Full command list: `python3 ydm.py --help`
 
 ## License
 
-MIT License - см. [LICENSE](LICENSE) файл для деталей.
+MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-Вклад приветствуется! Пожалуйста, создавайте issues и pull requests.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Notes
 
-- Проект использует только стандартную библиотеку Python (stdlib), без внешних зависимостей
-- Все данные хранятся локально в SQLite базе данных
-- Токены и секреты никогда не коммитятся в репозиторий (используйте `.env` файл)
-
+- The project uses only the Python standard library (stdlib), no external dependencies
+- All data is stored locally in a SQLite database
+- Tokens and secrets are never committed to the repository (use a `.env` file)
