@@ -250,6 +250,8 @@ Phase 4:
 ## Rename Cloud Policy
 
 `rename_cloud_plan` is intentionally not part of the MVP apply path.
+The broader fast rename/move design lives in
+[`FAST_RENAME_MOVE.md`](FAST_RENAME_MOVE.md).
 
 For the first version it may be a report/stub:
 

@@ -603,6 +603,31 @@ repair они существуют локально с safe-lookalike имена
       по `/sdcard/Download/ya_disk.bisync.filters` завершились успешно;
       `pro/agents` остался `download_only`.
 
+### Этап 9 — Fast rename/move path
+
+**Открыто (14.07.2026).** Design/backlog:
+[`FAST_RENAME_MOVE.md`](FAST_RENAME_MOVE.md).
+
+Причина: ручной round-trip тест показал, что `rclone bisync` трактует
+локальный rename как delete+upload. Для маленького файла это заняло
+~8.5 минут из-за ожидания Yandex Disk delete. При этом `rclone backend
+features yandex:` показывает `Move: true` и `DirMove: true`, значит нужен
+явный fast-path через server-side move.
+
+- [ ] Реализовать `tools/sync_rename.py plan|apply` на базе
+      `rclone moveto` для policy-safe `bidirectional` путей.
+- [ ] Проверить preconditions: оба пути внутри одного `bidirectional` root,
+      source существует локально/удалённо, target не существует локально/
+      удалённо, target name проходит risk checks.
+- [ ] После apply выполнять или предлагать `sync_bisync.py run --apply`
+      против `.bisync.filters`; отдельно проверить, не нужен ли `resync`.
+- [ ] Измерить latency `rclone moveto` против текущего `bisync` rename
+      (~8.5 минут).
+- [ ] Добавить durable `var/rename.log`.
+- [ ] Позже: bulk rename plan (`plan-bulk|apply-bulk`), local rename
+      detector, direct Yandex API fallback, Android normalization plan для
+      risky `download_only` путей.
+
 ---
 
 ## 6. Примеры использования (целевой UX, после реализации)
@@ -665,3 +690,6 @@ python3 ydm.py sync remove --path /Projects/2024 --apply
 - (Этап 8) До внедрения policy-aware filters нельзя автоматически делать
   `resync --apply` после добавления рискованных Android-путей: это может
   привести к cloud rename/delete-upload циклу из-за локально sanitized имён.
+- (Этап 9) Обычный `bisync` не оптимизирует rename: он видит локальное
+  переименование как delete старого имени + upload нового. Для частых или
+  массовых переименований нужен отдельный `rclone moveto`/API fast-path.
