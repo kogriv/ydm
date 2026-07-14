@@ -636,6 +636,9 @@ features yandex:` показывает `Move: true` и `DirMove: true`, знач
 - [x] Реализован v1 observe: `sync_rename.py detect`, candidate log/state,
       `apply-detected`, shell wrappers `ydm-rename-*`, scheduled Termux job
       запускает detector перед обычным `bisync run` без блокировки sync.
+- [x] Спланирован полный стек `guard/auto`: `rename_policy.json`,
+      `preflight` decision contract, quiet status, Termux notification,
+      root-level mode, batch auto-apply с одним финальным `resync`.
 - [ ] Позже: bulk rename plan (`plan-bulk|apply-bulk`), direct Yandex API
       fallback, Android normalization plan для risky `download_only` путей.
 

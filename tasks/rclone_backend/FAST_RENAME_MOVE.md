@@ -441,6 +441,211 @@ Risks:
 Decision: keep this as a later feature. Do not mix it into ordinary fast
 rename MVP.
 
+## Guard/Auto Implementation Plan
+
+Status: planned. `observe` v1 is implemented and enabled in the scheduled
+Termux job. The next implementation should add the full safety stack now, but
+keep `auto` opt-in rather than the silent default.
+
+### Mode Semantics
+
+`observe`:
+
+- Always allow the normal scheduled `bisync run`.
+- Write candidates and decision logs.
+- Never notify unless detector itself crashes repeatedly.
+
+`guard`:
+
+- Allow normal `bisync run` when there are no candidates.
+- Allow normal `bisync run` when only high-confidence candidates exist and
+  `auto` is not enabled. This preserves data correctness while still surfacing
+  the faster manual path.
+- Block normal `bisync run` when any `review` or `blocked` candidate exists.
+- Send a Termux notification with the short reason and point to
+  `ydm-rename-status`.
+
+`auto`:
+
+- Auto-apply all high-confidence file candidates.
+- Run one `sync_bisync.py resync --apply` after all successful server-side
+  moves, not after each candidate.
+- Block normal `bisync run` if any review/blocked candidate remains.
+- If all high-confidence candidates are applied and no ambiguous candidates
+  remain, skip normal `bisync run` because the final `resync` already refreshed
+  the baseline.
+
+Default rollout:
+
+```text
+repo default: observe
+recommended user default after implementation: guard
+auto: explicit opt-in only
+```
+
+### Configuration
+
+Add `var/rename_policy.json`:
+
+```json
+{
+  "schema": "ydm_rename_policy:v1",
+  "default_mode": "guard",
+  "max_auto_candidates": 10,
+  "roots": {
+    "DAO": {"mode": "guard"},
+    "pro/mathcoach": {"mode": "guard"},
+    "video/Obsidian": {"mode": "guard"}
+  }
+}
+```
+
+Rules:
+
+- If the file is absent, use built-in default `observe`.
+- Root setting overrides `default_mode`.
+- `download_only` and `disabled` policy roots are never eligible for auto.
+- `auto` is accepted only for file candidates with `confidence=high`.
+
+Commands:
+
+```bash
+python3 tools/sync_rename.py policy-status
+python3 tools/sync_rename.py policy-set --mode guard
+python3 tools/sync_rename.py policy-set --path /DAO --mode auto
+```
+
+Wrappers:
+
+```bash
+ydm-rename-policy
+ydm-rename-policy-set guard
+ydm-rename-policy-set auto /DAO
+```
+
+### Scheduled Job Contract
+
+Add a single command that the Termux job can call:
+
+```bash
+python3 tools/sync_rename.py preflight --local-root /sdcard/Download/ya_disk --format json
+```
+
+Output contract:
+
+```json
+{
+  "schema": "ydm_rename_preflight:v1",
+  "mode": "guard",
+  "decision": "allow_bisync|skip_bisync|block_bisync",
+  "reason": "no_candidates|high_only|auto_applied|ambiguous_candidates|error",
+  "summary": {"high": 0, "review": 0, "blocked": 0, "applied": 0},
+  "notify": true
+}
+```
+
+Termux job logic:
+
+```bash
+preflight_json=$(python3 tools/sync_rename.py preflight --format json ...)
+decision=$(printf '%s' "$preflight_json" | python3 -c '...')
+case "$decision" in
+  allow_bisync) python3 tools/sync_bisync.py run --apply ... ;;
+  skip_bisync)  exit 0 ;;
+  block_bisync) termux-notification ...; exit 0 ;;
+  *)            python3 tools/sync_bisync.py run --apply ... ;;
+esac
+```
+
+Failure policy:
+
+- `observe`: fail-open to normal `bisync run`.
+- `guard`/`auto`: fail-closed only when detector completed and found
+  ambiguous candidates. If detector crashes before producing a decision,
+  fail-open but log and notify.
+
+### Status UX
+
+Make `status` quiet by default:
+
+```text
+rename preflight: guard
+last detect: 2 candidates, 1 high, 1 review
+bisync decision: block_bisync ambiguous_candidates
+
+AUTO  98cb0ecc DAO/a.txt -> DAO/b.txt     md5 match
+HOLD  61fa...  DAO/x.txt -> DAO/y.txt     ambiguous_same_size_candidates
+
+next: ydm-rename-status --show 61fa
+```
+
+Add:
+
+```bash
+python3 tools/sync_rename.py status --show CANDIDATE_ID
+python3 tools/sync_rename.py status --verbose
+python3 tools/sync_rename.py status --jsonl
+```
+
+Default `status` must not print old verbose `rename.log` entries. Show only:
+
+- policy mode;
+- last detect summary;
+- current bisync state;
+- current candidates;
+- next action.
+
+### Auto Apply Details
+
+Implementation shape:
+
+- Reuse existing `apply-detected` remote-only flow.
+- Add `apply_candidates(candidates)` helper that:
+  - validates all candidates before the first move;
+  - rejects duplicate remote targets;
+  - rejects more than `max_auto_candidates`;
+  - performs `rclone moveto` for each candidate;
+  - runs exactly one final `sync_bisync.py resync --apply`.
+- If any remote move fails, stop immediately, log partial state, notify, and
+  block further normal `bisync run` until `ydm-rename-status` is inspected.
+
+Do not auto-apply:
+
+- directories;
+- `review` or `blocked` candidates;
+- candidates under `download_only`;
+- candidates where local new file disappeared after detection;
+- candidates where remote old/new state changed since detection.
+
+### Notifications
+
+Use `termux-notification` when available:
+
+```text
+title: ydm rename preflight
+content: blocked: 1 ambiguous candidate; run ydm-rename-status
+```
+
+Notification events:
+
+- guard blocked scheduled bisync;
+- auto applied one or more candidates;
+- auto failed after partial move;
+- detector crashed in scheduled job.
+
+Do not notify on routine zero-candidate observe/guard runs.
+
+### Acceptance Criteria
+
+- `observe` behavior remains backward compatible and fail-open.
+- `guard` blocks scheduled `bisync run` only for review/blocked candidates.
+- `auto` applies only high-confidence file candidates, then performs one
+  final `resync`.
+- `ydm-rename-status` is readable on a phone-width terminal.
+- `sync_bisync.py status` shows `resync_needed: False` after auto applies.
+- Termux scheduled job handles all decisions without requiring interactive
+  input.
+
 ## Safety Rules
 
 - Dry-run by default.
@@ -516,10 +721,20 @@ Scheduled job tests:
 - [x] Add candidate ids and `var/rename_candidates.jsonl`.
 - [x] Add `apply-detected` for one reviewed candidate.
 - [x] Add scheduled-job preflight in `observe` mode.
+- [ ] Add `var/rename_policy.json` with default/root mode config.
+- [ ] Add `policy-status` and `policy-set` commands.
+- [ ] Add root-level policy mode resolution for detect/preflight.
+- [ ] Add `preflight` command with `allow_bisync|skip_bisync|block_bisync`
+      decision contract.
+- [ ] Make `status` quiet by default; add `--show` and `--verbose`.
 - [ ] Add scheduled-job preflight `guard` mode with Termux notification.
+- [ ] Update Termux scheduled job to consume the `preflight` decision instead
+      of ignoring detect output.
 - [ ] Add scheduled-job preflight `auto` mode for high-confidence file
       candidates only.
-- [ ] Add root-level policy knob for rename preflight mode.
+- [ ] Add batch auto-apply helper with one final `resync`.
+- [ ] Add partial-failure state and recovery guidance for auto mode.
+- [ ] Add `ydm-rename-policy*` wrappers.
 - [ ] Add ambiguity handling and narrow-screen `ydm-rename-status` output.
 - [ ] Add directory rename detection as review-only.
 - [ ] Validate whether Termux/Android shared storage emits usable file watcher
