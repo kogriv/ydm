@@ -633,6 +633,9 @@ features yandex:` показывает `Move: true` и `DirMove: true`, знач
       заблокировать ambiguous случай с понятным статусом. Подробный план:
       `FAST_RENAME_MOVE.md` → `User Flow Target`, `Detection Design`,
       `Scheduled Job Integration`, `Backlog`.
+- [x] Реализован v1 observe: `sync_rename.py detect`, candidate log/state,
+      `apply-detected`, shell wrappers `ydm-rename-*`, scheduled Termux job
+      запускает detector перед обычным `bisync run` без блокировки sync.
 - [ ] Позже: bulk rename plan (`plan-bulk|apply-bulk`), direct Yandex API
       fallback, Android normalization plan для risky `download_only` путей.
 

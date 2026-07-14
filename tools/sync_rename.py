@@ -9,8 +9,10 @@ bisync baseline.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -29,6 +31,7 @@ from tools.sync_common import (  # noqa: E402
     load_bisync_state,
     local_encoding_flags_for_path,
     run_command,
+    run_local_scan,
     var_path,
 )
 from tools.sync_policy import (  # noqa: E402
@@ -41,6 +44,7 @@ from ydm import DEFAULT_CONFIG  # noqa: E402
 
 
 SCHEMA = "ydm_sync_rename:v1"
+CANDIDATE_SCHEMA = "ydm_rename_candidate:v1"
 
 
 def default_bisync_filter_path(local_root: str) -> str:
@@ -51,6 +55,13 @@ def append_json_log(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", buffering=1) as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def write_json_file(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 def remote_path(remote: str, entry: str) -> str:
@@ -93,6 +104,12 @@ def rclone_lsjson(remote: str, entry: str, local_root: str) -> CommandResult:
     return run_command(cmd)
 
 
+def rclone_lsjson_hash(remote: str, entry: str, local_root: str) -> CommandResult:
+    cmd = ["rclone", "lsjson", remote_path(remote, entry), "--max-depth", "1", "--hash"]
+    cmd.extend(local_encoding_flags_for_path(local_root))
+    return run_command(cmd)
+
+
 def remote_exists(remote: str, entry: str, local_root: str) -> dict:
     result = rclone_lsjson(remote, entry, local_root)
     exists = result.returncode == 0
@@ -112,10 +129,220 @@ def remote_exists(remote: str, entry: str, local_root: str) -> dict:
     }
 
 
+def remote_info(remote: str, entry: str, local_root: str) -> dict:
+    result = rclone_lsjson_hash(remote, entry, local_root)
+    parsed: Any = None
+    if result.stdout:
+        try:
+            parsed = json.loads(result.stdout)
+        except ValueError:
+            parsed = None
+    item = None
+    if isinstance(parsed, list) and parsed:
+        item = parsed[0]
+    hashes = (item or {}).get("Hashes") or {}
+    return {
+        "exists": result.returncode == 0,
+        "cmd": result.cmd,
+        "returncode": result.returncode,
+        "stderr": result.stderr,
+        "item": item,
+        "md5": hashes.get("md5"),
+    }
+
+
 def rclone_moveto(remote: str, old_entry: str, new_entry: str, local_root: str) -> CommandResult:
     cmd = ["rclone", "moveto", remote_path(remote, old_entry), remote_path(remote, new_entry)]
     cmd.extend(local_encoding_flags_for_path(local_root))
     return run_command(cmd)
+
+
+def md5_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def latest_successful_local_scan_id(db_path: str) -> Optional[int]:
+    if not os.path.exists(db_path):
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM scans
+            WHERE scan_type = 'local' AND status = 'success'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row[0]) if row else None
+
+
+def load_scan_files(db_path: str, scan_id: int) -> Dict[str, dict]:
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT parent_path, name, type, COALESCE(size, 0), md5, modified
+            FROM files
+            WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    result: Dict[str, dict] = {}
+    for parent, name, file_type, size, md5, modified in rows:
+        entry = f"{parent.strip('/')}/{name}" if parent else name
+        result[entry] = {
+            "entry": entry,
+            "type": file_type,
+            "size": int(size or 0),
+            "md5": md5,
+            "modified": modified,
+        }
+    return result
+
+
+def candidate_id(old_entry: str, new_entry: str, previous_scan_id: int, current_scan_id: int) -> str:
+    raw = f"{previous_scan_id}:{current_scan_id}:{old_entry}->{new_entry}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def is_bisync_clean(args: argparse.Namespace) -> Tuple[bool, str]:
+    state = load_bisync_state()
+    current_hash = filter_file_hash(args.bisync_filter_path)
+    if not state.get("last_resync_filter_hash"):
+        return False, "no_successful_resync"
+    if current_hash != state.get("last_resync_filter_hash"):
+        return False, "filter_hash_changed"
+    if os.path.exists("/tmp/ydm_bisync.lock"):
+        return False, "bisync_lock_held"
+    if state.get("last_status") not in {"ok", None}:
+        return False, f"last_status_{state.get('last_status')}"
+    return True, "clean"
+
+
+def find_candidates(args: argparse.Namespace, previous_scan_id: int, current_scan_id: int) -> Tuple[List[dict], List[str]]:
+    warnings: List[str] = []
+    policy = load_policy(args.policy_path)
+    if not policy:
+        return [], [f"Policy not found: {args.policy_path}"]
+
+    previous = load_scan_files(args.db_path, previous_scan_id)
+    current = load_scan_files(args.db_path, current_scan_id)
+
+    deleted = [item for entry, item in previous.items() if entry not in current and item["type"] == "file"]
+    created = [item for entry, item in current.items() if entry not in previous and item["type"] == "file"]
+
+    by_key: Dict[Tuple[str, int], dict] = {}
+    for item in deleted:
+        root, mode = path_mode(policy, item["entry"])
+        by_key.setdefault((root or "", item["size"]), {"deleted": [], "created": [], "mode": mode})
+        by_key[(root or "", item["size"])]["deleted"].append(item)
+    for item in created:
+        root, mode = path_mode(policy, item["entry"])
+        by_key.setdefault((root or "", item["size"]), {"deleted": [], "created": [], "mode": mode})
+        by_key[(root or "", item["size"])]["created"].append(item)
+
+    bisync_clean, bisync_reason = is_bisync_clean(args)
+    candidates: List[dict] = []
+
+    for (root, size), group in sorted(by_key.items()):
+        if not group["deleted"] or not group["created"]:
+            continue
+        ambiguous = len(group["deleted"]) != 1 or len(group["created"]) != 1
+        for old_item in group["deleted"]:
+            for new_item in group["created"]:
+                old_entry = old_item["entry"]
+                new_entry = new_item["entry"]
+                old_root, old_mode = path_mode(policy, old_entry)
+                new_root, new_mode = path_mode(policy, new_entry)
+                reasons = ["same_size", "old_missing_local", "new_present_local"]
+                blockers: List[str] = []
+                confidence = "review"
+
+                if not old_root or not new_root:
+                    blockers.append("outside_policy")
+                elif old_root != new_root:
+                    blockers.append("different_policy_roots")
+                elif old_mode != "bidirectional" or new_mode != "bidirectional":
+                    blockers.append(f"policy_{old_mode}_to_{new_mode}")
+
+                if ambiguous:
+                    blockers.append("ambiguous_same_size_candidates")
+                if not bisync_clean:
+                    blockers.append(f"bisync_{bisync_reason}")
+
+                remote_old = remote_info(args.remote, old_entry, args.local_root)
+                remote_new = remote_exists(args.remote, new_entry, args.local_root)
+                if remote_old["exists"]:
+                    reasons.append("remote_old_exists")
+                else:
+                    blockers.append("remote_old_missing")
+                if not remote_new["exists"]:
+                    reasons.append("remote_new_missing")
+                else:
+                    blockers.append("remote_new_exists")
+
+                local_hash = None
+                remote_md5 = remote_old.get("md5")
+                if remote_md5 and not blockers:
+                    try:
+                        local_hash = md5_file(local_path(args.local_root, new_entry))
+                        if local_hash == remote_md5:
+                            reasons.append("md5_match")
+                            confidence = "high"
+                        else:
+                            blockers.append("md5_mismatch")
+                    except OSError as exc:
+                        blockers.append(f"local_hash_failed:{exc}")
+                elif not remote_md5:
+                    reasons.append("remote_md5_missing")
+
+                if blockers:
+                    confidence = "blocked" if any(
+                        item.startswith("policy_")
+                        or item in {
+                            "outside_policy",
+                            "different_policy_roots",
+                            "remote_new_exists",
+                            "remote_old_missing",
+                            "md5_mismatch",
+                        }
+                        for item in blockers
+                    ) else "review"
+
+                candidates.append({
+                    "schema": CANDIDATE_SCHEMA,
+                    "id": candidate_id(old_entry, new_entry, previous_scan_id, current_scan_id),
+                    "old": f"/{old_entry}",
+                    "new": f"/{new_entry}",
+                    "policy_root": old_root,
+                    "mode": old_mode,
+                    "size": size,
+                    "confidence": confidence,
+                    "reason": reasons,
+                    "blockers": blockers,
+                    "requires_review": confidence != "high",
+                    "local_md5": local_hash,
+                    "remote_md5": remote_md5,
+                    "previous_scan_id": previous_scan_id,
+                    "current_scan_id": current_scan_id,
+                    "created_at": datetime.now().isoformat(),
+                })
+
+    return candidates, warnings
 
 
 def run_followup_bisync(args: argparse.Namespace) -> Optional[CommandResult]:
@@ -361,6 +588,229 @@ def cmd_apply(args: argparse.Namespace) -> dict:
     return payload
 
 
+def cmd_detect(args: argparse.Namespace) -> dict:
+    previous_scan_id = latest_successful_local_scan_id(args.db_path)
+    payload = {
+        "schema": SCHEMA,
+        "action": "detect",
+        "mode": args.mode,
+        "dry_run": True,
+        "local_root": args.local_root,
+        "remote": args.remote,
+        "policy_path": args.policy_path,
+        "bisync_filter_path": args.bisync_filter_path,
+        "previous_scan_id": previous_scan_id,
+        "current_scan_id": None,
+        "local_scan": None,
+        "candidates": [],
+        "summary": {
+            "total": 0,
+            "high": 0,
+            "review": 0,
+            "blocked": 0,
+        },
+        "decision": {
+            "bisync": "allow",
+            "reason": "observe_mode",
+        },
+        "warnings": [],
+        "error": None,
+    }
+
+    if previous_scan_id is None:
+        payload["error"] = "No previous successful local scan found."
+        payload["decision"] = {"bisync": "allow", "reason": "observe_error"}
+        write_json_file(var_path("rename_preflight_state.json"), payload)
+        return payload
+
+    local_scan = run_local_scan(args.db_path, args.local_root)
+    payload["local_scan"] = vars(local_scan)
+    if not local_scan.started or local_scan.scan_id is None:
+        payload["error"] = f"Local scan failed: {local_scan.error}"
+        payload["decision"] = {"bisync": "allow", "reason": "observe_error"}
+        write_json_file(var_path("rename_preflight_state.json"), payload)
+        return payload
+
+    payload["current_scan_id"] = local_scan.scan_id
+    candidates, warnings = find_candidates(args, previous_scan_id, local_scan.scan_id)
+    payload["warnings"].extend(warnings)
+    payload["candidates"] = candidates
+    payload["summary"] = {
+        "total": len(candidates),
+        "high": sum(1 for item in candidates if item["confidence"] == "high"),
+        "review": sum(1 for item in candidates if item["confidence"] == "review"),
+        "blocked": sum(1 for item in candidates if item["confidence"] == "blocked"),
+    }
+
+    state_record = dict(payload)
+    write_json_file(var_path("rename_preflight_state.json"), state_record)
+    for candidate in candidates:
+        append_json_log(var_path("rename_candidates.jsonl"), {
+            "kind": "candidate",
+            "detected_at": datetime.now().isoformat(),
+            **candidate,
+        })
+    append_json_log(var_path("rename_candidates.jsonl"), {
+        "kind": "decision",
+        "detected_at": datetime.now().isoformat(),
+        "mode": args.mode,
+        "bisync": payload["decision"]["bisync"],
+        "reason": payload["decision"]["reason"],
+        "summary": payload["summary"],
+        "previous_scan_id": previous_scan_id,
+        "current_scan_id": local_scan.scan_id,
+    })
+    return payload
+
+
+def load_latest_candidates() -> List[dict]:
+    state_path = var_path("rename_preflight_state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r") as handle:
+                payload = json.load(handle)
+            return payload.get("candidates") or []
+        except (OSError, ValueError):
+            return []
+    return []
+
+
+def find_candidate_by_id(candidate_id_value: str) -> Optional[dict]:
+    for item in load_latest_candidates():
+        if item.get("id") == candidate_id_value:
+            return item
+    log_path = var_path("rename_candidates.jsonl")
+    if not os.path.exists(log_path):
+        return None
+    found = None
+    with open(log_path, "r") as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if item.get("kind") == "candidate" and item.get("id") == candidate_id_value:
+                found = item
+    return found
+
+
+def cmd_apply_detected(args: argparse.Namespace) -> dict:
+    candidate = find_candidate_by_id(args.candidate_id)
+    payload = {
+        "schema": SCHEMA,
+        "action": "apply-detected",
+        "dry_run": not args.apply,
+        "candidate_id": args.candidate_id,
+        "candidate": candidate,
+        "operations": [],
+        "results": None,
+        "warnings": [],
+        "error": None,
+    }
+    if not candidate:
+        payload["error"] = f"Candidate not found: {args.candidate_id}"
+        return payload
+    if candidate.get("confidence") == "blocked":
+        payload["error"] = f"Candidate is blocked: {', '.join(candidate.get('blockers') or [])}"
+        return payload
+
+    old_entry = normalize_entry(candidate["old"])
+    new_entry = normalize_entry(candidate["new"])
+    local_new = local_path(args.local_root, new_entry)
+    payload["operations"] = [
+        {
+            "type": "remote_moveto",
+            "cmd": ["rclone", "moveto", remote_path(args.remote, old_entry), remote_path(args.remote, new_entry)],
+        },
+        {
+            "type": f"bisync_{args.followup}",
+            "cmd": [
+                sys.executable,
+                str(ROOT_DIR / "tools" / "sync_bisync.py"),
+                args.followup,
+                "--apply",
+                "--filter-path",
+                args.bisync_filter_path,
+            ],
+        },
+    ]
+    if not args.apply:
+        return payload
+
+    if not os.path.exists(local_new):
+        payload["error"] = f"Local renamed file not found: {local_new}"
+        return payload
+    remote_old = remote_exists(args.remote, old_entry, args.local_root)
+    remote_new = remote_exists(args.remote, new_entry, args.local_root)
+    if not remote_old["exists"]:
+        payload["error"] = f"Remote source not found: {remote_path(args.remote, old_entry)}"
+        return payload
+    if remote_new["exists"]:
+        payload["error"] = f"Remote target already exists: {remote_path(args.remote, new_entry)}"
+        return payload
+
+    start = time.time()
+    move_start = time.time()
+    move_result = rclone_moveto(args.remote, old_entry, new_entry, args.local_root)
+    result_summary: Dict[str, Any] = {
+        "remote_moveto": {
+            "cmd": move_result.cmd,
+            "returncode": move_result.returncode,
+            "stdout": move_result.stdout,
+            "stderr": move_result.stderr,
+            "duration_sec": round(time.time() - move_start, 3),
+        },
+        "bisync": None,
+    }
+    if move_result.returncode != 0:
+        payload["error"] = f"Remote rclone moveto failed (returncode={move_result.returncode})"
+        payload["results"] = result_summary
+        append_json_log(var_path("rename.log"), {
+            "schema": SCHEMA,
+            "timestamp": datetime.now().isoformat(),
+            "action": "apply-detected",
+            "status": "error",
+            "candidate_id": args.candidate_id,
+            "old": candidate["old"],
+            "new": candidate["new"],
+            "duration_sec": round(time.time() - start, 3),
+            "error": payload["error"],
+            "results": result_summary,
+        })
+        return payload
+
+    bisync_result = run_followup_bisync(args)
+    result_summary["bisync"] = None if bisync_result is None else {
+        "cmd": bisync_result.cmd,
+        "returncode": bisync_result.returncode,
+        "stdout": bisync_result.stdout,
+        "stderr": bisync_result.stderr,
+    }
+    if bisync_result is not None and (
+        bisync_result.returncode != 0 or '"success": false' in bisync_result.stdout
+    ):
+        payload["error"] = (
+            "Remote rename succeeded, but follow-up bisync baseline refresh failed. "
+            "Run `python3 tools/sync_bisync.py status` and recover/resync before more changes."
+        )
+    payload["results"] = result_summary
+    payload["duration_sec"] = round(time.time() - start, 3)
+    write_json_file(var_path("rename_apply_last.json"), payload)
+    append_json_log(var_path("rename.log"), {
+        "schema": SCHEMA,
+        "timestamp": datetime.now().isoformat(),
+        "action": "apply-detected",
+        "status": "error" if payload["error"] else "ok",
+        "candidate_id": args.candidate_id,
+        "old": candidate["old"],
+        "new": candidate["new"],
+        "duration_sec": payload["duration_sec"],
+        "error": payload["error"],
+        "results": log_record({"results": result_summary}, "ok", start).get("results"),
+    })
+    return payload
+
+
 def log_record(payload: dict, status: str, start: float) -> dict:
     def compact_result(result: Optional[dict]) -> Optional[dict]:
         if not result:
@@ -413,6 +863,15 @@ def cmd_status(args: argparse.Namespace) -> dict:
             except ValueError:
                 tail.append({"raw": line.rstrip("\n")})
 
+    candidate_state = None
+    state_path = var_path("rename_preflight_state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r") as handle:
+                candidate_state = json.load(handle)
+        except (OSError, ValueError):
+            candidate_state = None
+
     policy = None
     try:
         policy = load_policy(args.policy_path)
@@ -430,6 +889,8 @@ def cmd_status(args: argparse.Namespace) -> dict:
         "bisync_filter_hash": filter_file_hash(args.bisync_filter_path),
         "bisync_state": load_bisync_state(),
         "policy_paths": policy.get("paths", {}) if policy else None,
+        "candidate_state_path": state_path,
+        "candidate_state": candidate_state,
         "log_path": log_path,
         "log_tail": tail,
         "warnings": [],
@@ -439,6 +900,21 @@ def cmd_status(args: argparse.Namespace) -> dict:
 
 def render(payload: dict, fmt: str) -> None:
     success = payload.get("error") is None
+    if fmt == "jsonl":
+        if payload.get("action") == "detect":
+            for candidate in payload.get("candidates") or []:
+                print(json.dumps({"kind": "candidate", **candidate}, ensure_ascii=False))
+            print(json.dumps({
+                "kind": "decision",
+                "success": success,
+                "mode": payload.get("mode"),
+                "summary": payload.get("summary"),
+                "decision": payload.get("decision"),
+                "error": payload.get("error"),
+            }, ensure_ascii=False))
+        else:
+            print(json.dumps({"success": success, "data": payload}, ensure_ascii=False))
+        return
     if fmt == "json":
         print(json.dumps({"success": success, "data": payload}, ensure_ascii=False, indent=2))
         return
@@ -446,8 +922,49 @@ def render(payload: dict, fmt: str) -> None:
     print(f"schema: {SCHEMA}")
     print(f"action: {payload.get('action')}")
     print(f"dry_run: {payload.get('dry_run')}")
+    if payload.get("mode"):
+        print(f"mode: {payload['mode']}")
     if payload.get("error"):
         print(f"error: {payload['error']}")
+    if payload.get("summary") is not None:
+        summary = payload["summary"]
+        print(
+            "rename candidates: "
+            f"{summary.get('total', 0)} total, "
+            f"{summary.get('high', 0)} high, "
+            f"{summary.get('review', 0)} review, "
+            f"{summary.get('blocked', 0)} blocked"
+        )
+    if payload.get("decision"):
+        decision = payload["decision"]
+        print(f"bisync: {decision.get('bisync')} ({decision.get('reason')})")
+    if payload.get("candidates"):
+        print("candidates:")
+        for item in payload["candidates"][:20]:
+            label = {
+                "high": "AUTO",
+                "review": "HOLD",
+                "blocked": "BLOCK",
+            }.get(item.get("confidence"), "HOLD")
+            reasons = ",".join(item.get("blockers") or item.get("reason") or [])
+            print(f"- {label} {item['id']} {item['old']} -> {item['new']} [{reasons}]")
+    if payload.get("candidate_state"):
+        state = payload["candidate_state"]
+        summary = state.get("summary") or {}
+        print(
+            "last detect: "
+            f"prev={state.get('previous_scan_id')} current={state.get('current_scan_id')} "
+            f"candidates={summary.get('total', 0)} "
+            f"high={summary.get('high', 0)} review={summary.get('review', 0)} blocked={summary.get('blocked', 0)}"
+        )
+        for item in (state.get("candidates") or [])[:20]:
+            label = {
+                "high": "AUTO",
+                "review": "HOLD",
+                "blocked": "BLOCK",
+            }.get(item.get("confidence"), "HOLD")
+            reasons = ",".join(item.get("blockers") or item.get("reason") or [])
+            print(f"  {label} {item['id']} {item['old']} -> {item['new']} [{reasons}]")
     if payload.get("old"):
         print(f"old: {payload['old']}")
         print(f"new: {payload['new']}")
@@ -490,7 +1007,7 @@ def parse_args() -> argparse.Namespace:
 
     def common_flags(sub):
         sub.add_argument("--db-path", default="monitor.db", help="Path to SQLite DB")
-        sub.add_argument("--format", choices=["json", "text"], default="text")
+        sub.add_argument("--format", choices=["json", "jsonl", "text"], default="text")
         sub.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
         sub.add_argument("--policy-path", default=default_policy_path())
@@ -519,6 +1036,19 @@ def parse_args() -> argparse.Namespace:
     apply_parser = subparsers.add_parser("apply", help="Apply local mv + remote rclone moveto + bisync resync")
     rename_flags(apply_parser)
 
+    detect_parser = subparsers.add_parser("detect", help="Detect local rename candidates before scheduled bisync")
+    common_flags(detect_parser)
+    detect_parser.add_argument("--mode", choices=["observe"], default="observe")
+
+    detected_parser = subparsers.add_parser("apply-detected", help="Apply a reviewed candidate from the latest detect run")
+    common_flags(detected_parser)
+    detected_parser.add_argument("--candidate-id", required=True)
+    detected_parser.add_argument("--apply", action="store_true", help="Actually apply; omitted means dry-run")
+    detected_parser.add_argument("--followup", choices=["resync", "none"], default="resync")
+    detected_parser.add_argument("--max-delete", type=int, default=20)
+    detected_parser.add_argument("--check-access", action=argparse.BooleanOptionalAction, default=True)
+    detected_parser.add_argument("--notify-on-error", action=argparse.BooleanOptionalAction, default=True)
+
     status_parser = subparsers.add_parser("status", help="Show recent rename log and bisync state")
     common_flags(status_parser)
 
@@ -534,6 +1064,10 @@ def main() -> None:
         payload = cmd_plan(args)
     elif args.command == "apply":
         payload = cmd_apply(args)
+    elif args.command == "detect":
+        payload = cmd_detect(args)
+    elif args.command == "apply-detected":
+        payload = cmd_apply_detected(args)
     else:
         payload = cmd_status(args)
     render(payload, args.format)

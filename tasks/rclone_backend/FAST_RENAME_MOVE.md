@@ -125,6 +125,10 @@ ydm_bisync_job.sh
   -> otherwise normal bisync run
 ```
 
+Implemented v1 note: scheduled job currently runs detector in `observe` mode
+before normal `bisync run`; detector failure is fail-open and does not block
+scheduled sync.
+
 Layer 5, optional: near-real-time watcher. This may use Termux-side tools
 if Android shared storage emits usable events. Treat watcher as an optimization,
 not the correctness foundation; polling/snapshot detection must still work.
@@ -505,13 +509,13 @@ Scheduled job tests:
       (`resync`; ordinary `run` creates conflict copies after out-of-band
       local+remote move).
 - [x] Add `var/rename.log`.
-- [ ] Add `ydm-rename` and `ydm-rename-status` wrappers for the explicit
-      command.
-- [ ] Add `sync_rename.py detect` with current-local vs previous-local scan
+- [x] Add `ydm-rename`, `ydm-rename-detect`, `ydm-rename-status`, and
+      `ydm-rename-apply` wrappers.
+- [x] Add `sync_rename.py detect` with current-local vs previous-local scan
       comparison.
-- [ ] Add candidate ids and `var/rename_candidates.jsonl`.
-- [ ] Add `apply-detected` for one reviewed candidate.
-- [ ] Add scheduled-job preflight in `observe` mode.
+- [x] Add candidate ids and `var/rename_candidates.jsonl`.
+- [x] Add `apply-detected` for one reviewed candidate.
+- [x] Add scheduled-job preflight in `observe` mode.
 - [ ] Add scheduled-job preflight `guard` mode with Termux notification.
 - [ ] Add scheduled-job preflight `auto` mode for high-confidence file
       candidates only.
