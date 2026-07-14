@@ -17,6 +17,14 @@ from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CON
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Android shared storage rejects several ASCII characters even though cloud
+# remotes can store them. Rclone's local backend can map these to lookalike
+# Unicode characters on disk and decode them back when comparing/uploading.
+ANDROID_SHARED_STORAGE_LOCAL_ENCODING = (
+    "Slash,LtGt,DoubleQuote,Colon,Question,Asterisk,Pipe,BackSlash,"
+    "Del,Ctl,InvalidUtf8,Dot"
+)
+
 
 @dataclass
 class CompositeSnapshot:
@@ -153,6 +161,11 @@ def load_sync_filters(filter_path: str) -> SyncFiltersResult:
                     continue
                 if line == "- **":
                     continue  # expected catch-all terminator
+                if line.startswith("+ /") and not line.endswith("/**"):
+                    # Raw single-file include, used by sync_bisync.py for
+                    # RCLONE_TEST check-access. It is valid rclone syntax but
+                    # not a folder include for sync tree membership.
+                    continue
                 if line.startswith("+ /") and line.endswith("/**"):
                     entry = line[len("+ /"):-len("/**")]
                     if entry:
@@ -185,6 +198,35 @@ def write_sync_filters(filter_path: str, include_dirs: List[str]) -> None:
         handle.writelines(lines)
 
 
+def is_android_shared_storage_path(path: str) -> bool:
+    resolved = os.path.abspath(os.path.expanduser(path))
+    prefixes = (
+        "/sdcard",
+        "/storage/emulated/0",
+        "/mnt/sdcard",
+    )
+    return any(resolved == prefix or resolved.startswith(prefix + "/") for prefix in prefixes)
+
+
+def local_encoding_flags_for_path(path: str) -> List[str]:
+    if is_android_shared_storage_path(path):
+        return ["--local-encoding", ANDROID_SHARED_STORAGE_LOCAL_ENCODING]
+    return []
+
+
+def write_last_command_log(path: str, cmd: List[str], returncode: int, output: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(f"timestamp: {datetime.now().isoformat()}\n")
+        handle.write(f"returncode: {returncode}\n")
+        handle.write("cmd:\n")
+        handle.write("  " + " ".join(cmd) + "\n")
+        handle.write("\noutput:\n")
+        handle.write(output)
+        if output and not output.endswith("\n"):
+            handle.write("\n")
+
+
 def rclone_copy_materialize(remote: str, local_root: str, filter_path: str) -> CommandResult:
     """Runs `rclone copy` for the whole filter-file — materializes every
     currently-included top-level entry (adding one more just re-copies the
@@ -200,8 +242,50 @@ def rclone_copy_materialize(remote: str, local_root: str, filter_path: str) -> C
         "rclone", "copy", f"{remote}:", resolved_root,
         "--filter-from", os.path.expanduser(filter_path), "-P",
     ]
-    result = subprocess.run(cmd)  # inherits stdout/stderr — live progress, not captured
-    return CommandResult(cmd=cmd, returncode=result.returncode, stdout="", stderr="")
+
+    output_parts: List[str] = []
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    interrupted = False
+    try:
+        for line in process.stdout:
+            print(line, end="")
+            output_parts.append(line)
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        interrupted = True
+        process.terminate()
+        try:
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait()
+        if returncode == 0:
+            returncode = 130
+    output = "".join(output_parts)
+
+    copy_last_log = var_path("copy_last.log")
+    write_last_command_log(copy_last_log, cmd, returncode, output)
+    append_text_log(
+        var_path("copy.log"),
+        f"{datetime.now().isoformat()} rclone copy returncode={returncode} "
+        f"log={copy_last_log}",
+    )
+    result = CommandResult(
+        cmd=cmd,
+        returncode=returncode,
+        stdout="",
+        stderr=f"rclone output saved to {copy_last_log}",
+    )
+    if interrupted:
+        raise KeyboardInterrupt
+    return result
 
 
 def rclone_check_entry(remote: str, entry: str, local_root: str) -> CommandResult:

@@ -550,6 +550,59 @@ rclone-логикой синка, не раньше.
       был другой, чем предполагался. Исправлено: wrapper теперь явно
       передаёт `--local-root /sdcard/Download/ya_disk`.
 
+### Этап 8 — Policy-aware bidirectional sync
+
+**Открыто (14.07.2026).** Gap/design:
+[`POLICY_AWARE_BISYNC.md`](POLICY_AWARE_BISYNC.md).
+
+Причина: `sync_filters.py` сейчас использует один filter-file и для
+download-материализации, и для scheduled `rclone bisync`. На Android shared
+storage это небезопасно: cloud path может быть полезен как локальное зеркало,
+но не быть безопасным bidirectional root из-за имён, которые `/sdcard`
+не может создать 1:1 (`|`, `:`, etc.). Реальный триггер — добавление
+`/pro/agents`: 13 файлов не копировались с `operation not permitted`; после
+repair они существуют локально с safe-lookalike именами (`｜`, `：`), что
+опасно для слепого `bisync`.
+
+- [x] Ввести policy-файл `ydm_sync_policy:v1` с режимами path-level:
+      `bidirectional`, `download_only`, `disabled`.
+      Рекомендуемый source of truth для этого окружения:
+      `var/sync_policy.json`.
+- [x] Разделить generated filters:
+      `<local-root>.download.filters` для materialize/copy и
+      `<local-root>.bisync.filters` только для scheduled bidirectional sync
+      + `RCLONE_TEST`.
+- [x] Реализовать `tools/sync_policy.py status|inspect|add|remove|render-filters`
+      (dry-run по умолчанию, JSON/text как у `sync_filters.py` и
+      `sync_bisync.py`).
+- [x] Реализовать risk analyzer по cloud snapshot:
+      Android-forbidden characters, sanitization collisions, case/unicode
+      collisions, path length, existing local sanitized-name divergence.
+- [x] При `add` безопасный путь по умолчанию становится `bidirectional`;
+      risky path блокируется и предлагает явный выбор:
+      `download_only`, `rename_cloud_plan`, `abort`.
+- [ ] Реализовать `rename_cloud_plan` как dry-run отчёт перед любыми
+      изменениями в облаке; отдельный apply-командный путь оставить
+      намеренно явным. Не включать cloud rename apply в MVP.
+- [x] Обновить Termux `ydm_bisync_job.sh`, чтобы scheduled job читал только
+      generated `.bisync.filters`, а не общий download filter.
+- [x] Миграция текущего окружения:
+      `DAO`, `pro/mathcoach`, `video/Obsidian` -> `bidirectional`;
+      `pro/agents` -> `download_only`.
+- [x] Обновить `ydm-bisync-status`, чтобы он показывал effective policy:
+      bidirectional paths, download-only paths, filter hashes,
+      `resync_needed` только для bidirectional filter.
+- [ ] Добавить тест/fixture на `/pro/agents`-подобный случай:
+      13 Android-incompatible paths -> `safe_for_bidirectional=false`,
+      recommended decision `download_only`.
+- [x] Рекомендуемый порядок MVP:
+      `sync_policy.py status|inspect|render-filters` -> risk analyzer ->
+      migration from legacy filter -> generated filters -> update scheduled
+      job -> manual resync/run against `.bisync.filters`.
+- [x] Локальная приёмка MVP (14.07.2026): `resync --apply` и `run --apply`
+      по `/sdcard/Download/ya_disk.bisync.filters` завершились успешно;
+      `pro/agents` остался `download_only`.
+
 ---
 
 ## 6. Примеры использования (целевой UX, после реализации)
@@ -609,3 +662,6 @@ python3 ydm.py sync remove --path /Projects/2024 --apply
   прогон теоретически может не уложиться в паузу до следующего
   срабатывания `termux-job-scheduler` (сейчас 30 мин) — лок-файл не даст
   повреждения данных, просто следующий тик будет пропущен/сдвинут.
+- (Этап 8) До внедрения policy-aware filters нельзя автоматически делать
+  `resync --apply` после добавления рискованных Android-путей: это может
+  привести к cloud rename/delete-upload циклу из-за локально sanitized имён.

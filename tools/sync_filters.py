@@ -36,6 +36,7 @@ from tools.sync_common import (  # noqa: E402
     path_exists_in_snapshot,
     rclone_check_entry,
     rclone_copy_materialize,
+    var_path,
     write_sync_filters,
 )
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
@@ -268,6 +269,14 @@ def main() -> None:
     result.warnings.extend(warnings)
     result.filter_path = filter_path
     result.snapshot_base_scan_id = snapshot.base_scan_id
+
+    policy_path = var_path("sync_policy.json")
+    if args.apply and Path(policy_path).exists():
+        result.warnings.append(
+            "Policy file exists; sync_filters.py is a legacy low-level filter "
+            "editor and does not update var/sync_policy.json. Prefer "
+            "tools/sync_policy.py for bidirectional/download-only decisions."
+        )
 
     if args.apply and result.error is None:
         write_sync_filters(filter_path, result.after)

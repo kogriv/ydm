@@ -57,6 +57,39 @@ from ydm import DEFAULT_CONFIG  # noqa: E402
 LOCK_PATH = "/tmp/ydm_bisync.lock"
 CHECK_ACCESS_FILENAME = "RCLONE_TEST"
 CHECK_ACCESS_CONTENT = "ydm sync_bisync check-access sentinel\n"
+POLICY_SCHEMA = "ydm_sync_policy:v1"
+
+
+def default_policy_path() -> str:
+    return var_path("sync_policy.json")
+
+
+def default_bisync_filter_path(local_root: str) -> str:
+    return f"{os.path.expanduser(local_root).rstrip('/')}.bisync.filters"
+
+
+def load_sync_policy(policy_path: str) -> dict | None:
+    resolved = os.path.expanduser(policy_path)
+    if not os.path.exists(resolved):
+        return None
+    try:
+        with open(resolved, "r") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if payload.get("schema") != POLICY_SCHEMA:
+        return None
+    return payload
+
+
+def policy_paths_by_mode(policy: dict | None, mode: str) -> List[str]:
+    if not policy:
+        return []
+    return sorted(
+        entry
+        for entry, meta in policy.get("paths", {}).items()
+        if meta.get("mode") == mode
+    )
 
 
 def ensure_check_access_filter(filter_path: str) -> bool:
@@ -182,6 +215,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     state = load_bisync_state()
     state["last_resync_filter_hash"] = filter_file_hash(filter_path)
     state["last_resync_at"] = datetime.now().isoformat()
+    state["last_status"] = "ok"
     save_bisync_state(state)
     payload["state_after"] = state
 
@@ -293,8 +327,12 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
 def cmd_status(args: argparse.Namespace) -> dict:
     filter_path = args.filter_path or default_filter_path(args.local_root)
+    policy_path = getattr(args, "policy_path", None) or default_policy_path()
+    policy = load_sync_policy(policy_path)
+    policy_bisync_filter_path = default_bisync_filter_path(args.local_root) if policy else None
     state = load_bisync_state()
     current_hash = filter_file_hash(filter_path)
+    policy_bisync_hash = filter_file_hash(policy_bisync_filter_path) if policy_bisync_filter_path else None
 
     if os.path.exists(LOCK_PATH):
         try:
@@ -326,6 +364,19 @@ def cmd_status(args: argparse.Namespace) -> dict:
         "filter_path": filter_path,
         "state": state,
         "current_filter_hash": current_hash,
+        "policy": {
+            "path": policy_path,
+            "exists": policy is not None,
+            "bidirectional_paths": policy_paths_by_mode(policy, "bidirectional"),
+            "download_only_paths": policy_paths_by_mode(policy, "download_only"),
+            "disabled_paths": policy_paths_by_mode(policy, "disabled"),
+            "bisync_filter_path": policy_bisync_filter_path,
+            "bisync_filter_hash": policy_bisync_hash,
+            "policy_filter_resync_needed": (
+                not state.get("last_resync_filter_hash")
+                or policy_bisync_hash != state.get("last_resync_filter_hash")
+            ) if policy else None,
+        },
         "resync_needed": resync_needed,
         "lock": lock_info,
         "log_tail": log_tail,
@@ -371,6 +422,16 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
         print(f"local scan: {payload['local_scan']}")
     if payload.get("state") is not None:
         print(f"state: {json.dumps(payload['state'], ensure_ascii=False)}")
+    if payload.get("policy") is not None:
+        policy = payload["policy"]
+        print(f"policy: {policy['path']} exists={policy['exists']}")
+        if policy["exists"]:
+            print(f"policy bidirectional: {', '.join(policy['bidirectional_paths'])}")
+            print(f"policy download_only: {', '.join(policy['download_only_paths'])}")
+            print(f"policy disabled: {', '.join(policy['disabled_paths'])}")
+            print(f"policy bisync_filter_path: {policy['bisync_filter_path']}")
+            print(f"policy bisync_filter_hash: {policy['bisync_filter_hash']}")
+            print(f"policy_filter_resync_needed: {policy['policy_filter_resync_needed']}")
     if payload.get("state_after") is not None:
         print(f"state_after: {json.dumps(payload['state_after'], ensure_ascii=False)}")
     if payload.get("resync_needed") is not None:
@@ -394,6 +455,7 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
         sub.add_argument("--filter-path", default=None, help="Defaults to <local-root>.filters")
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
+        sub.add_argument("--policy-path", default=default_policy_path())
 
     resync_parser = subparsers.add_parser(
         "resync", help="Establish/re-establish the bisync baseline (Path1 may overwrite Path2)"

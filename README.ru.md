@@ -17,6 +17,15 @@ ydm-sync-rm /Projects/2024
 ydm-help
 ```
 
+Для rclone/bisync на Android есть policy-aware слой, который отделяет
+download-only зеркала от bidirectional путей:
+
+```bash
+python3 tools/sync_policy.py status --local-root /sdcard/Download/ya_disk
+python3 tools/sync_policy.py inspect --path /pro/agents --local-root /sdcard/Download/ya_disk
+python3 tools/sync_policy.py render-filters --local-root /sdcard/Download/ya_disk --apply
+```
+
 ## Features
 
 - 🔍 **Полное сканирование облака** - рекурсивный обход всех файлов и папок через Yandex Disk API

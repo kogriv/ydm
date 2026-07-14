@@ -19,6 +19,7 @@
 ## Документация
 
 - [TASK_SYNC_MANAGER.md](./TASK_SYNC_MANAGER.md) - design notes и проверенные особенности поведения `yandex-disk` (не полное описание того, что реализовано — см. "Статус" ниже)
+- [../rclone_backend/POLICY_AWARE_BISYNC.md](../rclone_backend/POLICY_AWARE_BISYNC.md) - актуальный gap/design для policy-aware bidirectional sync на rclone/Android
 
 ## Быстрые примеры
 
@@ -49,4 +50,3 @@ python3 tools/sync_tree.py --no-local-scan --no-sync-percent
 ## Статус
 
 **Частично реализовано** - доступны переходные CLI‑тулы (sync_tree, sync_exclude) в `tools/`.
-
