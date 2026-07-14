@@ -25,6 +25,8 @@ download-only mirrors from bidirectional paths:
 python3 tools/sync_policy.py status --local-root /sdcard/Download/ya_disk
 python3 tools/sync_policy.py inspect --path /pro/agents --local-root /sdcard/Download/ya_disk
 python3 tools/sync_policy.py render-filters --local-root /sdcard/Download/ya_disk --apply
+python3 tools/sync_rename.py plan --local-root /sdcard/Download/ya_disk --old /DAO/a.txt --new /DAO/b.txt
+python3 tools/sync_rename.py apply --local-root /sdcard/Download/ya_disk --old /DAO/a.txt --new /DAO/b.txt
 ```
 
 ## Features

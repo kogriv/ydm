@@ -1,6 +1,6 @@
 # Fast Rename/Move For Policy-Aware Sync
 
-*Status:* design/backlog. Created after the 2026-07-14 bidirectional rename
+*Status:* MVP implemented. Created after the 2026-07-14 bidirectional rename
 test showed that `rclone bisync` treats a local rename as delete+upload and
 waits ~8 minutes for Yandex Disk delete completion.
 
@@ -90,23 +90,30 @@ Behavior:
 6. Dry-run prints:
    - local `mv`;
    - remote `rclone moveto`;
-   - follow-up `sync_bisync.py run --apply`.
+   - follow-up `sync_bisync.py resync --apply`.
 7. Apply order:
    - local `mv old new`;
    - `rclone moveto yandex:old yandex:new`;
-   - `sync_bisync.py run --apply --filter-path .bisync.filters`.
+   - `sync_bisync.py resync --apply --filter-path .bisync.filters`.
 
 Expected outcome:
 
 - No content upload for same-remote rename.
 - No delete+upload cycle.
-- `bisync` updates its listings after the explicit move.
+- `bisync` refreshes its baseline after the explicit move.
 
-Open validation:
+Validated:
 
-- Measure `rclone moveto` latency on Yandex for one small file.
-- Confirm whether a follow-up `bisync run` is enough or whether
-  `bisync resync` is sometimes required after out-of-band remote move.
+- `tools/sync_rename.py plan` rejects `/pro/agents` because it is
+  `download_only`.
+- `tools/sync_rename.py apply` under `/DAO` completed a local rename plus
+  Yandex server-side `rclone moveto`.
+- The measured `rclone moveto` latency for one small test file was ~5 seconds.
+- Follow-up must be `bisync resync --apply`, not ordinary `bisync run`.
+  A live validation with `run` produced `..path1`/`..path2` conflict copies
+  because both Path1 and Path2 had changed outside bisync's previous baseline.
+  The corrected `resync` flow left only `after.txt` locally and remotely, with
+  `resync_needed: False`.
 
 ## Option B — Direct Yandex Disk API Move
 
@@ -242,7 +249,7 @@ rename MVP.
 - Reject moves across different policy roots in MVP.
 - Reject target already existing locally or remotely.
 - Log every apply to `var/rename.log`.
-- After apply, run or instruct a `sync_bisync.py run` against
+- After apply, run or instruct a `sync_bisync.py resync` against
   `.bisync.filters`.
 
 ## Testing Plan
@@ -255,7 +262,7 @@ MVP tests:
   - local file is renamed;
   - `rclone moveto` succeeds;
   - cloud listing shows only the new name;
-  - follow-up `bisync run` ends with `last_status=ok`.
+  - follow-up `bisync resync` ends with `last_status=ok`.
 - Target-exists checks fail safely.
 - Path-outside-policy checks fail safely.
 
@@ -268,10 +275,11 @@ Performance test:
 
 - [ ] Implement `tools/sync_rename.py plan|apply`.
 - [ ] Measure `rclone moveto` latency on Yandex.
-- [ ] Decide whether follow-up should be `bisync run` or `bisync resync`.
+- [x] Decide whether follow-up should be `bisync run` or `bisync resync`
+      (`resync`; ordinary `run` creates conflict copies after out-of-band
+      local+remote move).
 - [ ] Add `var/rename.log`.
 - [ ] Add bulk plan format and `plan-bulk|apply-bulk`.
 - [ ] Add local rename detector.
 - [ ] Add direct Yandex API backend fallback if `rclone moveto` is insufficient.
 - [ ] Add Android normalization plan for risky `download_only` paths.
-

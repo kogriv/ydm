@@ -605,7 +605,7 @@ repair они существуют локально с safe-lookalike имена
 
 ### Этап 9 — Fast rename/move path
 
-**Открыто (14.07.2026).** Design/backlog:
+**MVP реализован (14.07.2026).** Design/backlog и дальнейшие варианты:
 [`FAST_RENAME_MOVE.md`](FAST_RENAME_MOVE.md).
 
 Причина: ручной round-trip тест показал, что `rclone bisync` трактует
@@ -614,16 +614,19 @@ repair они существуют локально с safe-lookalike имена
 features yandex:` показывает `Move: true` и `DirMove: true`, значит нужен
 явный fast-path через server-side move.
 
-- [ ] Реализовать `tools/sync_rename.py plan|apply` на базе
+- [x] Реализовать `tools/sync_rename.py plan|apply` на базе
       `rclone moveto` для policy-safe `bidirectional` путей.
-- [ ] Проверить preconditions: оба пути внутри одного `bidirectional` root,
+- [x] Проверить preconditions: оба пути внутри одного `bidirectional` root,
       source существует локально/удалённо, target не существует локально/
       удалённо, target name проходит risk checks.
-- [ ] После apply выполнять или предлагать `sync_bisync.py run --apply`
-      против `.bisync.filters`; отдельно проверить, не нужен ли `resync`.
-- [ ] Измерить latency `rclone moveto` против текущего `bisync` rename
-      (~8.5 минут).
-- [ ] Добавить durable `var/rename.log`.
+- [x] После apply выполнять `sync_bisync.py resync --apply` против
+      `.bisync.filters`. Обычный `run` проверен и оказался неправильным:
+      после out-of-band local+remote move он создаёт conflict-копии
+      `..path1`/`..path2`.
+- [x] Измерить latency `rclone moveto` против текущего `bisync` rename
+      (~8.5 минут): server-side `moveto` на тестовом файле занял ~5 секунд;
+      полный follow-up `resync` занял ~1.5 минуты.
+- [x] Добавить durable `var/rename.log`.
 - [ ] Позже: bulk rename plan (`plan-bulk|apply-bulk`), local rename
       detector, direct Yandex API fallback, Android normalization plan для
       risky `download_only` путей.
