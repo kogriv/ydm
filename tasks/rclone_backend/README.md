@@ -627,9 +627,14 @@ features yandex:` показывает `Move: true` и `DirMove: true`, знач
       (~8.5 минут): server-side `moveto` на тестовом файле занял ~5 секунд;
       полный follow-up `resync` занял ~1.5 минуты.
 - [x] Добавить durable `var/rename.log`.
-- [ ] Позже: bulk rename plan (`plan-bulk|apply-bulk`), local rename
-      detector, direct Yandex API fallback, Android normalization plan для
-      risky `download_only` путей.
+- [ ] Следующий продуктовый слой: normal-user rename UX. Если пользователь
+      переименовал файл в Total Commander, `ydm` должен до scheduled bisync
+      распознать probable rename и либо применить fast `rclone moveto`, либо
+      заблокировать ambiguous случай с понятным статусом. Подробный план:
+      `FAST_RENAME_MOVE.md` → `User Flow Target`, `Detection Design`,
+      `Scheduled Job Integration`, `Backlog`.
+- [ ] Позже: bulk rename plan (`plan-bulk|apply-bulk`), direct Yandex API
+      fallback, Android normalization plan для risky `download_only` путей.
 
 ---
 
