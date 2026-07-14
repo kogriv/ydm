@@ -443,9 +443,8 @@ rename MVP.
 
 ## Guard/Auto Implementation Plan
 
-Status: planned. `observe` v1 is implemented and enabled in the scheduled
-Termux job. The next implementation should add the full safety stack now, but
-keep `auto` opt-in rather than the silent default.
+Status: implemented. `observe` v1 is implemented, `guard` is the configured
+default, and `auto` is available as explicit opt-in per root.
 
 ### Mode Semantics
 
@@ -475,11 +474,11 @@ keep `auto` opt-in rather than the silent default.
   remain, skip normal `bisync run` because the final `resync` already refreshed
   the baseline.
 
-Default rollout:
+Current rollout:
 
 ```text
-repo default: observe
-recommended user default after implementation: guard
+repo default when config is absent: observe
+configured default on this device: guard
 auto: explicit opt-in only
 ```
 
@@ -721,21 +720,21 @@ Scheduled job tests:
 - [x] Add candidate ids and `var/rename_candidates.jsonl`.
 - [x] Add `apply-detected` for one reviewed candidate.
 - [x] Add scheduled-job preflight in `observe` mode.
-- [ ] Add `var/rename_policy.json` with default/root mode config.
-- [ ] Add `policy-status` and `policy-set` commands.
-- [ ] Add root-level policy mode resolution for detect/preflight.
-- [ ] Add `preflight` command with `allow_bisync|skip_bisync|block_bisync`
+- [x] Add `var/rename_policy.json` with default/root mode config.
+- [x] Add `policy-status` and `policy-set` commands.
+- [x] Add root-level policy mode resolution for detect/preflight.
+- [x] Add `preflight` command with `allow_bisync|skip_bisync|block_bisync`
       decision contract.
-- [ ] Make `status` quiet by default; add `--show` and `--verbose`.
-- [ ] Add scheduled-job preflight `guard` mode with Termux notification.
-- [ ] Update Termux scheduled job to consume the `preflight` decision instead
+- [x] Make `status` quiet by default; add `--show` and `--verbose`.
+- [x] Add scheduled-job preflight `guard` mode with Termux notification.
+- [x] Update Termux scheduled job to consume the `preflight` decision instead
       of ignoring detect output.
-- [ ] Add scheduled-job preflight `auto` mode for high-confidence file
+- [x] Add scheduled-job preflight `auto` mode for high-confidence file
       candidates only.
-- [ ] Add batch auto-apply helper with one final `resync`.
-- [ ] Add partial-failure state and recovery guidance for auto mode.
-- [ ] Add `ydm-rename-policy*` wrappers.
-- [ ] Add ambiguity handling and narrow-screen `ydm-rename-status` output.
+- [x] Add batch auto-apply helper with one final `resync`.
+- [x] Add partial-failure state and recovery guidance for auto mode.
+- [x] Add `ydm-rename-policy*` wrappers.
+- [x] Add ambiguity handling and narrow-screen `ydm-rename-status` output.
 - [ ] Add directory rename detection as review-only.
 - [ ] Validate whether Termux/Android shared storage emits usable file watcher
       events; if yes, add optional watcher as a latency optimization.
