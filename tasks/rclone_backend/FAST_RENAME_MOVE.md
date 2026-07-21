@@ -482,6 +482,19 @@ configured default on this device: guard
 auto: explicit opt-in only
 ```
 
+Decision note:
+
+- Keep `guard` as the live default until the detector has seen several real
+  rename scenarios without false positives.
+- Do not enable global `auto` yet. `auto` performs real server-side renames in
+  the cloud, so a detector mistake can move the wrong object.
+- Promote one bidirectional root at a time, starting with a low-risk root such
+  as `DAO`, only after `guard` logs look sane for normal day-to-day edits.
+- Keep `download_only` roots, especially `pro/agents`, out of `auto`; they are
+  not eligible for server-side rename automation.
+- Revisit global or broader `auto` only after root-level `auto` has survived
+  live use and `ydm-rename-status`/preflight logs remain boring.
+
 ### Configuration
 
 Add `var/rename_policy.json`:

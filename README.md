@@ -281,7 +281,34 @@ Aliases and functions for common workflows, added to `~/.bashrc`:
 - `ydm-tree-path <path> [depth]` — sync tree for one folder, with depth
 - `ydm-sync-add <path>` — add a folder to sync
 - `ydm-sync-rm <path>` — remove a folder from sync
-- `ydm-help` — short cheat sheet
+- `ydm-help` — short cheat sheet, paged through `less` when an interactive
+  terminal is available
+- `ydm-help --plain` or `ydm-help --no-pager` — print without a pager
+
+### Termux/proot scroll
+
+If Termux finger scroll moves through shell command history at the prompt
+instead of scrolling the screen, use the pager for long help output:
+
+```bash
+ydm-help
+```
+
+Inside `less`:
+
+- `q` — quit
+- `Space` / `b` — page down / page up
+- `j` / `k` — line down / line up
+- `/text` — search
+
+If scrolling is stuck after a TUI/pager and swipes keep acting like up/down
+arrows, reset the terminal mode:
+
+```bash
+termux-scroll-fix
+```
+
+`ydm-help --plain` remains available for pipes and full-text copy.
 
 ### Important
 - `ydm-sync-add` and `ydm-sync-rm` **run with `--apply` directly**.
