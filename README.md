@@ -284,6 +284,8 @@ Aliases and functions for common workflows, added to `~/.bashrc`:
 - `ydm-help` — short cheat sheet, paged through `less` when an interactive
   terminal is available
 - `ydm-help --plain` or `ydm-help --no-pager` — print without a pager
+- The `ydm-help` text is intentionally ASCII-only and short-line optimized for
+  narrow Termux/proot screens.
 
 ### Termux/proot scroll
 
