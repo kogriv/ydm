@@ -8,6 +8,7 @@
 
 ```bash
 ydm-scan-cloud
+ydm-scan-cloud /Books/Math
 ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
@@ -273,6 +274,7 @@ JSON‑контракт (версии):
 ### Что добавлено
 Алиасы и функции добавлены в `~/.bashrc` для частых сценариев:
 - `ydm-scan-cloud` — полный cloud scan
+- `ydm-scan-cloud <path>` — cloud scan одной папки
 - `ydm-scan-cloud-path <path>` — cloud scan папки
 - `ydm-scan-local` — local scan для `/data/ya_disk`
 - `ydm-tree` — дерево синка (text + ветки)

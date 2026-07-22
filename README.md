@@ -9,6 +9,7 @@ against a local mirror and tracking changes over time.
 
 ```bash
 ydm-scan-cloud
+ydm-scan-cloud /Books/Math
 ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
@@ -275,6 +276,7 @@ Notes:
 ### What's added
 Aliases and functions for common workflows, added to `~/.bashrc`:
 - `ydm-scan-cloud` — full cloud scan
+- `ydm-scan-cloud <path>` — cloud scan of one folder
 - `ydm-scan-cloud-path <path>` — cloud scan of one folder
 - `ydm-scan-local` — local scan of `/data/ya_disk`
 - `ydm-tree` — sync tree (text + branches)
