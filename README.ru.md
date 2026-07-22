@@ -14,6 +14,7 @@ ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
+ydm-sync-add-match /Books/Math angem
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
@@ -279,7 +280,11 @@ JSON‑контракт (версии):
 - `ydm-scan-local` — local scan для `/data/ya_disk`
 - `ydm-tree` — дерево синка (text + ветки)
 - `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
-- `ydm-sync-add <path>` — добавить папку в sync
+- `ydm-sync-add <path>` — добавить папку как `download_only` и скачать локально
+- `ydm-sync-add --mode bidirectional <path>` — добавить папку в bidirectional
+  bisync
+- `ydm-sync-add-match <parent> <latin-query>` — найти подпапку по ASCII-запросу
+  и добавить её, например `ydm-sync-add-match /Books/Math angem`
 - `ydm-sync-rm <path>` — убрать папку из sync
 - `ydm-help` — краткая подсказка с постраничным выводом через `less`, если
   доступен интерактивный терминал

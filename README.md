@@ -15,6 +15,7 @@ ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
+ydm-sync-add-match /Books/Math angem
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
@@ -281,7 +282,11 @@ Aliases and functions for common workflows, added to `~/.bashrc`:
 - `ydm-scan-local` — local scan of `/data/ya_disk`
 - `ydm-tree` — sync tree (text + branches)
 - `ydm-tree-path <path> [depth]` — sync tree for one folder, with depth
-- `ydm-sync-add <path>` — add a folder to sync
+- `ydm-sync-add <path>` — add a folder as `download_only` and copy it locally
+- `ydm-sync-add --mode bidirectional <path>` — add a folder to bidirectional
+  bisync
+- `ydm-sync-add-match <parent> <latin-query>` — find a child folder using an
+  ASCII query and add it, for example `ydm-sync-add-match /Books/Math angem`
 - `ydm-sync-rm <path>` — remove a folder from sync
 - `ydm-help` — short cheat sheet, paged through `less` when an interactive
   terminal is available

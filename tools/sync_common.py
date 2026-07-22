@@ -355,6 +355,15 @@ def path_exists_in_snapshot(analyzer: Analyzer, snapshot, path: str) -> bool:
             """,
             (scan_id, parent_db, target_name),
         ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """
+                SELECT 1 FROM files
+                WHERE scan_id = ? AND parent_path = ?
+                LIMIT 1
+                """,
+                (scan_id, normalized),
+            ).fetchone()
     finally:
         conn.close()
     return row is not None
