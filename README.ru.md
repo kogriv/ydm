@@ -13,7 +13,8 @@ ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
-ydm-sync-add --mode download_only /Projects/2024
+ydm-sync-add /Projects/2024
+ydm-sync-pick /Books/Math
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
@@ -279,8 +280,13 @@ JSON‑контракт (версии):
 - `ydm-scan-local` — local scan для `/data/ya_disk`
 - `ydm-tree` — дерево синка (text + ветки)
 - `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
-- `ydm-sync-add --mode <mode> <path>` — добавить папку в policy; режим надо
-  выбрать явно: `download_only`, `bidirectional` или `disabled`
+- `ydm-sync-add <path>` — добавить папку как `bidirectional`, если risk analyzer
+  считает путь безопасным; после изменения фильтра проверьте
+  `ydm-bisync-status` и при необходимости выполните `ydm-bisync-resync --apply`
+- `ydm-sync-add --mode <mode> <path>` — явный режим:
+  `bidirectional`, `download_only` или `disabled`
+- `ydm-sync-pick <parent>` — интерактивно выбрать подпапку по номеру из
+  `rclone lsf`, чтобы не вводить кириллицу вручную
 - `ydm-sync-rm <path>` — убрать папку из sync
 - `ydm-help` — краткая подсказка с постраничным выводом через `less`, если
   доступен интерактивный терминал
