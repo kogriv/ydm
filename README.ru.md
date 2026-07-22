@@ -15,6 +15,7 @@ ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
 ydm-sync-pick /Books/Math
+ydm-sync-state
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
@@ -281,12 +282,14 @@ JSON‑контракт (версии):
 - `ydm-tree` — дерево синка (text + ветки)
 - `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
 - `ydm-sync-add <path>` — добавить папку как `bidirectional`, если risk analyzer
-  считает путь безопасным; после изменения фильтра проверьте
-  `ydm-bisync-status` и при необходимости выполните `ydm-bisync-resync --apply`
+  считает путь безопасным; после изменения фильтра команда сама покажет
+  короткий статус и спросит, запускать ли `ydm-bisync-resync --apply`
 - `ydm-sync-add --mode <mode> <path>` — явный режим:
   `bidirectional`, `download_only` или `disabled`
 - `ydm-sync-pick <parent>` — интерактивно выбрать подпапку по номеру из
-  `rclone lsf`, чтобы не вводить кириллицу вручную
+  `rclone lsf`, чтобы не вводить кириллицу вручную; после выбора запускает
+  обычный `ydm-sync-add <path>`
+- `ydm-sync-state` — короткий пользовательский статус sync и следующий шаг
 - `ydm-sync-rm <path>` — убрать папку из sync
 - `ydm-help` — краткая подсказка с постраничным выводом через `less`, если
   доступен интерактивный терминал

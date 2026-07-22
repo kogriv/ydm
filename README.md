@@ -16,6 +16,7 @@ ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
 ydm-sync-pick /Books/Math
+ydm-sync-state
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
@@ -283,12 +284,14 @@ Aliases and functions for common workflows, added to `~/.bashrc`:
 - `ydm-tree` — sync tree (text + branches)
 - `ydm-tree-path <path> [depth]` — sync tree for one folder, with depth
 - `ydm-sync-add <path>` — add a folder as `bidirectional` when the risk
-  analyzer says the path is safe; after a filter change check
-  `ydm-bisync-status` and run `ydm-bisync-resync --apply` if needed
+  analyzer says the path is safe; after a filter change the command shows a
+  short status and asks whether to run `ydm-bisync-resync --apply`
 - `ydm-sync-add --mode <mode> <path>` — explicit mode: `bidirectional`,
   `download_only`, or `disabled`
 - `ydm-sync-pick <parent>` — choose a child folder by number from `rclone lsf`,
-  avoiding manual Cyrillic input
+  avoiding manual Cyrillic input; after selection it runs the regular
+  `ydm-sync-add <path>` flow
+- `ydm-sync-state` — short human sync status and next action
 - `ydm-sync-rm <path>` — remove a folder from sync
 - `ydm-help` — short cheat sheet, paged through `less` when an interactive
   terminal is available
