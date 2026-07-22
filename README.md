@@ -293,6 +293,16 @@ Aliases and functions for common workflows, added to `~/.bashrc`:
   `ydm-sync-add <path>` flow
 - `ydm-sync-state` — short human sync status and next action
 - `ydm-sync-rm <path>` — remove a folder from sync
+
+If `ydm-sync-add` prints `BLOCKED` with `Risk: path_not_found`, the path exists
+in the cloud but is missing from the current YDM cloud snapshot. Refresh that
+snapshot first:
+
+```bash
+ydm-scan-cloud /Books/Math/База
+```
+
+Then retry `ydm-sync-add` or `ydm-sync-pick`.
 - `ydm-help` — short cheat sheet, paged through `less` when an interactive
   terminal is available
 - `ydm-help --plain` or `ydm-help --no-pager` — print without a pager

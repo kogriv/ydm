@@ -291,6 +291,16 @@ JSON‑контракт (версии):
   обычный `ydm-sync-add <path>`
 - `ydm-sync-state` — короткий пользовательский статус sync и следующий шаг
 - `ydm-sync-rm <path>` — убрать папку из sync
+
+Если `ydm-sync-add` пишет `BLOCKED` с `Risk: path_not_found`, это значит, что
+путь есть в облаке, но его ещё нет в актуальном cloud snapshot `ydm`. Сначала
+обновите снимок:
+
+```bash
+ydm-scan-cloud /Books/Math/База
+```
+
+Потом повторите `ydm-sync-add` или `ydm-sync-pick`.
 - `ydm-help` — краткая подсказка с постраничным выводом через `less`, если
   доступен интерактивный терминал
 - `ydm-help --plain` или `ydm-help --no-pager` — напечатать подсказку без pager
