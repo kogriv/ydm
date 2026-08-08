@@ -7,6 +7,8 @@
 ## Быстрая памятка (алиасы)
 
 ```bash
+ydm
+ydm-menu
 ydm-scan-cloud
 ydm-scan-cloud /Books/Math
 ydm-scan-cloud-path /video

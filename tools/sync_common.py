@@ -384,6 +384,31 @@ def run_command(cmd: List[str]) -> CommandResult:
     )
 
 
+def run_command_stream(cmd: List[str]) -> CommandResult:
+    """Run a command and stream merged stdout/stderr to the terminal."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    chunks: List[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        chunks.append(line)
+    proc.wait()
+    combined = "".join(chunks).strip()
+    return CommandResult(
+        cmd=cmd,
+        returncode=proc.returncode,
+        stdout=combined,
+        stderr="",
+    )
+
+
 def stop_start_daemon() -> Dict[str, CommandResult]:
     return {
         "stop": run_command(["yandex-disk", "stop"]),
@@ -534,11 +559,12 @@ def rclone_bisync_run(
     max_delete: int = 20,
     check_access: bool = True,
     workdir: Optional[str] = None,
+    stream: bool = False,
 ) -> CommandResult:
     """Runs `rclone bisync` between the local mirror and the cloud remote,
     scoped via bisync's own --filters-file (a distinct flag from `copy`'s
-    --filter-from). Captured, not streamed: this is meant to run unattended
-    (scheduled job) and its output needs to be logged, not watched live.
+    --filter-from). By default output is captured for unattended jobs; pass
+    stream=True for interactive terminals (menu / manual resync).
 
     --max-delete is a *global* rclone flag (must precede the `bisync`
     subcommand), not a bisync-specific one in this rclone build — it defaults
@@ -555,6 +581,8 @@ def rclone_bisync_run(
     if workdir:
         cmd.extend(["--workdir", os.path.expanduser(workdir)])
     cmd.append("-v")
+    if stream:
+        return run_command_stream(cmd)
     return run_command(cmd)
 
 

@@ -32,14 +32,21 @@ jobs:
           python tools/sync_exclude.py --help
           python tools/sync_filters.py --help
           python tools/sync_bisync.py --help
+          python tools/ydm_menu.py --help
           python tasks/junk/plan_cleanup.py --help
           python tasks/junk/run_cleanup.py --help
 
-      - name: Regression suite (tests/test_ydm_fixes.sh)
-        run: bash tests/test_ydm_fixes.sh
-
       - name: Unit tests (Analyzer/StorageManager on synthetic data)
         run: python tests/test_analyzer.py -v
+
+      - name: Unit tests (sync_tree policy/cloud)
+        run: python tests/test_sync_tree.py -v
+
+      - name: Unit tests (ydm_menu)
+        run: python tests/test_ydm_menu.py -v
+
+      - name: Regression suite (tests/test_ydm_fixes.sh)
+        run: bash tests/test_ydm_fixes.sh
 
       # tests/test_scan.sh and tests/test_rclone_backend.sh are NOT run
       # here on purpose: the former scans the real Yandex Disk API

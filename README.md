@@ -8,6 +8,8 @@ against a local mirror and tracking changes over time.
 ## Quick reference (shell aliases)
 
 ```bash
+ydm
+ydm-menu
 ydm-scan-cloud
 ydm-scan-cloud /Books/Math
 ydm-scan-cloud-path /video
@@ -355,6 +357,8 @@ source ~/.bashrc
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Full project documentation, architecture, implementation details
 - **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Quick start for AI assistants and automation
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples
+- **[Sync Tree v2](tasks/sync_tree/README.md)** - Policy-aware `ydm-tree` (`[B]`/`[D]`/`[L]` markers, orphan paths)
+- **[YDM Menu](tasks/ydm_menu/README.md)** - Interactive sync UI for humans (`ydm`; agents keep `ydm-sync-*` CLI)
 - **[Sync Manager](tasks/sync_manager/README.md)** - Transitional sync_tree/sync_exclude tools and Sync Manager plans
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Alternative to the `yandex-disk` daemon for environments without it (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup via rclone
 - **[Smart Diff](tasks/smart_diff/README.md)** - How `report diff` builds a composite snapshot (full scan + newer partial scans) instead of just comparing the two latest scans

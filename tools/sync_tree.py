@@ -6,7 +6,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -14,10 +14,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
-    build_composite_snapshot,
     create_storage,
     default_filter_path,
-    fetch_child_dirs,
     get_latest_successful_scan_id,
     load_exclude_dirs,
     load_sync_filters,
@@ -25,6 +23,29 @@ from tools.sync_common import (  # noqa: E402
     run_local_scan,
     select_scan_id_for_path,
     sleep_sec,
+)
+from tools.sync_policy import (  # noqa: E402
+    default_policy_path,
+    effective_download_paths,
+)
+from tools.sync_tree_cloud import (  # noqa: E402
+    fetch_child_names,
+    select_snapshot_for_tree,
+)
+from tools.sync_tree_policy import (  # noqa: E402
+    LEGEND_LINES,
+    SCHEMA_V2,
+    PolicyContext,
+    display_marker,
+    is_under_policy_path,
+    load_policy_context,
+    local_state,
+    path_in_policy,
+    policy_entry_for_path,
+    policy_mode_for_path,
+    policy_paths_set,
+    policy_summary_line,
+    rel_path_from_cloud,
 )
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
 
@@ -44,22 +65,47 @@ class TreeNode:
     has_synced_descendants: bool = False
     visible_children_count: int = 0
     sync_percent: float | None = None
+    policy_mode: str | None = None
+    policy_entry: str | None = None
+    in_policy: bool = False
+    local_state: str | None = None
+    display_marker: str = "[?]"
+    cloud_file_count: int = 0
+    local_file_count: int = 0
 
-    def to_dict(self, include_children: bool = True) -> Dict[str, object]:
-        data = {
-            "path": self.path,
-            "name": self.name,
-            "sync_status": self.sync_status,
-            "has_synced_descendants": self.has_synced_descendants,
-            "visible_children_count": self.visible_children_count,
-        }
-        if self.sync_percent is not None:
-            data["sync_percent"] = self.sync_percent
+    def to_dict(self, include_children: bool = True, schema: str = "sync_tree:v1") -> Dict[str, object]:
+        if schema == SCHEMA_V2:
+            data: Dict[str, object] = {
+                "path": self.path,
+                "name": self.name,
+                "markers": {
+                    "display": self.display_marker,
+                    "policy_mode": self.policy_mode,
+                    "local_state": self.local_state,
+                    "cloud_state": "present" if self.cloud_file_count > 0 or self.children else "unknown",
+                },
+                "sync_percent": self.sync_percent,
+                "in_policy": self.in_policy,
+                "policy_entry": self.policy_entry,
+                "cloud_file_count": self.cloud_file_count,
+                "local_file_count": self.local_file_count,
+                "sync_status_v1": self.sync_status,
+            }
+        else:
+            data = {
+                "path": self.path,
+                "name": self.name,
+                "sync_status": self.sync_status,
+                "has_synced_descendants": self.has_synced_descendants,
+                "visible_children_count": self.visible_children_count,
+            }
+            if self.sync_percent is not None:
+                data["sync_percent"] = self.sync_percent
+
         if include_children:
-            if self.children:
-                data["children"] = [child.to_dict(include_children=True) for child in self.children]
-            else:
-                data["children"] = []
+            data["children"] = [
+                child.to_dict(include_children=True, schema=schema) for child in self.children
+            ] if self.children else []
         else:
             data["children_count"] = self.children_count
         return data
@@ -94,8 +140,6 @@ def is_path_excluded(path: str, exclude_dirs: Set[str]) -> bool:
 
 
 def is_path_included(path: str, include_dirs: Set[str]) -> bool:
-    """Whitelist counterpart of is_path_excluded: True if `path` itself or
-    any ancestor prefix has an explicit rclone filter-file `+` entry."""
     normalized = normalize_path(path)
     relative = normalized[1:] if normalized != "/" else ""
     if relative == "":
@@ -122,7 +166,7 @@ def build_tree(
         name = "/" if normalized == "/" else normalized.rsplit("/", 1)[-1]
         node = TreeNode(path=normalized, name=name)
         scan_id = select_scan_id_for_path(normalized, snapshot)
-        children_names = fetch_child_dirs(storage, scan_id, normalized)
+        children_names = fetch_child_names(storage, scan_id, normalized)
         node.children_count = len(children_names)
 
         if remaining_depth > 0:
@@ -148,17 +192,22 @@ def _count_files_for_prefix(conn, scan_id: int, prefix: str) -> int:
         ).fetchone()
         return row[0] if row else 0
 
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM files
-        WHERE scan_id = ?
-          AND type = 'file'
-          AND (parent_path = ? OR parent_path LIKE ?)
-        """,
-        (scan_id, prefix, f"{prefix}/%"),
-    ).fetchone()
-    return row[0] if row else 0
+    variants = {prefix, prefix.lstrip("/"), f"/{prefix.lstrip('/')}"}
+    total = 0
+    for variant in variants:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM files
+            WHERE scan_id = ?
+              AND type = 'file'
+              AND (parent_path = ? OR parent_path LIKE ?)
+            """,
+            (scan_id, variant, f"{variant.rstrip('/')}/%"),
+        ).fetchone()
+        if row:
+            total = max(total, row[0])
+    return total
 
 
 def count_cloud_files_for_path(analyzer: Analyzer, snapshot, path: str) -> int:
@@ -166,14 +215,15 @@ def count_cloud_files_for_path(analyzer: Analyzer, snapshot, path: str) -> int:
     if prefix == "/":
         prefix = ""
     base_scan_id = select_scan_id_for_path(path, snapshot)
+    rel = rel_path_from_cloud(path)
     deeper_updates = [
         folder for folder in snapshot.folder_updates.keys()
-        if folder and (prefix == "" or folder.startswith(prefix + "/"))
+        if folder and (rel == "" or folder.startswith(rel) or folder.startswith(rel + "/"))
     ]
 
     conn = analyzer.storage.get_connection()
     try:
-        base_count = _count_files_for_prefix(conn, base_scan_id, prefix)
+        base_count = _count_files_for_prefix(conn, base_scan_id, prefix or rel)
         for folder in deeper_updates:
             base_count -= _count_files_for_prefix(conn, base_scan_id, folder)
 
@@ -201,17 +251,22 @@ def apply_sync_percent(
     analyzer: Analyzer,
     snapshot,
     local_scan_id: int | None,
+    local_root: str,
 ) -> None:
-    if local_scan_id is None:
-        return
     cloud_count = count_cloud_files_for_path(analyzer, snapshot, node.path)
-    local_count = count_local_files_for_path(analyzer.storage, local_scan_id, node.path)
-    if cloud_count == 0:
-        node.sync_percent = 100.0
+    local_count = count_local_files_for_path(analyzer.storage, local_scan_id, node.path) if local_scan_id else 0
+    node.cloud_file_count = cloud_count
+    node.local_file_count = local_count
+
+    if local_scan_id is None:
+        node.sync_percent = None
+    elif cloud_count == 0:
+        node.sync_percent = 100.0 if local_count > 0 else 0.0
     else:
         node.sync_percent = round((local_count / cloud_count) * 100.0, 1)
+
     for child in node.children:
-        apply_sync_percent(child, analyzer, snapshot, local_scan_id)
+        apply_sync_percent(child, analyzer, snapshot, local_scan_id, local_root)
 
 
 def compute_status(node: TreeNode, exclude_dirs: Set[str], collapse: bool) -> bool:
@@ -241,8 +296,6 @@ def compute_status(node: TreeNode, exclude_dirs: Set[str], collapse: bool) -> bo
 
 
 def _mark_full_subtree(node: TreeNode, collapse: bool) -> None:
-    """Whitelist model: once a folder is itself included (`+ /path/**`),
-    every descendant is synced too — no partial state below that point."""
     node.sync_status = STATUS_FULL
     node.has_synced_descendants = bool(node.children)
     for child in node.children:
@@ -250,10 +303,13 @@ def _mark_full_subtree(node: TreeNode, collapse: bool) -> None:
     node.visible_children_count = len(node.children)
 
 
-def compute_status_whitelist(node: TreeNode, include_dirs: Set[str], collapse: bool) -> bool:
-    """rclone filter-file counterpart of compute_status: default is
-    EXCLUDED, a folder becomes FULL only if it (or an ancestor) has an
-    explicit `+` entry, PARTIAL if some descendant does."""
+def compute_status_whitelist(
+    node: TreeNode,
+    include_dirs: Set[str],
+    collapse: bool,
+    policy_paths: Optional[Set[str]] = None,
+    local_root: Optional[str] = None,
+) -> bool:
     if is_path_included(node.path, include_dirs):
         _mark_full_subtree(node, collapse)
         return True
@@ -261,44 +317,94 @@ def compute_status_whitelist(node: TreeNode, include_dirs: Set[str], collapse: b
     has_synced_descendants = False
     visible_children: List[TreeNode] = []
     for child in node.children:
-        child_has_synced = compute_status_whitelist(child, include_dirs, collapse)
+        child_has_synced = compute_status_whitelist(
+            child, include_dirs, collapse, policy_paths=policy_paths, local_root=local_root
+        )
         if child_has_synced:
             visible_children.append(child)
         has_synced_descendants = has_synced_descendants or child_has_synced
 
     node.sync_status = STATUS_PARTIAL if has_synced_descendants else STATUS_EXCLUDED
     node.has_synced_descendants = has_synced_descendants
+
     if collapse:
-        node.children = visible_children
-    node.visible_children_count = len(visible_children)
-    return has_synced_descendants
+        kept = list(visible_children)
+        if local_root:
+            from tools.sync_tree_policy import local_dir_exists
+
+            for child in node.children:
+                if child in kept:
+                    continue
+                if local_dir_exists(local_root, child.path):
+                    kept.append(child)
+        if policy_paths and is_under_policy_path(node.path, policy_paths):
+            kept = node.children
+        node.children = sorted(kept, key=lambda n: n.name.lower())
+    node.visible_children_count = len(node.children)
+    return has_synced_descendants or (
+        policy_paths is not None and is_under_policy_path(node.path, policy_paths)
+    )
 
 
-def render_text(node: TreeNode, indent: str = "") -> List[str]:
-    marker = {
-        STATUS_FULL: "[S]",
-        STATUS_PARTIAL: "[P]",
-        STATUS_EXCLUDED: "[-]",
-    }.get(node.sync_status, "[?]")
+def apply_policy_overlay(
+    node: TreeNode,
+    ctx: PolicyContext,
+    local_root: str,
+) -> None:
+    policy = ctx.policy
+    entry_key, _entry_meta = policy_entry_for_path(node.path, policy)
+    node.in_policy = path_in_policy(node.path, policy)
+    node.policy_entry = entry_key
+    node.policy_mode = policy_mode_for_path(node.path, policy)
+    node.local_state = local_state(
+        policy_mode=node.policy_mode,
+        in_policy=node.in_policy,
+        cloud_count=node.cloud_file_count,
+        local_count=node.local_file_count,
+        local_root=local_root,
+        path=node.path,
+    )
+    node.display_marker = display_marker(
+        policy_mode=node.policy_mode,
+        in_policy=node.in_policy,
+        local_state_value=node.local_state,
+        has_synced_descendant=node.has_synced_descendants,
+        v1_sync_status=node.sync_status,
+    )
+    for child in node.children:
+        apply_policy_overlay(child, ctx, local_root)
+
+
+def render_text(node: TreeNode, indent: str = "", schema: str = "sync_tree:v1") -> List[str]:
+    if schema == SCHEMA_V2:
+        marker = node.display_marker
+    else:
+        marker = {
+            STATUS_FULL: "[S]",
+            STATUS_PARTIAL: "[P]",
+            STATUS_EXCLUDED: "[-]",
+        }.get(node.sync_status, "[?]")
     suffix = f" {node.sync_percent:.1f}%" if node.sync_percent is not None else ""
     lines = [f"{marker} {indent}{node.name}{suffix}"]
     for child in node.children:
-        lines.extend(render_text(child, indent + "  "))
+        lines.extend(render_text(child, indent + "  ", schema=schema))
     return lines
 
 
-def render_text_tree(node: TreeNode) -> List[str]:
-    marker_map = {
-        STATUS_FULL: "[S]",
-        STATUS_PARTIAL: "[P]",
-        STATUS_EXCLUDED: "[-]",
-    }
+def render_text_tree(node: TreeNode, schema: str = "sync_tree:v1") -> List[str]:
+    def marker_for(current: TreeNode) -> str:
+        if schema == SCHEMA_V2:
+            return current.display_marker
+        return {
+            STATUS_FULL: "[S]",
+            STATUS_PARTIAL: "[P]",
+            STATUS_EXCLUDED: "[-]",
+        }.get(current.sync_status, "[?]")
 
     def walk(current: TreeNode, prefix: str, is_last: bool) -> List[str]:
-        marker = marker_map.get(current.sync_status, "[?]")
         connector = "└── " if is_last else "├── "
         suffix = f" {current.sync_percent:.1f}%" if current.sync_percent is not None else ""
-        line = f"{marker}{prefix}{connector}{current.name}{suffix}"
+        line = f"{marker_for(current)}{prefix}{connector}{current.name}{suffix}"
         lines = [line]
         if current.children:
             next_prefix = prefix + ("    " if is_last else "│   ")
@@ -307,25 +413,60 @@ def render_text_tree(node: TreeNode) -> List[str]:
                 lines.extend(walk(child, next_prefix, child_last))
         return lines
 
-    root_marker = marker_map.get(node.sync_status, "[?]")
     root_suffix = f" {node.sync_percent:.1f}%" if node.sync_percent is not None else ""
-    output = [f"{root_marker} {node.name}{root_suffix}"]
+    output = [f"{marker_for(node)} {node.name}{root_suffix}"]
     for index, child in enumerate(node.children):
         child_last = index == len(node.children) - 1
         output.extend(walk(child, "", child_last))
     return output
 
 
+def render_v2_header(
+    *,
+    root_path: str,
+    depth: int,
+    ctx: PolicyContext,
+    selection,
+    local_scan_id: Optional[int],
+    collapsed: bool,
+    local_scan_started: Optional[bool],
+    extra_warnings: List[str],
+) -> List[str]:
+    lines = [
+        f"schema: {SCHEMA_V2}",
+        f"root_path: {root_path}",
+        f"depth: {depth}",
+        f"policy_path: {ctx.policy_path}",
+        f"policy: {policy_summary_line(ctx)}",
+        f"snapshot: base scan #{selection.base_scan_id}",
+    ]
+    if selection.folder_updates:
+        lines.append(f"snapshot_updates: {selection.folder_updates}")
+    if local_scan_id is not None:
+        lines.append(f"local_scan_id: {local_scan_id}")
+    if ctx.filter_mismatch:
+        lines.append("WARN: bisync filter out of sync with policy — run: sync_policy render-filters --apply")
+    if selection.warning:
+        lines.append(f"WARN: {selection.warning}")
+    for warning in selection.warnings:
+        lines.append(f"WARN: {warning}")
+    for warning in extra_warnings:
+        lines.append(f"WARN: {warning}")
+    lines.append("legend: " + "; ".join(LEGEND_LINES))
+    lines.append(f"collapsed: {collapsed}")
+    if local_scan_started is not None:
+        lines.append(f"local_scan_started: {local_scan_started}")
+    lines.append("")
+    return lines
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple sync tree (transition tool)")
+    parser = argparse.ArgumentParser(description="Sync tree (cloud structure + policy overlay)")
     parser.add_argument("--path", default="/", help="Root path (e.g., /A/B)")
     parser.add_argument("--depth", type=int, default=2, help="Depth from root path")
     parser.add_argument("--format", choices=["json", "text"], default="json")
-    parser.add_argument(
-        "--text-tree",
-        action="store_true",
-        help="Use tree branches in text output",
-    )
+    parser.add_argument("--schema", choices=["sync_tree:v1", "sync_tree:v2"], default="sync_tree:v2")
+    parser.add_argument("--text-tree", action="store_true", help="Use tree branches in text output")
     parser.add_argument(
         "--text-header",
         action=argparse.BooleanOptionalAction,
@@ -347,24 +488,27 @@ def parse_args() -> argparse.Namespace:
         help="Compute sync percent per node (default)",
     )
     parser.add_argument("--db-path", default="monitor.db", help="Path to SQLite DB")
-    parser.add_argument("--backend", choices=["api", "rclone"], default="api",
-                         help="'api' reads exclude-dirs from config.cfg (default, unchanged "
-                              "behavior); 'rclone' reads the filter-file whitelist instead "
-                              "(see tasks/rclone_backend/README.md)")
-    parser.add_argument("--filter-path", default=None,
-                         help="rclone filter-file path (--backend rclone only); "
-                              "defaults to <local-root>.filters")
+    parser.add_argument(
+        "--backend",
+        choices=["api", "rclone"],
+        default="api",
+        help="'api' reads exclude-dirs from config.cfg; 'rclone' uses policy/filter whitelist",
+    )
+    parser.add_argument("--filter-path", default=None, help="Override rclone filter-file path")
+    parser.add_argument(
+        "--policy-path",
+        default=None,
+        help="Path to sync_policy.json (default: var/sync_policy.json)",
+    )
+    parser.add_argument(
+        "--use-policy",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use sync_policy.json for markers (default: on for rclone backend)",
+    )
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--collapse-synced",
-        action="store_true",
-        help="Show only branches with synced folders (default)",
-    )
-    mode_group.add_argument(
-        "--show-all",
-        action="store_true",
-        help="Show full tree regardless of exclude-dirs",
-    )
+    mode_group.add_argument("--collapse-synced", action="store_true", help="Show synced branches (default)")
+    mode_group.add_argument("--show-all", action="store_true", help="Show full tree")
     parser.set_defaults(collapse_synced=True)
     return parser.parse_args()
 
@@ -372,13 +516,34 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root_path = normalize_path(args.path)
+    schema = args.schema
+    use_policy = args.use_policy if args.use_policy is not None else args.backend == "rclone"
+
+    policy_path = args.policy_path or default_policy_path()
+    policy_ctx = load_policy_context(policy_path, args.local_root) if use_policy else PolicyContext(
+        policy=None,
+        policy_path=policy_path,
+        bidirectional=[],
+        download_only=[],
+        disabled=[],
+        bisync_filter_path=None,
+        bisync_filter_hash=None,
+        filter_mismatch=False,
+    )
 
     if args.backend == "rclone":
-        filter_path = args.filter_path or default_filter_path(args.local_root)
-        filters_result = load_sync_filters(filter_path)
-        membership_dirs = set(filters_result.include_dirs)
-        source_path = filters_result.filter_path
-        source_warnings = filters_result.warnings
+        if use_policy and policy_ctx.policy:
+            membership_dirs = set(effective_download_paths(policy_ctx.policy))
+            source_path = policy_path
+            source_warnings = []
+            if policy_ctx.filter_mismatch:
+                source_warnings.append("bisync filter out of sync with policy")
+        else:
+            filter_path = args.filter_path or default_filter_path(args.local_root)
+            filters_result = load_sync_filters(filter_path)
+            membership_dirs = set(filters_result.include_dirs)
+            source_path = filters_result.filter_path
+            source_warnings = filters_result.warnings
     else:
         exclude_result = load_exclude_dirs()
         membership_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
@@ -387,9 +552,12 @@ def main() -> None:
 
     storage = create_storage(args.db_path)
     analyzer = Analyzer(storage)
+    selection = select_snapshot_for_tree(analyzer, root_path)
+    snapshot = selection.snapshot
 
-    snapshot = build_composite_snapshot(analyzer)
     collapse = False if args.show_all else args.collapse_synced
+    policy_path_set = policy_paths_set(policy_ctx) if use_policy else None
+
     local_scan_started = None
     local_scan_error = None
     local_scan_id = get_latest_successful_scan_id(storage, "local")
@@ -403,51 +571,97 @@ def main() -> None:
 
     node = build_tree(analyzer, snapshot, root_path, args.depth)
     if args.backend == "rclone":
-        compute_status_whitelist(node, membership_dirs, collapse=collapse)
+        compute_status_whitelist(
+            node, membership_dirs, collapse=collapse, policy_paths=policy_path_set,
+            local_root=args.local_root,
+        )
     else:
         compute_status(node, membership_dirs, collapse=collapse)
 
-    if args.sync_percent:
-        apply_sync_percent(node, analyzer, snapshot, local_scan_id)
+    apply_sync_percent(node, analyzer, snapshot, local_scan_id, args.local_root)
+
+    if use_policy and schema == SCHEMA_V2:
+        apply_policy_overlay(node, policy_ctx, args.local_root)
+
+    extra_warnings: List[str] = list(source_warnings)
+    if node.children_count == 0 and root_path != "/":
+        extra_warnings.append(
+            f"No cloud folders under {root_path}. Run: ydm-scan-cloud {root_path}"
+        )
+    if local_scan_error:
+        extra_warnings.append(f"local_scan_error: {local_scan_error}")
 
     if args.format == "json":
-        payload = {
-            "schema": "sync_tree:v1",
-            "root": node.to_dict(include_children=True),
-            "root_path": root_path,
-            "root_depth": args.depth,
-            "root_children_count": node.children_count,
-            "root_visible_children_count": node.visible_children_count,
-            "config_path": source_path,
-            "warnings": source_warnings,
-            "collapsed": collapse,
-            "local_scan_started": local_scan_started,
-            "local_scan_error": local_scan_error,
-        }
+        if schema == SCHEMA_V2:
+            payload = {
+                "schema": SCHEMA_V2,
+                "header": {
+                    "root_path": root_path,
+                    "root_depth": args.depth,
+                    "policy_path": policy_ctx.policy_path,
+                    "policy_summary": policy_summary_line(policy_ctx),
+                    "cloud_snapshot": {
+                        "base_scan_id": selection.base_scan_id,
+                        "folder_updates": selection.folder_updates,
+                        "freshness_warning": selection.warning,
+                    },
+                    "local_scan_id": local_scan_id,
+                    "legend": LEGEND_LINES,
+                },
+                "root": node.to_dict(include_children=True, schema=schema),
+                "warnings": extra_warnings + selection.warnings,
+                "collapsed": collapse,
+                "local_scan_started": local_scan_started,
+                "local_scan_error": local_scan_error,
+            }
+        else:
+            payload = {
+                "schema": "sync_tree:v1",
+                "root": node.to_dict(include_children=True, schema=schema),
+                "root_path": root_path,
+                "root_depth": args.depth,
+                "root_children_count": node.children_count,
+                "root_visible_children_count": node.visible_children_count,
+                "config_path": source_path,
+                "warnings": extra_warnings + selection.warnings,
+                "collapsed": collapse,
+                "local_scan_started": local_scan_started,
+                "local_scan_error": local_scan_error,
+            }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         if args.text_header:
-            print("schema: sync_tree:v1")
-            print(f"root_path: {root_path}")
-            print(f"root_depth: {args.depth}")
-            print(f"root_children_count: {node.children_count}")
-            print(f"root_visible_children_count: {node.visible_children_count}")
-            print(f"config_path: {source_path}")
-            if source_warnings:
-                print("warnings:")
-                for warning in source_warnings:
-                    print(f"- {warning}")
-            print(f"collapsed: {collapse}")
-            if local_scan_started is not None:
-                print(f"local_scan_started: {local_scan_started}")
-            if local_scan_error:
-                print(f"local_scan_error: {local_scan_error}")
-        if args.text_tree:
-            lines = render_text_tree(node)
-        else:
-            lines = render_text(node)
-        if args.text_header:
-            print("")
+            if schema == SCHEMA_V2:
+                for line in render_v2_header(
+                    root_path=root_path,
+                    depth=args.depth,
+                    ctx=policy_ctx,
+                    selection=selection,
+                    local_scan_id=local_scan_id,
+                    collapsed=collapse,
+                    local_scan_started=local_scan_started,
+                    extra_warnings=extra_warnings,
+                ):
+                    print(line)
+            else:
+                print("schema: sync_tree:v1")
+                print(f"root_path: {root_path}")
+                print(f"root_depth: {args.depth}")
+                print(f"root_children_count: {node.children_count}")
+                print(f"root_visible_children_count: {node.visible_children_count}")
+                print(f"config_path: {source_path}")
+                if extra_warnings:
+                    print("warnings:")
+                    for warning in extra_warnings:
+                        print(f"- {warning}")
+                print(f"collapsed: {collapse}")
+                if local_scan_started is not None:
+                    print(f"local_scan_started: {local_scan_started}")
+                if local_scan_error:
+                    print(f"local_scan_error: {local_scan_error}")
+                print("")
+
+        lines = render_text_tree(node, schema=schema) if args.text_tree else render_text(node, schema=schema)
         for line in lines:
             print(line)
 

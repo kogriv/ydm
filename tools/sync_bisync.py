@@ -196,9 +196,14 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         ensure_check_access_filter(filter_path)
         ensure_check_access_file(args.local_root)
 
+    stream = bool(getattr(args, "stream", False))
+    if stream:
+        print("Starting rclone bisync --resync (verbose log below)...", flush=True)
+
     result = rclone_bisync_run(
         args.remote, args.local_root, filter_path,
         resync=True, max_delete=args.max_delete, check_access=args.check_access,
+        stream=stream,
     )
     payload["bisync"] = {
         "cmd": result.cmd, "returncode": result.returncode,
@@ -219,8 +224,12 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     save_bisync_state(state)
     payload["state_after"] = state
 
+    if stream:
+        print("\nUpdating local scan index after resync...", flush=True)
     local_scan = run_local_scan(args.db_path, args.local_root)
     payload["local_scan"] = vars(local_scan)
+    if stream and local_scan.duration_sec is not None:
+        print(f"Local scan done in {local_scan.duration_sec:.0f}s.", flush=True)
 
     append_text_log(var_path("bisync.log"), f"{datetime.now().isoformat()} resync OK")
     return payload
@@ -290,9 +299,13 @@ def cmd_run(args: argparse.Namespace) -> dict:
         return payload
 
     try:
+        stream = bool(getattr(args, "stream", False))
+        if stream:
+            print("Starting rclone bisync...", flush=True)
         result = rclone_bisync_run(
             args.remote, args.local_root, filter_path,
             resync=False, max_delete=args.max_delete, check_access=args.check_access,
+            stream=stream,
         )
         payload["bisync"] = {
             "cmd": result.cmd, "returncode": result.returncode,

@@ -20,6 +20,8 @@
 
 - [TASK_SYNC_MANAGER.md](./TASK_SYNC_MANAGER.md) - design notes и проверенные особенности поведения `yandex-disk` (не полное описание того, что реализовано — см. "Статус" ниже)
 - [../rclone_backend/POLICY_AWARE_BISYNC.md](../rclone_backend/POLICY_AWARE_BISYNC.md) - актуальный gap/design для policy-aware bidirectional sync на rclone/Android
+- [../sync_tree/README.md](../sync_tree/README.md) - **Sync Tree v2**: policy-aware `ydm-tree` (`[B]`/`[D]`/`[L]`)
+- [../ydm_menu/README.md](../ydm_menu/README.md) - **YDM Menu**: интерактивный UI для человека (`ydm`)
 
 ## Быстрые примеры
 
