@@ -37,6 +37,7 @@ def render_header(cfg: MenuConfig, status: MenuStatus) -> List[str]:
     lines = ["YDM Sync"]
     if not cfg.plain:
         lines.append(_line("─", cfg.width))
+    lines.append(f"Backend: {cfg.backend_name}")
     lines.append(f"Status: {status.overall}   last bisync: {status.last_run_short}")
     lock = "yes" if status.lock_held else "no"
     resync = "needed" if status.resync_needed else "not needed"

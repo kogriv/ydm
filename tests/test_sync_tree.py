@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -88,13 +89,22 @@ class SyncTreePolicyTests(unittest.TestCase):
             self.assertEqual(state, "orphan")
 
     def test_policy_summary(self):
-        ctx = load_policy_context(
-            str(ROOT / "var/sync_policy.json"),
-            "/sdcard/Download/ya_disk",
-        )
+        import tempfile
+        import json
+        tmpdir = tempfile.mkdtemp()
+        policy_path = os.path.join(tmpdir, "sync_policy.json")
+        with open(policy_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "ydm_sync_policy:v1",
+                "paths": {
+                    "Books/Math/База": {"mode": "bidirectional"},
+                }
+            }, handle, ensure_ascii=False)
+        ctx = load_policy_context(policy_path, "/sdcard/Download/ya_disk")
         summary = policy_summary_line(ctx)
         self.assertIn("[B]", summary)
         self.assertIn("Books/Math/База", summary)
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class SyncTreeCloudTests(unittest.TestCase):

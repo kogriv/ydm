@@ -31,6 +31,7 @@
 - [`tasks/sync_manager/README.md`](../sync_manager/README.md) — исходный sync manager
 - [`tasks/rclone_backend/POLICY_AWARE_BISYNC.md`](../rclone_backend/POLICY_AWARE_BISYNC.md) — policy layer (реализован)
 - [`tasks/rclone_backend/README.md`](../rclone_backend/README.md) — rclone backend
+- [`tasks/sync_unification/README.md`](../sync_unification/README.md) — unified backend-agnostic CLI and daemon backend support for policy overlay
 
 ## Быстрый workaround (до реализации v2)
 

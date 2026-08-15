@@ -93,6 +93,9 @@ def screen_add_cloud(cfg: MenuConfig, reader: Reader) -> None:
         print("No subfolders found (or rclone error).")
         return
     labels = [f"{name}/" for name in dirs]
+    print("Subfolders:")
+    for i, label in enumerate(labels, start=1):
+        print(f" {i:2d}  {label}")
     pick = prompt_ints("Folder number(s)", max_n=len(labels), reader=reader)
     if not pick:
         return
@@ -283,6 +286,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-path", default=None)
     parser.add_argument("--bisync-filter-path", default=None)
     parser.add_argument("--remote", default=None)
+    parser.add_argument(
+        "--backend",
+        choices=["daemon", "rclone", "auto"],
+        default=None,
+        help="Sync backend: daemon (yandex-disk), rclone, or auto-detect",
+    )
     parser.add_argument("--plain", action="store_true")
     parser.add_argument("--non-interactive", action="store_true", help="Script subcommands only")
     sub = parser.add_subparsers(dest="command")
@@ -298,6 +307,7 @@ def main() -> int:
         policy_path=args.policy_path,
         bisync_filter_path=args.bisync_filter_path,
         remote=args.remote,
+        backend=args.backend,
         plain=args.plain,
     )
     if args.command == "orphans":

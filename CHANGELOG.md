@@ -5,6 +5,33 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-14 — Unified sync interface across daemon and rclone backends
+
+Added `tools/sync_backends.py`, a backend abstraction that lets the same
+CLI work on Ubuntu with the official `yandex-disk` daemon and on
+Android/Termux with `rclone bisync`:
+
+- `DaemonBackend` applies `var/sync_policy.json` to `exclude-dirs=` in
+  `~/.config/yandex-disk/config.cfg` and restarts the daemon.
+- `RcloneBackend` writes `.bisync.filters` / `.download.filters` and runs
+  `rclone bisync` as before.
+- Auto-detection prefers the daemon when available; explicit
+  `--backend daemon|rclone|auto` and `YDM_BACKEND` override it.
+- `tools/sync_policy.py` gained `--backend daemon|rclone|auto` and
+  `migrate --backend daemon` to import existing `exclude-dirs` into policy.
+- `tools/sync_tree.py` now shows policy markers `[B]`/`[D]`/`[L]`/`[X]`
+  for the daemon backend too, not only for rclone.
+- `tools/ydm_menu.py`, `ydm_menu_config.py`, `ydm_menu_actions.py`,
+  `ydm_menu_status.py`, and `ydm_menu_screens.py` are now backend-agnostic.
+- `.bashrc` aliases `ydm-sync-add` / `ydm-sync-rm` now use policy-first
+  semantics (add = include in sync, rm = exclude from sync) via
+  `sync_policy.py`.
+- `ydm_config.json` accepts an optional `"backend": "auto"` profile key.
+
+Docs: [`tasks/sync_unification/README.md`](tasks/sync_unification/README.md),
+[`tasks/sync_unification/DESIGN.md`](tasks/sync_unification/DESIGN.md),
+[`tasks/sync_unification/HOW_TO_USE.md`](tasks/sync_unification/HOW_TO_USE.md).
+
 ## 2026-07-13 — Two `build_composite_scan()` bugs, found while writing unit tests
 
 Added `tests/test_analyzer.py` (stdlib `unittest`, no new dependency) —

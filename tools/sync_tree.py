@@ -13,6 +13,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from tools.sync_backends import (  # noqa: E402
+    backend_from_args,
+    detect_backend,
+)
 from tools.sync_common import (  # noqa: E402
     create_storage,
     default_filter_path,
@@ -490,9 +494,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", default="monitor.db", help="Path to SQLite DB")
     parser.add_argument(
         "--backend",
-        choices=["api", "rclone"],
-        default="api",
-        help="'api' reads exclude-dirs from config.cfg; 'rclone' uses policy/filter whitelist",
+        choices=["api", "rclone", "daemon", "auto"],
+        default="auto",
+        help="Sync backend: daemon (yandex-disk config.cfg), rclone (filter whitelist), api (alias for daemon), or auto",
     )
     parser.add_argument("--filter-path", default=None, help="Override rclone filter-file path")
     parser.add_argument(
@@ -513,11 +517,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_backend_name(args) -> str:
+    backend = args.backend
+    if backend == "auto":
+        try:
+            backend = detect_backend(
+                db_path=args.db_path,
+                local_root=args.local_root,
+                config_path=args.exclude_config if hasattr(args, "exclude_config") else DEFAULT_CONFIG["exclude_config"],
+            ).kind
+        except Exception:
+            backend = "daemon"
+    if backend == "api":
+        backend = "daemon"
+    return backend
+
+
 def main() -> None:
     args = parse_args()
     root_path = normalize_path(args.path)
     schema = args.schema
-    use_policy = args.use_policy if args.use_policy is not None else args.backend == "rclone"
+    effective_backend = _resolve_backend_name(args)
+
+    # use_policy is default True unless explicitly disabled
+    use_policy = args.use_policy if args.use_policy is not None else True
 
     policy_path = args.policy_path or default_policy_path()
     policy_ctx = load_policy_context(policy_path, args.local_root) if use_policy else PolicyContext(
@@ -531,7 +554,10 @@ def main() -> None:
         filter_mismatch=False,
     )
 
-    if args.backend == "rclone":
+    source_path: str
+    source_warnings: List[str]
+
+    if effective_backend == "rclone":
         if use_policy and policy_ctx.policy:
             membership_dirs = set(effective_download_paths(policy_ctx.policy))
             source_path = policy_path
@@ -545,10 +571,18 @@ def main() -> None:
             source_path = filters_result.filter_path
             source_warnings = filters_result.warnings
     else:
-        exclude_result = load_exclude_dirs()
-        membership_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
-        source_path = exclude_result.config_path
-        source_warnings = exclude_result.warnings
+        # daemon backend: use policy if available; fallback to exclude-dirs
+        if use_policy and policy_ctx.policy:
+            membership_dirs = set(effective_download_paths(policy_ctx.policy))
+            source_path = policy_path
+            source_warnings = []
+            if policy_ctx.filter_mismatch:
+                source_warnings.append("bisync filter out of sync with policy")
+        else:
+            exclude_result = load_exclude_dirs()
+            membership_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
+            source_path = exclude_result.config_path
+            source_warnings = exclude_result.warnings
 
     storage = create_storage(args.db_path)
     analyzer = Analyzer(storage)
@@ -570,13 +604,10 @@ def main() -> None:
             local_scan_id = local_result.scan_id
 
     node = build_tree(analyzer, snapshot, root_path, args.depth)
-    if args.backend == "rclone":
-        compute_status_whitelist(
-            node, membership_dirs, collapse=collapse, policy_paths=policy_path_set,
-            local_root=args.local_root,
-        )
-    else:
-        compute_status(node, membership_dirs, collapse=collapse)
+    compute_status_whitelist(
+        node, membership_dirs, collapse=collapse, policy_paths=policy_path_set,
+        local_root=args.local_root,
+    )
 
     apply_sync_percent(node, analyzer, snapshot, local_scan_id, args.local_root)
 

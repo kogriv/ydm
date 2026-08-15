@@ -32,6 +32,7 @@
 - [`tasks/sync_tree/README.md`](../sync_tree/README.md) — дерево и метки `[B]`/`[L]`
 - [`tasks/rclone_backend/POLICY_AWARE_BISYNC.md`](../rclone_backend/POLICY_AWARE_BISYNC.md) — policy layer
 - [`tasks/sync_manager/README.md`](../sync_manager/README.md) — исторический sync manager
+- [`tasks/sync_unification/README.md`](../sync_unification/README.md) — unified backend-agnostic CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) for daemon and rclone
 
 ## Целевой UX (one-liner)
 

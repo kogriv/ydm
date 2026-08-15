@@ -11,11 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from tools.sync_backends import (
+    DaemonBackend,
+    RcloneBackend,
+    backend_from_args,
+    stop_yandex_disk_daemon,
+)
 from tools.sync_bisync import cmd_resync, cmd_run
 from tools.sync_common import delete_local_entry_contents, load_sync_filters, rclone_check_entry
 from tools.sync_policy import (
     add_policy_path,
     inspect_path,
+    load_policy,
     remove_policy_path,
     render_filters,
 )
@@ -33,6 +40,8 @@ class ActionResult:
 
 
 def _policy_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
+    is_daemon = cfg.backend_kind == "daemon"
+    backend_arg = "daemon" if is_daemon else "rclone"
     base = {
         "db_path": cfg.db_path,
         "local_root": cfg.local_root,
@@ -43,12 +52,17 @@ def _policy_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
         "bisync_filter_path": cfg.bisync_filter_path,
         "format": "json",
         "text_header": False,
+        "backend": backend_arg,
+        "exclude_config": "~/.config/yandex-disk/config.cfg",
+        "apply": False,
     }
     base.update(extra)
     return argparse.Namespace(**base)
 
 
 def _bisync_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
+    is_daemon = cfg.backend_kind == "daemon"
+    backend_arg = "daemon" if is_daemon else "rclone"
     base = {
         "db_path": cfg.db_path,
         "local_root": cfg.local_root,
@@ -60,6 +74,8 @@ def _bisync_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
         "format": "json",
         "text_header": False,
         "stream": False,
+        "backend": backend_arg,
+        "exclude_config": "~/.config/yandex-disk/config.cfg",
     }
     base.update(extra)
     return argparse.Namespace(**base)
@@ -103,15 +119,14 @@ def _format_bisync_result(payload: dict, *, label: str) -> ActionResult:
 
 
 def render_filters_apply(cfg: MenuConfig) -> ActionResult:
-    from tools.sync_policy import load_policy
-
     policy = load_policy(cfg.policy_path)
     if not policy:
         return ActionResult(False, f"Policy not found: {cfg.policy_path}")
-    write = render_filters(_policy_ns(cfg, apply=True), policy)
+    backend = backend_from_args(_policy_ns(cfg))
+    write = backend.apply_policy(policy, dry_run=False)
     if write.get("error"):
         return ActionResult(False, write["error"], write)
-    return ActionResult(True, "Filters updated", write)
+    return ActionResult(True, f"Policy applied via {backend.name()}", write)
 
 
 def action_inspect(cfg: MenuConfig, path: str) -> dict:
@@ -125,15 +140,18 @@ def action_add(
     *,
     force_risk: bool = False,
 ) -> ActionResult:
-    payload = add_policy_path(
-        _policy_ns(cfg, path=path, mode=mode, apply=True, force_risk=force_risk)
-    )
+    ns = _policy_ns(cfg, path=path, mode=mode, apply=True, force_risk=force_risk)
+    payload = add_policy_path(ns)
     if payload.get("error"):
         return ActionResult(False, payload["error"], payload)
-    filt = render_filters_apply(cfg)
-    if not filt.ok:
-        return ActionResult(False, filt.message, {"add": payload, "filters": filt.details})
-    msg = f"Added {payload.get('path')} as {mode}"
+    backend = backend_from_args(ns)
+    policy = load_policy(ns.policy_path)
+    if policy:
+        apply_payload = backend.apply_policy(policy, dry_run=False)
+        payload["backend_apply"] = apply_payload
+        if apply_payload.get("error"):
+            return ActionResult(False, apply_payload["error"], payload)
+    msg = f"Added {payload.get('path')} as {mode} via {cfg.backend_name}"
     return ActionResult(True, msg, payload)
 
 
@@ -143,12 +161,17 @@ def action_remove(
     *,
     delete_local: bool = False,
 ) -> ActionResult:
-    payload = remove_policy_path(_policy_ns(cfg, path=path, apply=True))
+    ns = _policy_ns(cfg, path=path, apply=True)
+    payload = remove_policy_path(ns)
     if payload.get("error"):
         return ActionResult(False, payload["error"], payload)
-    filt = render_filters_apply(cfg)
-    if not filt.ok:
-        return ActionResult(False, filt.message, payload)
+    backend = backend_from_args(ns)
+    policy = load_policy(ns.policy_path)
+    if policy:
+        apply_payload = backend.apply_policy(policy, dry_run=False)
+        payload["backend_apply"] = apply_payload
+        if apply_payload.get("error"):
+            return ActionResult(False, apply_payload["error"], payload)
 
     local_info = None
     if delete_local:
@@ -163,7 +186,7 @@ def action_remove(
             }
     return ActionResult(
         True,
-        f"Removed {path} from policy",
+        f"Removed {path} from policy via {cfg.backend_name}",
         {"remove": payload, "local_delete": local_info},
     )
 
@@ -180,6 +203,10 @@ def offer_resync_if_needed(
     default_yes: bool = True,
 ) -> None:
     if mode != "bidirectional":
+        return
+    if cfg.backend_kind == "daemon":
+        # Daemon backend does not use rclone bisync; sync happens automatically.
+        print("yandex-disk daemon will sync the folder automatically.")
         return
     if not resync_needed(cfg):
         return
@@ -217,10 +244,18 @@ def action_bisync_run(cfg: MenuConfig, *, apply: bool) -> ActionResult:
     status = load_status(cfg)
     if status.lock_held:
         return ActionResult(False, f"Bisync busy (pid {status.lock_pid})")
+    stream = _interactive_stream(apply=apply)
+    backend = backend_from_args(_bisync_ns(cfg))
+    if isinstance(backend, DaemonBackend):
+        if not apply:
+            return ActionResult(True, "Daemon sync: apply to restart yandex-disk daemon")
+        payload = backend.run_sync(dry_run=False)
+        if payload.get("error"):
+            return ActionResult(False, payload["error"], payload)
+        return ActionResult(True, "yandex-disk daemon restarted", payload)
     if apply:
         print_bisync_scope(cfg)
-    stream = _interactive_stream(apply=apply)
-    payload = cmd_run(_bisync_ns(cfg, apply=apply, stream=stream, notify_on_error=False))
+    payload = backend.run_sync(dry_run=not apply, stream=stream)
     if payload.get("error"):
         return _format_bisync_result(payload, label="Bisync run")
     if not apply:
@@ -260,60 +295,37 @@ def handle_blocked_add(
 
 
 def cloud_list_dirs(cfg: MenuConfig, parent: str) -> List[str]:
-    remote_path = parent.strip("/")
-    target = f"{cfg.remote}:{remote_path}" if remote_path else f"{cfg.remote}:"
+    backend = backend_from_args(_policy_ns(cfg))
     try:
-        proc = subprocess.run(
-            ["rclone", "lsf", target, "--dirs-only", "--max-depth", "1"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        print(f"rclone lsf failed: {exc}")
+        return backend.list_cloud_children(parent)
+    except Exception as exc:
+        print(f"cloud list failed: {exc}")
         return []
-    items = []
-    for line in proc.stdout.splitlines():
-        name = line.strip().rstrip("/")
-        if name:
-            items.append(name)
-    return sorted(items)
 
 
 def run_cloud_scan(cfg: MenuConfig, path: str) -> ActionResult:
-    ydm_py = str(ROOT_DIR / "ydm.py")
-    cmd = [
-        sys.executable,
-        ydm_py,
-        "--db-path",
-        cfg.db_path,
-        "--backend",
-        "rclone",
-        "scan",
-        "cloud",
-        "--path",
-        path,
-        "--progress",
-    ]
-    print(f"Running: {' '.join(cmd)}")
+    backend = backend_from_args(_policy_ns(cfg))
+    print(f"Running cloud scan for {path} via {backend.name()}")
     print("(Ctrl+C safe — scan is resumable)")
     try:
-        proc = subprocess.run(cmd)
+        result = backend.run_cloud_scan(path)
     except KeyboardInterrupt:
         return ActionResult(False, "Scan interrupted")
-    if proc.returncode != 0:
-        return ActionResult(False, f"Scan failed (rc={proc.returncode})")
-    return ActionResult(True, f"Cloud scan finished for {path}")
+    if result.get("error"):
+        return ActionResult(False, result["error"], result)
+    return ActionResult(True, f"Cloud scan finished for {path}", result)
 
 
 def run_sync_tree(cfg: MenuConfig, path: str, depth: int) -> ActionResult:
+    is_daemon = cfg.backend_kind == "daemon"
+    backend_arg = "daemon" if is_daemon else "rclone"
     cmd = [
         sys.executable,
         str(ROOT_DIR / "tools" / "sync_tree.py"),
         "--db-path",
         cfg.db_path,
         "--backend",
-        "rclone",
+        backend_arg,
         "--local-root",
         cfg.local_root,
         "--policy-path",

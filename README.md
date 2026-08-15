@@ -34,6 +34,12 @@ python3 tools/sync_rename.py plan --local-root /sdcard/Download/ya_disk --old /D
 python3 tools/sync_rename.py apply --local-root /sdcard/Download/ya_disk --old /DAO/a.txt --new /DAO/b.txt
 ```
 
+On Ubuntu with the official `yandex-disk` daemon the same `sync_policy.py`
+commands work as well: they manage `exclude-dirs=` in
+`~/.config/yandex-disk/config.cfg`. See
+[`tasks/sync_unification/README.md`](tasks/sync_unification/README.md) for
+one CLI across both environments.
+
 ## Features
 
 - 🔍 **Full cloud scan** - recursive walk of every file/folder via the Yandex Disk API
@@ -360,6 +366,7 @@ source ~/.bashrc
 - **[Sync Tree v2](tasks/sync_tree/README.md)** - Policy-aware `ydm-tree` (`[B]`/`[D]`/`[L]` markers, orphan paths)
 - **[YDM Menu](tasks/ydm_menu/README.md)** - Interactive sync UI for humans (`ydm`; agents keep `ydm-sync-*` CLI)
 - **[Sync Manager](tasks/sync_manager/README.md)** - Transitional sync_tree/sync_exclude tools and Sync Manager plans
+- **[Unified Sync Interface](tasks/sync_unification/README.md)** - One CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) for both the `yandex-disk` daemon and the `rclone` backend, with automatic backend detection
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Alternative to the `yandex-disk` daemon for environments without it (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup via rclone
 - **[Smart Diff](tasks/smart_diff/README.md)** - How `report diff` builds a composite snapshot (full scan + newer partial scans) instead of just comparing the two latest scans
 - **[CHANGELOG.md](CHANGELOG.md)** - Notable changes, newest first

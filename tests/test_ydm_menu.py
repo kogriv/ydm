@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -49,14 +50,21 @@ class MenuScopeTests(unittest.TestCase):
     def test_bisync_scope_lines(self):
         from tools.ydm_menu_actions import bisync_scope_lines
 
-        cfg = MenuConfig.from_env_and_args(
-            local_root="/sdcard/Download/ya_disk",
-            bisync_filter_path="/sdcard/Download/ya_disk.bisync.filters",
-        )
-        lines = bisync_scope_lines(cfg)
-        text = "\n".join(lines)
-        self.assertIn("NOT the whole disk", text)
-        self.assertIn("+ /", text)
+        tmpdir = tempfile.mkdtemp()
+        filter_path = os.path.join(tmpdir, "test.bisync.filters")
+        with open(filter_path, "w", encoding="utf-8") as handle:
+            handle.write("+ /Books/Math/**\n- **\n")
+        try:
+            cfg = MenuConfig.from_env_and_args(
+                local_root="/sdcard/Download/ya_disk",
+                bisync_filter_path=filter_path,
+            )
+            lines = bisync_scope_lines(cfg)
+            text = "\n".join(lines)
+            self.assertIn("NOT the whole disk", text)
+            self.assertIn("+ /Books/Math/", text)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class MenuStatusTests(unittest.TestCase):

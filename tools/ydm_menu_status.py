@@ -28,16 +28,22 @@ class MenuStatus:
 
 
 def _bisync_args(cfg: MenuConfig) -> argparse.Namespace:
+    is_daemon = cfg.backend_kind == "daemon"
+    backend_arg = "daemon" if is_daemon else "rclone"
     return argparse.Namespace(
         db_path=cfg.db_path,
         local_root=cfg.local_root,
         remote=cfg.remote,
         filter_path=cfg.bisync_filter_path,
         policy_path=cfg.policy_path,
+        backend=backend_arg,
+        exclude_config="~/.config/yandex-disk/config.cfg",
     )
 
 
 def _policy_args(cfg: MenuConfig) -> argparse.Namespace:
+    is_daemon = cfg.backend_kind == "daemon"
+    backend_arg = "daemon" if is_daemon else "rclone"
     return argparse.Namespace(
         db_path=cfg.db_path,
         local_root=cfg.local_root,
@@ -46,6 +52,8 @@ def _policy_args(cfg: MenuConfig) -> argparse.Namespace:
         legacy_filter_path=None,
         download_filter_path=None,
         bisync_filter_path=cfg.bisync_filter_path,
+        backend=backend_arg,
+        exclude_config="~/.config/yandex-disk/config.cfg",
     )
 
 

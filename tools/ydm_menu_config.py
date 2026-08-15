@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from tools.sync_backends import detect_backend
 from tools.sync_policy import bisync_filter_path as policy_bisync_filter_path, default_policy_path
 from ydm import DEFAULT_CONFIG
 
@@ -19,6 +20,8 @@ class MenuConfig:
     policy_path: str
     bisync_filter_path: str
     remote: str
+    backend_name: str
+    backend_kind: str = "daemon"
     plain: bool = False
     width: int = 72
 
@@ -31,6 +34,7 @@ class MenuConfig:
         policy_path: str | None = None,
         bisync_filter_path: str | None = None,
         remote: str | None = None,
+        backend: str | None = None,
         plain: bool = False,
     ) -> "MenuConfig":
         resolved_local = os.path.expanduser(
@@ -54,11 +58,23 @@ class MenuConfig:
             or policy_bisync_filter_path(resolved_local)
         )
         resolved_remote = remote or os.environ.get("YDM_REMOTE") or DEFAULT_CONFIG["rclone_remote"]
+        resolved_backend = detect_backend(
+            explicit=backend,
+            env=os.environ.get("YDM_BACKEND"),
+            db_path=resolved_db,
+            local_root=resolved_local,
+            remote=resolved_remote,
+            policy_path=resolved_policy,
+            bisync_filter_path=resolved_bisync,
+        )
         return cls(
             db_path=resolved_db,
             local_root=resolved_local,
             policy_path=resolved_policy,
             bisync_filter_path=resolved_bisync,
             remote=resolved_remote,
+            backend_name=resolved_backend.name(),
+            backend_kind=resolved_backend.kind,
             plain=plain,
+            width=72,
         )

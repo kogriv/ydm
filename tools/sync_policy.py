@@ -27,6 +27,7 @@ from tools.sync_common import (  # noqa: E402
     build_composite_snapshot,
     create_storage,
     default_filter_path,
+    fetch_child_dirs,
     filter_file_hash,
     load_bisync_state,
     load_sync_filters,
@@ -34,6 +35,10 @@ from tools.sync_common import (  # noqa: E402
     path_exists_in_snapshot,
     select_scan_id_for_path,
     var_path,
+)
+from tools.sync_backends import (  # noqa: E402
+    backend_from_args,
+    detect_backend,
 )
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
 
@@ -146,6 +151,101 @@ def effective_download_paths(policy: dict) -> List[str]:
 
 def effective_bisync_paths(policy: dict) -> List[str]:
     return policy_paths_by_mode(policy, "bidirectional")
+
+
+def _is_disabled_ancestor(entry: str, target: str) -> bool:
+    """Return True if entry is an ancestor path of target and would block it."""
+    if not entry:
+        return False
+    if entry == target:
+        return False
+    # entry is ancestor if target starts with entry + "/"
+    return target.startswith(entry + "/")
+
+
+def _find_scan_with_children(storage, parent_path: str) -> Optional[int]:
+    """Return the latest scan_id that actually contains directory children of parent_path."""
+    from tools.sync_common import normalize_db_parent_path
+
+    parent_path_db = normalize_db_parent_path(parent_path)
+    conn = storage.get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT scan_id
+            FROM files
+            WHERE parent_path = ? AND type = 'dir'
+            ORDER BY scan_id DESC
+            LIMIT 1
+            """,
+            (parent_path_db,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def _policy_coerce_for_daemon(
+    policy: dict,
+    target: str,
+    mode: str,
+    db_path: str,
+) -> List[str]:
+    """
+    Resolve ancestor conflicts for the daemon backend.
+
+    The yandex-disk daemon uses an exclude-dirs blacklist: a disabled ancestor
+    blocks every descendant. When the user adds a descendant as bidirectional
+    (or download_only), we must:
+      1. Remove disabled entries that are ancestors of the target.
+      2. For every removed ancestor, add all its other children as disabled
+         so they stay excluded.
+
+    Returns a list of human-readable changes.
+    """
+    changes: List[str] = []
+    if mode == "disabled":
+        return changes
+
+    paths = policy.get("paths", {})
+    ancestors_to_remove = [
+        entry for entry, meta in paths.items()
+        if meta.get("mode") == "disabled" and _is_disabled_ancestor(entry, target)
+    ]
+    if not ancestors_to_remove:
+        return changes
+
+    storage = create_storage(db_path)
+
+    for ancestor in ancestors_to_remove:
+        del paths[ancestor]
+        changes.append(f"removed disabled ancestor: /{ancestor}")
+
+        # The removed ancestor itself becomes the parent whose children we enumerate.
+        # ancestor = "Books", target = "Books/Math/АнГем" -> next_child = "Math"
+        ancestor_parts = ancestor.split("/") if ancestor else []
+        target_parts = target.split("/")
+        if len(target_parts) <= len(ancestor_parts):
+            continue
+        next_child = target_parts[len(ancestor_parts)]
+        parent_path = f"/{ancestor}" if ancestor else "/"
+
+        scan_id = _find_scan_with_children(storage, parent_path)
+        if scan_id is None:
+            changes.append(f"WARNING: no scan data for {parent_path}, could not add siblings")
+            continue
+        child_names = fetch_child_dirs(storage, scan_id, parent_path)
+        for child_name in child_names:
+            if child_name == next_child:
+                continue
+            sibling_entry = f"{ancestor}/{child_name}" if ancestor else child_name
+            # Don't overwrite an explicitly managed path
+            if sibling_entry in paths:
+                continue
+            paths[sibling_entry] = {"mode": "disabled"}
+            changes.append(f"added disabled sibling: /{sibling_entry}")
+
+    return changes
 
 
 def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: bool = False) -> None:
@@ -290,6 +390,14 @@ def inspect_path(db_path: str, local_root: str, path: str, *, max_examples: int 
 
 
 def migrate_policy(args: argparse.Namespace) -> dict:
+    backend_name = args.backend
+    resolved = backend_name
+    if resolved == "auto":
+        resolved = _resolve_backend_name(args)
+
+    if resolved == "daemon":
+        return _migrate_from_daemon(args)
+
     filter_path = args.legacy_filter_path or default_filter_path(args.local_root)
     filters = load_sync_filters(filter_path)
     policy = empty_policy(args.local_root, args.remote)
@@ -317,6 +425,31 @@ def migrate_policy(args: argparse.Namespace) -> dict:
         "warnings": filters.warnings,
         "policy": policy,
         "inspections": inspections,
+        "error": None,
+    }
+    if args.apply:
+        write_policy(args.policy_path, policy)
+    return result
+
+
+def _migrate_from_daemon(args: argparse.Namespace) -> dict:
+    from tools.sync_common import load_exclude_dirs
+    exclude_result = load_exclude_dirs(args.exclude_config)
+    policy = empty_policy(args.local_root, args.remote)
+    for entry in exclude_result.exclude_dirs:
+        if entry == CHECK_ACCESS_FILENAME:
+            continue
+        policy["paths"][entry] = {"mode": "disabled"}
+    policy["updated_at"] = datetime.now().isoformat()
+    result = {
+        "schema": SCHEMA,
+        "action": "migrate",
+        "source": "daemon",
+        "dry_run": not args.apply,
+        "policy_path": args.policy_path,
+        "exclude_config": exclude_result.config_path,
+        "warnings": exclude_result.warnings,
+        "policy": policy,
         "error": None,
     }
     if args.apply:
@@ -415,6 +548,16 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         if requested_mode == "bidirectional" and args.force_risk:
             meta["forced_risk"] = True
         policy["paths"][entry] = meta
+
+        # Resolve ancestor conflicts on daemon backend
+        backend_name = getattr(args, "backend", None)
+        if backend_name == "auto":
+            backend_name = _resolve_backend_name(args)
+        if backend_name == "daemon":
+            coerce_changes = _policy_coerce_for_daemon(policy, entry, requested_mode, args.db_path)
+            if coerce_changes:
+                result["coerce_changes"] = coerce_changes
+
         policy["updated_at"] = datetime.now().isoformat()
         write_policy(args.policy_path, policy)
         result["policy"] = policy
@@ -493,9 +636,20 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
         print(payload["download_filter"], end="")
         print(f"bisync_filter_path: {payload['bisync_filter_path']}")
         print(payload["bisync_filter"], end="")
+        backend_apply = payload.get("backend_apply")
+        if backend_apply:
+            print(f"backend: {backend_apply.get('backend')}")
+            print(f"backend_action: {backend_apply.get('action')}")
+            if backend_apply.get("error"):
+                print(f"backend_error: {backend_apply['error']}")
     elif action == "migrate":
         paths = payload["policy"].get("paths", {})
-        print(f"legacy_filter_path: {payload['legacy_filter_path']}")
+        source = payload.get("source", "legacy_filter")
+        if source == "daemon":
+            print(f"exclude_config: {payload.get('exclude_config')}")
+        else:
+            print(f"legacy_filter_path: {payload.get('legacy_filter_path')}")
+        print(f"source: {source}")
         for entry, meta in sorted(paths.items()):
             print(f"{entry}: {meta['mode']}")
     elif action in {"add", "remove"}:
@@ -504,6 +658,12 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
             print(f"mode: {payload['mode']}")
         if payload.get("risk"):
             print(f"safe_for_bidirectional: {payload['risk']['safe_for_bidirectional']}")
+        backend_apply = payload.get("backend_apply")
+        if backend_apply:
+            print(f"backend: {backend_apply.get('backend')}")
+            print(f"backend_action: {backend_apply.get('action')}")
+            if backend_apply.get("error"):
+                print(f"backend_error: {backend_apply['error']}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -520,6 +680,17 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--bisync-filter-path", default=None)
         sub.add_argument("--format", choices=["json", "text"], default="text")
         sub.add_argument("--text-header", action=argparse.BooleanOptionalAction, default=True)
+        sub.add_argument(
+            "--backend",
+            choices=["daemon", "rclone", "auto"],
+            default="auto",
+            help="Sync backend to use: daemon (yandex-disk), rclone, or auto-detect",
+        )
+        sub.add_argument(
+            "--exclude-config",
+            default=DEFAULT_CONFIG["exclude_config"],
+            help="Path to yandex-disk config.cfg (daemon backend only)",
+        )
 
     status = subparsers.add_parser("status")
     common_flags(status)
@@ -551,6 +722,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_backend_name(args: argparse.Namespace) -> str:
+    """Resolve effective backend name from args/env/config/auto-detect."""
+    backend = getattr(args, "backend", None)
+    if backend and backend != "auto":
+        return backend
+    env = os.environ.get("YDM_BACKEND")
+    if env and env != "auto":
+        return env
+    return detect_backend(
+        db_path=args.db_path,
+        local_root=args.local_root,
+        remote=args.remote,
+        policy_path=args.policy_path,
+        bisync_filter_path=getattr(args, "bisync_filter_path", None),
+        download_filter_path=getattr(args, "download_filter_path", None),
+        config_path=getattr(args, "exclude_config", DEFAULT_CONFIG["exclude_config"]),
+    ).kind
+
+
+def _apply_backend_policy(args: argparse.Namespace, policy: dict) -> dict:
+    """Apply policy via the selected backend."""
+    backend = backend_from_args(args)
+    return backend.apply_policy(policy, dry_run=not args.apply)
+
+
 def main() -> None:
     args = parse_args()
     try:
@@ -575,10 +771,24 @@ def main() -> None:
                 }
             else:
                 payload = render_filters(args, policy)
+                # Also apply to backend if requested
+                if args.apply:
+                    backend_payload = _apply_backend_policy(args, policy)
+                    payload["backend_apply"] = backend_payload
         elif args.command == "add":
             payload = add_policy_path(args)
+            if args.apply and payload.get("error") is None:
+                policy = load_policy(args.policy_path)
+                if policy:
+                    backend_payload = _apply_backend_policy(args, policy)
+                    payload["backend_apply"] = backend_payload
         else:
             payload = remove_policy_path(args)
+            if args.apply and payload.get("error") is None:
+                policy = load_policy(args.policy_path)
+                if policy:
+                    backend_payload = _apply_backend_policy(args, policy)
+                    payload["backend_apply"] = backend_payload
     except Exception as exc:
         payload = {
             "schema": SCHEMA,
