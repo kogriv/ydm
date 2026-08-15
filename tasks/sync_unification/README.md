@@ -8,7 +8,15 @@
 - Design: ✅ `DESIGN.md`
 - Backlog: ✅ `BACKLOG.md`
 - User guide: ✅ `HOW_TO_USE.md`
-- Implementation: ⏳ не начата
+- Implementation: 🔄 код написан (не закоммичен), см. `BACKLOG.md` → Current state
+
+> ⚠️ **Важно перед продолжением работ.** Первая реализация (2026-08-14)
+> тестировалась на боевом демоне и боевом `~/.config/yandex-disk/config.cfg`
+> и привела к удалению облачной папки `/Books` (13 893 файла, 113 ГБ) — она
+> была восстановлена из корзины 15 августа. Разбор:
+> [`docs/incidents/`](../../docs/incidents/). В `DaemonBackend.apply_policy()`
+> добавлен предохранитель `deletion_risk_paths()`; любые проверки daemon-бэкенда
+> проводить на временном конфиге, а не на рабочем.
 
 ## Проблема
 

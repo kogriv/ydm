@@ -5,6 +5,32 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-15 — Deletion guard for the daemon backend, after a 113 GB near-loss
+
+The work below was validated against the **live** `yandex-disk` daemon and
+the real `~/.config/yandex-disk/config.cfg`. A bug in the ancestor-sibling
+coercion left `Books` out of `exclude-dirs`; its local copy was then deleted
+while the daemon still tracked it, and on the next start the daemon read that
+absence as a user deletion and propagated it to the cloud — 13 893 files
+(113,6 GB) went to the trash. The data was restored and verified from the
+snapshot database: 0 files lost against the last full pre-incident scan.
+Root cause and timeline:
+[`docs/incidents/yandex-books-delete-2026-08-14.md`](docs/incidents/yandex-books-delete-2026-08-14.md).
+
+- `DaemonBackend.deletion_risk_paths()`: `apply_policy()` now refuses to
+  restart the daemon while a path stays inside its scope but has no local
+  copy — the exact precondition for a cloud deletion. A path that is only
+  now leaving `exclude-dirs` is not flagged: the daemon downloads it rather
+  than deleting it. Override with `force_unsafe=True`; dry-run reports the
+  risk in `deletion_risk_paths` instead of raising.
+- Backend selection no longer parses the human-readable name: callers use
+  `SyncBackend.kind`. Previously `_resolve_backend_name()` compared
+  `"yandex-disk daemon".split()[0]` against `"daemon"`, so under the default
+  `--backend auto` the daemon-specific paths in `sync_policy.py` (including
+  `migrate`) never ran.
+- `ydm_menu.py --plain` reaches `MenuConfig` again; the flag was parsed but
+  dropped, leaving `plain` hardcoded to `False`.
+
 ## 2026-08-14 — Unified sync interface across daemon and rclone backends
 
 Added `tools/sync_backends.py`, a backend abstraction that lets the same

@@ -47,7 +47,7 @@
 | 2.1 | Добавить `--backend {daemon,rclone,auto}` в `sync_policy.py` | `tools/sync_policy.py` | `--help` показывает флаг; unit test parse args |
 | 2.2 | `add_policy_path()` default mode = bidirectional (уже так) | `tools/sync_policy.py` | confirm |
 | 2.3 | При `--apply` вызывать backend.apply_policy() | `tools/sync_policy.py` | daemon backend обновляет config.cfg; rclone backend пишет filters; unit test |
-| 2.4 | Новый subcommand `migrate --from-daemon` | `tools/sync_policy.py` | читает exclude-dirs → создаёт policy с disabled; dry-run по умолчанию; unit test |
+| 2.4 | Новый subcommand `migrate --backend daemon` | `tools/sync_policy.py` | читает exclude-dirs → создаёт policy с disabled; dry-run по умолчанию; unit test |
 | 2.5 | `download_only` на daemon backend — clear error | `tools/sync_policy.py` | unit test |
 | 2.6 | Обновить `render` для action `migrate` | `tools/sync_policy.py` | text + JSON output |
 | 2.7 | Обновить `tests/test_sync_policy.py` или добавить | tests | покрыть migrate, backend apply |
@@ -170,7 +170,7 @@
 - [ ] После stale snapshot menu предлагает cloud scan
 - [ ] `ydm-menu` с `--backend rclone` на машине с daemon: warning + предложение остановить daemon
 - [ ] На Android `ydm-menu` работает через rclone как раньше
-- [ ] `python3 tools/sync_policy.py migrate --from-daemon --apply` создаёт policy из exclude-dirs
+- [ ] `python3 tools/sync_policy.py migrate --backend daemon --apply` создаёт policy из exclude-dirs
 - [ ] `sync_policy.py add --mode download_only` на daemon падает с понятной ошибкой
 - [ ] `tests/test_sync_backends.py` все зелёные
 - [ ] `tests/test_ydm_menu.py` все зелёные
@@ -228,16 +228,34 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 
 
 ## Current state
 
+*Обновлено 2026-08-15.*
+
 | Item | Status |
 |------|--------|
 | Gap analysis | ✅ |
 | Design document | ✅ |
 | Backlog | ✅ |
-| Backend abstraction | ⏳ Phase 1 |
-| sync_policy backend support | ⏳ Phase 2 |
-| sync_tree policy on daemon | ⏳ Phase 3 |
-| ydm_menu backend-agnostic | ⏳ Phase 4 |
-| Bash aliases fixed | ⏳ Phase 5 |
-| Config/status | ⏳ Phase 6 |
-| Tests & CI | ⏳ Phase 7 |
-| Docs update | ⏳ Phase 8 |
+| Backend abstraction | ✅ код в рабочем дереве, не закоммичен |
+| sync_policy backend support | ✅ код в рабочем дереве, не закоммичен |
+| sync_tree policy on daemon | ✅ код в рабочем дереве, не закоммичен |
+| ydm_menu backend-agnostic | ✅ код в рабочем дереве, не закоммичен |
+| Bash aliases fixed | ✅ `~/.bashrc` уже правлен |
+| Config/status | ✅ `ydm_config.json` + backend в шапке меню |
+| Tests & CI | ✅ 57 тестов зелёные, шаги в `ci.yml` добавлены |
+| Docs update | ✅ README / CHANGELOG / cross-links |
+| **Проверка на живом daemon-окружении** | ❌ **не пройдена** — см. предупреждение ниже |
+
+### Что осталось закрыть перед коммитом
+
+1. **Ancestor-sibling coercion (`_policy_coerce_for_daemon`) не проверена.**
+   Первая попытка проверки 2026-08-14 шла на боевом конфиге и закончилась
+   удалением облачной `/Books` (113 ГБ, восстановлена из корзины). Проверять
+   только на временном `config.cfg` и тестовом дереве.
+2. **Предохранитель `DaemonBackend.deletion_risk_paths()`** (добавлен 2026-08-15):
+   `apply_policy()` отказывается перезапускать демон, если путь остаётся в
+   синхронизации, но его локальной копии нет — именно эта комбинация приводит к
+   удалению в облаке. Покрыт тестами; на живом окружении не проверялся.
+3. **Дефекты первой реализации исправлены 2026-08-15:** `SyncBackend.kind`
+   вместо разбора человекочитаемого `name()` в `sync_policy._resolve_backend_name`
+   и `sync_tree._resolve_backend_name` (при `--backend auto` daemon-ветка не
+   срабатывала), возвращён проброс `--plain` в `ydm_menu.py`.
