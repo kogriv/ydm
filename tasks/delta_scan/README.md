@@ -1,7 +1,7 @@
 # Delta scan — cheap change detection instead of a full rescan
 
-**Status: proposed, not built.** The API probes below were run against the
-live account on 2026-08-16 and the numbers are real; no code exists yet.
+**Status: step 1 built (`tools/cloud_delta.py`), steps 2–3 proposed.** All
+numbers below were measured against the live account on 2026-08-16.
 
 ## Problem
 
@@ -39,28 +39,72 @@ Two findings that shape the design:
    top-down walk cannot prune unchanged subtrees by comparing one revision —
    that shortcut is not available.
 
+## Step 1 — built: `tools/cloud_delta.py`
+
+Read-only. Nothing is written to `monitor.db`; the output is a targeting list
+for the existing scanner.
+
+```bash
+# One request: has anything changed on the disk at all?
+python3 tools/cloud_delta.py check --save
+
+# Which folders of the snapshot went stale, and what to rescan
+python3 tools/cloud_delta.py changes
+```
+
+First real run on this account:
+
+```text
+snapshot: base scan #72 at 2026-03-04, 149 folder update(s)
+swept: 5002 file(s), 6 trash entr(ies), 9 request(s)
+stale folders: 67  changed files: 662  deleted: 6  rescan roots: 32
+```
+
+**9 requests against ~4 600 for a full scan**, and the answer is specific:
+`/pro/salva` has 140 files newer than the scan that covers it, `/obsidian_vault`
+has 70, and so on — with a `scan cloud --path …` line for each.
+
+Two details that make the output usable rather than merely correct:
+
+- **Staleness is per folder, not per disk.** The composite covers every folder
+  with the newest scan that visited it, so the same timestamp can be news in
+  `/video` (covered by the March base) and old news in `/pro` (rescanned in
+  August). `Snapshot.covering_scan()` answers that per path.
+- **Nested folders collapse.** `scan cloud --path X` walks X recursively, so
+  67 stale folders became 32 commands. The disk root is deliberately excluded
+  from that collapsing: rescanning `/` *is* the full scan.
+
+Limits are reported, never silent: hitting `--max-pages` before reaching the
+snapshot date prints a warning saying the list is incomplete, and a disk
+revision that moved while the sweeps found nothing prints the blind-spot
+warning below instead of "no changes".
+
 ## Proposed mechanism
 
 Store `disk_revision` alongside each cloud scan. Then:
 
+Steps 0–2 are what `cloud_delta.py` does today:
+
 **Step 0 — is anything different?** One request for `/v1/disk` revision.
-Unchanged since the last scan → nothing to do. On a quiet day the entire
-check costs one HTTP call.
+Unchanged since the last check → nothing to do anywhere. On a quiet day the
+whole thing costs one HTTP call.
 
 **Step 1 — additions and modifications.** Page `/files?sort=-modified` until
-`modified` drops below the previous scan's timestamp. Cost is
+`modified` drops below the oldest date the snapshot covers. Cost is
 `ceil(changed_files / 1000)` requests, independent of disk size. Each item
-carries `path`, `size`, `md5`, `modified` — everything a `files` row needs.
+carries `path`, `size`, `md5`, `modified`.
 
-**Step 2 — deletions.** Page `/trash/resources?sort=-deleted` until `deleted`
-drops below the previous scan's timestamp. `origin_path` says what vanished
-and from where.
+**Step 2 — deletions.** Page `/trash/resources?sort=-deleted` the same way.
+`origin_path` says what vanished and from where.
 
-**Step 3 — write a delta scan.** Persist as a scan of type `delta` whose rows
-are the changed paths, and teach `build_composite_scan()` to overlay deltas
-per *file* rather than per folder. This is the part that needs real design
-work: today a folder update replaces a whole `parent_path` bucket, which is
-wrong for a per-file delta.
+**Step 3 — not built: write the delta into the snapshot.** Persist it as a
+scan whose rows are the changed paths, and teach `build_composite_scan()` to
+overlay per *file* rather than per folder. Today a folder update replaces a
+whole `parent_path` bucket, which is wrong for a per-file delta — that is the
+design work this needs. Until then step 2's output feeds the existing
+`scan cloud --path …`, which is also what supplies the things the flat file
+listing cannot: directory rows, empty folders, and the fact that something in
+a folder is *gone* rather than merely changed.
 
 ## Known blind spots
 

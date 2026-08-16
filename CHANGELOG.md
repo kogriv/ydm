@@ -5,6 +5,38 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — `cloud_delta.py`: which folders of the snapshot went stale
+
+The composite snapshot patches a base scan with targeted partial scans, so it
+is only as fresh as the folders someone thought to rescan — and there was no
+way to find out which ones needed it. `tools/cloud_delta.py` answers that
+without walking the tree, using three endpoints the project had not been
+using:
+
+- `GET /v1/disk` returns a global revision counter. Unchanged since the last
+  check → nothing changed anywhere on the disk, and the whole run is one HTTP
+  request. (It is the same counter the daemon tracks: the value matched, to
+  the digit, the `"new"` revision in `.sync/push.log` for the last change.)
+- `GET /v1/disk/resources/files?sort=-modified` lists the most recently
+  modified files across the whole disk, flat and newest first. Paging it until
+  the timestamps predate the snapshot costs `ceil(changed/1000)` requests,
+  independent of disk size.
+- `GET /v1/disk/trash/resources?sort=-deleted` supplies deletions, each with
+  the `origin_path` it came from.
+
+Staleness is decided per folder, not per disk: the composite covers each
+folder with the newest scan that visited it, so the same timestamp is news in
+one folder and old news in another. Output is a rescan plan for the existing
+scanner, with nested folders collapsed to the fewest `scan cloud --path …`
+commands that cover them.
+
+First run here: **9 requests against ~4 600 for a full scan** — 67 stale
+folders, 662 changed files, 6 deletions, 32 rescan commands. Read-only;
+`monitor.db` is not touched. Blind spots (moves, renames, restores from trash
+keep their `modified`) are documented and warned about rather than passed off
+as "no changes":
+[`tasks/delta_scan/README.md`](tasks/delta_scan/README.md).
+
 ## 2026-08-16 — A partial scan could become the composite base
 
 `find_last_full_scan()` picked the largest successful cloud scan of the last
