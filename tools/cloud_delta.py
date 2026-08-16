@@ -232,11 +232,26 @@ def read_revision_state(path: str) -> Optional[dict]:
         return None
 
 
-def write_revision_state(path: str, revision: int, checked_at: str) -> None:
+def write_revision_state(
+    path: str,
+    revision: int,
+    checked_at: str,
+    clean: Optional[bool] = None,
+) -> None:
+    """`clean` records whether the snapshot had *no* stale folders at that
+    revision. Only a clean state licenses skipping the sweeps next time: a
+    revision saved while 67 folders were stale means "nothing changed since
+    then", not "the snapshot is up to date".
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(
-            {"schema": SCHEMA, "revision": revision, "checked_at": checked_at},
+            {
+                "schema": SCHEMA,
+                "revision": revision,
+                "checked_at": checked_at,
+                "clean": clean,
+            },
             handle,
             ensure_ascii=False,
             indent=2,
@@ -407,6 +422,7 @@ def report_changes(args: argparse.Namespace) -> dict:
     state_path = revision_state_path(args.revision_state)
     previous = read_revision_state(state_path)
     revision_changed = None if previous is None else revision != previous.get("revision")
+    previous_clean = bool(previous and previous.get("clean"))
 
     warnings: List[str] = []
     stale: Dict[str, dict] = {}
@@ -415,12 +431,19 @@ def report_changes(args: argparse.Namespace) -> dict:
     trash_examined = 0
     trash_truncated = False
 
-    if revision_changed is False and not args.force:
+    skipped = revision_changed is False and previous_clean and not args.force
+    if skipped:
         warnings.append(
-            "Disk revision unchanged since the last check — nothing changed anywhere. "
-            "Skipped the sweeps; pass --force to run them anyway."
+            "Disk revision unchanged since the last clean run — nothing changed "
+            "anywhere. Skipped the sweeps; pass --force to run them anyway."
         )
     else:
+        if revision_changed is False and not previous_clean:
+            warnings.append(
+                "Disk revision is unchanged, but the last run left stale folders — "
+                "swept anyway. An unchanged revision means nothing happened since "
+                "then, not that the snapshot is up to date."
+            )
         stale, files_examined, files_truncated = sweep_modified(
             client, snapshot, max_pages=args.max_pages
         )
@@ -455,6 +478,13 @@ def report_changes(args: argparse.Namespace) -> dict:
         key=lambda item: (-(item["changed_files"] + item["deleted_entries"]), item["folder"]),
     )
     roots, root_is_stale = rescan_roots(stale.keys())
+    if not skipped and not args.no_save and not files_truncated and not trash_truncated:
+        write_revision_state(
+            state_path,
+            revision,
+            datetime.now(timezone.utc).replace(tzinfo=None).isoformat(sep=" ", timespec="seconds"),
+            clean=not stale,
+        )
     if root_is_stale:
         warnings.append(
             "Files directly in the disk root changed. `scan cloud --path /` is a "
@@ -591,6 +621,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     changes.add_argument(
         "--force", action="store_true",
         help="Sweep even when the disk revision says nothing changed",
+    )
+    changes.add_argument(
+        "--no-save", action="store_true",
+        help="Do not record this revision as the reference for the next run",
     )
     return parser.parse_args(argv)
 

@@ -290,9 +290,17 @@ class RevisionStateTests(unittest.TestCase):
 
     def test_roundtrip(self):
         self.assertIsNone(cloud_delta.read_revision_state(self.path))
-        cloud_delta.write_revision_state(self.path, 123, "2026-08-16 10:00:00")
+        cloud_delta.write_revision_state(self.path, 123, "2026-08-16 10:00:00", clean=True)
         state = cloud_delta.read_revision_state(self.path)
         self.assertEqual(state["revision"], 123)
+        self.assertTrue(state["clean"])
+
+    def test_a_revision_saved_while_stale_is_not_clean(self):
+        """`check --save` records "nothing happened since then", which is not
+        the same as "the snapshot is up to date" — only a clean run may let
+        the next one skip its sweeps."""
+        cloud_delta.write_revision_state(self.path, 123, "2026-08-16 10:00:00")
+        self.assertIsNone(cloud_delta.read_revision_state(self.path)["clean"])
 
     def test_corrupt_state_is_ignored_not_fatal(self):
         with open(self.path, "w", encoding="utf-8") as handle:
