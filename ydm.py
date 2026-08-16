@@ -64,6 +64,40 @@ def load_token_from_env():
         except: pass
     return None
 
+def normalize_compare_path(parent_path):
+    """Bring a stored `parent_path` to the form used when comparing scans.
+
+    The two scanners disagree, and always have: cloud scans store "/pro/MuSy"
+    (root as ""), local scans store "pro/MuSy" (root as ""). Comparing them
+    raw — which `report diff` did — can never match, so every file was
+    reported missing on both sides. Neither convention is "right"; comparison
+    just has to pick one, and this is it. Storage is left as it is: 856k
+    historical local rows would otherwise need rewriting, along with every
+    reader of the local side.
+    """
+    if not parent_path:
+        return ""
+    return str(parent_path).strip("/")
+
+
+def is_path_excluded(compare_path, exclude_dirs):
+    """True if `compare_path` sits under any entry of exclude-dirs.
+
+    exclude-dirs is not a list of top-level folder names: on this machine 45
+    of its 55 entries are nested (`video/Обучение`, `Books/42`, …). Testing
+    only the first path component — which `report diff` did — reported
+    thousands of deliberately unsynced files as missing locally.
+    """
+    if not exclude_dirs or not compare_path:
+        return False
+    prefix = ""
+    for part in compare_path.split("/"):
+        prefix = f"{prefix}/{part}" if prefix else part
+        if prefix in exclude_dirs:
+            return True
+    return False
+
+
 def is_termination_requested():
     """Check if SIGTERM/SIGUSR1 requested graceful stop."""
     return _terminate_requested
@@ -1828,286 +1862,141 @@ class Analyzer:
         """Clears the composite scan cache."""
         self._composite_cache.clear()
 
-    def _compare_composite_scan(self, composite, local_id, exclude_dirs):
+    def _composite_cloud_files(self, composite):
+        """{(compare_path, name): size} for the composite cloud snapshot.
+
+        The composite resolves per folder: each folder is served by the newest
+        scan that covered it, and by the base scan otherwise. The previous
+        implementation expressed that as
+        `WHERE scan_id IN (...) AND parent_path IN (...)`, a cross product of
+        every scan with every folder — so any scan holding rows for a folder
+        could win, at random, instead of the one the composite assigned.
         """
-        Compares composite cloud scan (base + partial updates) with local scan.
-        Optimized using temporary tables for better performance.
-        
-        Args:
-            composite: Result from build_composite_scan()
-            local_id: Local scan ID
-            exclude_dirs: Set of excluded directory names
-            
-        Returns:
-            dict: Comparison results
-        """
-        conn = self.storage.get_connection()
         base_scan_id = composite["base_scan_id"]
-        folder_updates = composite["folder_updates"]
-        
-        if not folder_updates:
-            # No partial scans, use simple comparison with base scan
-            return self._compare_simple_scan(base_scan_id, local_id, exclude_dirs)
-        
-        # Optimize using temporary table for composite cloud files
-        # This avoids multiple queries and improves performance
-        
+        folder_updates = composite.get("folder_updates") or {}
+
+        by_scan = {}
+        for folder, scan_id in folder_updates.items():
+            by_scan.setdefault(scan_id, set()).add(folder)
+
+        conn = self.storage.get_connection()
         try:
-            # Create temporary table for composite cloud files
-            conn.execute("""
-                CREATE TEMP TABLE IF NOT EXISTS composite_cloud_files (
-                    parent_path TEXT,
-                    name TEXT,
-                    size INTEGER,
-                    PRIMARY KEY (parent_path, name)
-                )
-            """)
-            conn.execute("DELETE FROM composite_cloud_files")
-            
-            updated_folders_list = list(folder_updates.keys())
-            updated_scan_ids = list(set(folder_updates.values()))
-            
-            if updated_folders_list:
-                # Insert files from base scan (excluding updated folders)
-                if len(updated_folders_list) == 1:
-                    base_insert = """
-                        INSERT INTO composite_cloud_files (parent_path, name, size)
-                        SELECT parent_path, name, size
-                        FROM files
-                        WHERE scan_id = ? AND parent_path != ? AND type = 'file'
-                    """
-                    conn.execute(base_insert, (base_scan_id, updated_folders_list[0]))
-                else:
-                    placeholders = ','.join(['?' for _ in updated_folders_list])
-                    base_insert = f"""
-                        INSERT INTO composite_cloud_files (parent_path, name, size)
-                        SELECT parent_path, name, size
-                        FROM files
-                        WHERE scan_id = ? AND parent_path NOT IN ({placeholders}) AND type = 'file'
-                    """
-                    params = [base_scan_id] + updated_folders_list
-                    conn.execute(base_insert, tuple(params))
-                
-                # Insert files from updated scans
-                if len(updated_scan_ids) == 1 and len(updated_folders_list) == 1:
-                    updated_insert = """
-                        INSERT OR REPLACE INTO composite_cloud_files (parent_path, name, size)
-                        SELECT parent_path, name, size
-                        FROM files
-                        WHERE scan_id = ? AND parent_path = ? AND type = 'file'
-                    """
-                    conn.execute(updated_insert, (updated_scan_ids[0], updated_folders_list[0]))
-                else:
-                    scan_placeholders = ','.join(['?' for _ in updated_scan_ids])
-                    folder_placeholders = ','.join(['?' for _ in updated_folders_list])
-                    updated_insert = f"""
-                        INSERT OR REPLACE INTO composite_cloud_files (parent_path, name, size)
-                        SELECT parent_path, name, size
-                        FROM files
-                        WHERE scan_id IN ({scan_placeholders}) 
-                        AND parent_path IN ({folder_placeholders})
-                        AND type = 'file'
-                    """
-                    params = updated_scan_ids + updated_folders_list
-                    conn.execute(updated_insert, tuple(params))
-            else:
-                # No updated folders, just use base scan
-                conn.execute("""
-                    INSERT INTO composite_cloud_files (parent_path, name, size)
-                    SELECT parent_path, name, size
-                    FROM files
-                    WHERE scan_id = ? AND type = 'file'
-                """, (base_scan_id,))
-            
-            conn.commit()
-            
-            # Query missing local files using temporary table (much faster)
-            missing_local = conn.execute("""
-                SELECT c.parent_path, c.name, c.size
-                FROM composite_cloud_files c
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM files l
-                    WHERE l.scan_id = ? 
-                    AND l.parent_path = c.parent_path 
-                    AND l.name = c.name
-                )
-            """, (local_id,)).fetchall()
-            
+            files = {}
+            for parent, name, size in conn.execute(
+                "SELECT parent_path, name, size FROM files "
+                "WHERE scan_id = ? AND type = 'file'",
+                (base_scan_id,),
+            ):
+                if parent in folder_updates:
+                    continue  # a newer scan owns this folder
+                files[(normalize_compare_path(parent), name)] = size
+
+            for scan_id, folders in by_scan.items():
+                for parent, name, size in conn.execute(
+                    "SELECT parent_path, name, size FROM files "
+                    "WHERE scan_id = ? AND type = 'file'",
+                    (scan_id,),
+                ):
+                    if parent in folders:
+                        files[(normalize_compare_path(parent), name)] = size
         finally:
-            # Clean up temporary table
-            conn.execute("DROP TABLE IF EXISTS composite_cloud_files")
-            conn.commit()
-        
-        # Filter excluded directories
-        filtered_missing_local = []
-        for row in missing_local:
-            parent, name, size = row
-            full_path = f"{parent}/{name}".strip("/")
-            root_folder = full_path.split("/")[0] if full_path else ""
-            
-            if root_folder and root_folder not in exclude_dirs:
-                filtered_missing_local.append(row)
-        
-        # Query for missing cloud files (optimized)
-        # Use temporary table again for better performance
+            conn.close()
+        return files
+
+    def _scan_files(self, scan_id):
+        """{(compare_path, name): size} for a single scan."""
+        conn = self.storage.get_connection()
         try:
-            conn.execute("""
-                CREATE TEMP TABLE IF NOT EXISTS composite_cloud_files_check (
-                    parent_path TEXT,
-                    name TEXT,
-                    PRIMARY KEY (parent_path, name)
+            return {
+                (normalize_compare_path(parent), name): size
+                for parent, name, size in conn.execute(
+                    "SELECT parent_path, name, size FROM files "
+                    "WHERE scan_id = ? AND type = 'file'",
+                    (scan_id,),
                 )
-            """)
-            conn.execute("DELETE FROM composite_cloud_files_check")
-            
-            # Rebuild composite cloud files table for checking
-            if updated_folders_list:
-                if len(updated_folders_list) == 1:
-                    conn.execute("""
-                        INSERT INTO composite_cloud_files_check (parent_path, name)
-                        SELECT parent_path, name
-                        FROM files
-                        WHERE scan_id = ? AND parent_path != ? AND type = 'file'
-                    """, (base_scan_id, updated_folders_list[0]))
-                else:
-                    placeholders = ','.join(['?' for _ in updated_folders_list])
-                    conn.execute(f"""
-                        INSERT INTO composite_cloud_files_check (parent_path, name)
-                        SELECT parent_path, name
-                        FROM files
-                        WHERE scan_id = ? AND parent_path NOT IN ({placeholders}) AND type = 'file'
-                    """, tuple([base_scan_id] + updated_folders_list))
-                
-                if len(updated_scan_ids) == 1 and len(updated_folders_list) == 1:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO composite_cloud_files_check (parent_path, name)
-                        SELECT parent_path, name
-                        FROM files
-                        WHERE scan_id = ? AND parent_path = ? AND type = 'file'
-                    """, (updated_scan_ids[0], updated_folders_list[0]))
-                else:
-                    scan_placeholders = ','.join(['?' for _ in updated_scan_ids])
-                    folder_placeholders = ','.join(['?' for _ in updated_folders_list])
-                    conn.execute(f"""
-                        INSERT OR REPLACE INTO composite_cloud_files_check (parent_path, name)
-                        SELECT parent_path, name
-                        FROM files
-                        WHERE scan_id IN ({scan_placeholders}) 
-                        AND parent_path IN ({folder_placeholders})
-                        AND type = 'file'
-                    """, tuple(updated_scan_ids + updated_folders_list))
-            else:
-                conn.execute("""
-                    INSERT INTO composite_cloud_files_check (parent_path, name)
-                    SELECT parent_path, name
-                    FROM files
-                    WHERE scan_id = ? AND type = 'file'
-                """, (base_scan_id,))
-            
-            conn.commit()
-            
-            # Query missing cloud files using temporary table
-            missing_cloud = conn.execute("""
-                SELECT l.parent_path, l.name, l.size
-                FROM files l
-                WHERE l.scan_id = ? AND l.type = 'file'
-                AND NOT EXISTS (
-                    SELECT 1 FROM composite_cloud_files_check c
-                    WHERE c.parent_path = l.parent_path 
-                    AND c.name = l.name
-                )
-            """, (local_id,)).fetchall()
-            
-        finally:
-            conn.execute("DROP TABLE IF EXISTS composite_cloud_files_check")
-            conn.commit()
-        
-        # Filter .sync files
-        filtered_missing_cloud = [
-            row for row in missing_cloud 
-            if not row[1].startswith(".sync") and "/.sync" not in row[0]
-        ]
-        
-        return {
-            "compare_scans": {
-                "cloud": f"composite(base={base_scan_id}, partials={len(folder_updates)})",
-                "local": local_id
-            },
-            "missing_local_count": len(filtered_missing_local),
-            "missing_cloud_count": len(filtered_missing_cloud),
-            "missing_local_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_local[:20]],
-            "missing_cloud_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_cloud[:20]],
-            "composite_info": {
-                "base_scan_id": base_scan_id,
-                "updated_folders_count": len(folder_updates)
             }
+        finally:
+            conn.close()
+
+    def _diff_file_sets(self, cloud_files, local_id, exclude_dirs, compare_scans, extra=None):
+        """The one place cloud is compared with local.
+
+        This logic used to exist in three copies — composite, simple, and a
+        dead tail in get_diff() — which is how the path-convention mismatch
+        below survived: cloud rows store parent_path as "/pro/MuSy", local
+        rows as "pro/MuSy", so the join `l.parent_path = c.parent_path`
+        matched nothing at all and every file was reported missing on both
+        sides. normalize_compare_path() settles the convention in one place.
+        """
+        local_files = self._scan_files(local_id)
+
+        missing_local = []
+        excluded = 0
+        for (parent, name), size in cloud_files.items():
+            if (parent, name) in local_files:
+                continue
+            if is_path_excluded(f"{parent}/{name}".strip("/"), exclude_dirs):
+                excluded += 1
+                continue
+            missing_local.append((parent, name, size))
+
+        missing_cloud = []
+        for (parent, name), size in local_files.items():
+            if (parent, name) in cloud_files:
+                continue
+            if name.startswith(".sync") or parent == ".sync" or parent.startswith(".sync/"):
+                continue
+            missing_cloud.append((parent, name, size))
+
+        missing_local.sort()
+        missing_cloud.sort()
+
+        result = {
+            "compare_scans": compare_scans,
+            "cloud_files_count": len(cloud_files),
+            "local_files_count": len(local_files),
+            "matched_count": len(set(cloud_files) & set(local_files)),
+            "excluded_from_sync_count": excluded,
+            "missing_local_count": len(missing_local),
+            "missing_cloud_count": len(missing_cloud),
+            "missing_local_sample": [f"/{p}/{n}".replace("//", "/") for p, n, _ in missing_local[:20]],
+            "missing_cloud_sample": [f"/{p}/{n}".replace("//", "/") for p, n, _ in missing_cloud[:20]],
         }
+        if extra:
+            result.update(extra)
+        return result
+
+    def _compare_composite_scan(self, composite, local_id, exclude_dirs):
+        """Compares the composite cloud snapshot (base + partial updates) with a local scan."""
+        base_scan_id = composite["base_scan_id"]
+        folder_updates = composite.get("folder_updates") or {}
+        if not folder_updates:
+            return self._compare_simple_scan(base_scan_id, local_id, exclude_dirs)
+
+        return self._diff_file_sets(
+            self._composite_cloud_files(composite),
+            local_id,
+            exclude_dirs,
+            compare_scans={
+                "cloud": f"composite(base={base_scan_id}, partials={len(folder_updates)})",
+                "local": local_id,
+            },
+            extra={
+                "composite_info": {
+                    "base_scan_id": base_scan_id,
+                    "updated_folders_count": len(folder_updates),
+                }
+            },
+        )
 
     def _compare_simple_scan(self, cloud_id, local_id, exclude_dirs):
-        """
-        Simple comparison between two scans (non-composite).
-        
-        Args:
-            cloud_id: Cloud scan ID
-            local_id: Local scan ID
-            exclude_dirs: Set of excluded directory names
-            
-        Returns:
-            dict: Comparison results
-        """
-        conn = self.storage.get_connection()
-        
-        # 1. Missing Local
-        missing_local = conn.execute("""
-            SELECT c.parent_path, c.name, c.size 
-            FROM files c 
-            WHERE c.scan_id = ? 
-            AND c.type = 'file'
-            AND NOT EXISTS (
-                SELECT 1 FROM files l 
-                WHERE l.scan_id = ? 
-                AND l.parent_path = c.parent_path 
-                AND l.name = c.name
-            )
-        """, (cloud_id, local_id)).fetchall()
-        
-        # Фильтрация исключенных папок
-        filtered_missing_local = []
-        for row in missing_local:
-            parent, name, size = row
-            full_path = f"{parent}/{name}".strip("/")
-            root_folder = full_path.split("/")[0] if full_path else ""
-            
-            if root_folder and root_folder not in exclude_dirs:
-                filtered_missing_local.append(row)
-        
-        # 2. Missing Cloud
-        missing_cloud = conn.execute("""
-            SELECT l.parent_path, l.name, l.size 
-            FROM files l 
-            WHERE l.scan_id = ? 
-            AND l.type = 'file'
-            AND NOT EXISTS (
-                SELECT 1 FROM files c 
-                WHERE c.scan_id = ? 
-                AND c.parent_path = l.parent_path 
-                AND c.name = l.name
-            )
-        """, (local_id, cloud_id)).fetchall()
-
-        # Фильтруем системные файлы (.sync) из missing_cloud
-        filtered_missing_cloud = [
-            row for row in missing_cloud 
-            if not row[1].startswith(".sync") and "/.sync" not in row[0]
-        ]
-
-        return {
-            "compare_scans": {"cloud": cloud_id, "local": local_id},
-            "missing_local_count": len(filtered_missing_local),
-            "missing_cloud_count": len(filtered_missing_cloud),
-            "missing_local_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_local[:20]],
-            "missing_cloud_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_cloud[:20]]
-        }
+        """Compares one cloud scan with one local scan, no composite involved."""
+        return self._diff_file_sets(
+            self._scan_files(cloud_id),
+            local_id,
+            exclude_dirs,
+            compare_scans={"cloud": cloud_id, "local": local_id},
+        )
 
     def get_diff(self, cloud_scan_id=None, local_scan_id=None, use_composite=True):
         """
@@ -2188,63 +2077,6 @@ class Analyzer:
                 return {"error": "No cloud scans found"}
             cloud_id = last_cloud[0]
             return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
-        
-        # 1. Missing Local
-        missing_local = conn.execute(f"""
-            SELECT c.parent_path, c.name, c.size 
-            FROM files c 
-            WHERE c.scan_id = ? 
-            AND NOT EXISTS (
-                SELECT 1 FROM files l 
-                WHERE l.scan_id = ? 
-                AND l.parent_path = c.parent_path 
-                AND l.name = c.name
-            )
-        """, (cloud_id, local_id)).fetchall()
-        
-        # Фильтрация исключенных папок
-        # Если файл лежит в папке, которая (или родитель которой) есть в exclude_dirs
-        filtered_missing_local = []
-        for row in missing_local:
-            parent, name, size = row
-            # Проверяем, начинается ли путь с исключенной папки
-            # Путь в базе: "/Folder/Sub" или "" (корень) + "Folder"
-            
-            # Строим полный путь для проверки
-            full_path = f"{parent}/{name}".strip("/")
-            root_folder = full_path.split("/")[0]
-            
-            if root_folder in exclude_dirs:
-                continue
-            filtered_missing_local.append(row)
-
-        
-        # 2. Missing Cloud
-        missing_cloud = conn.execute(f"""
-            SELECT l.parent_path, l.name, l.size 
-            FROM files l 
-            WHERE l.scan_id = ? 
-            AND NOT EXISTS (
-                SELECT 1 FROM files c 
-                WHERE c.scan_id = ? 
-                AND c.parent_path = l.parent_path 
-                AND c.name = l.name
-            )
-        """, (local_id, cloud_id)).fetchall()
-
-        # Фильтруем системные файлы (.sync) из missing_cloud
-        filtered_missing_cloud = [
-            row for row in missing_cloud 
-            if not row[1].startswith(".sync") and "/.sync" not in row[0]
-        ]
-
-        return {
-            "compare_scans": {"cloud": cloud_id, "local": local_id},
-            "missing_local_count": len(filtered_missing_local),
-            "missing_cloud_count": len(filtered_missing_cloud),
-            "missing_local_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_local[:20]],
-            "missing_cloud_sample": [f"{r[0]}/{r[1]}" for r in filtered_missing_cloud[:20]]
-        }
 
     def get_long_paths(self, scan_id, limit_chars=240):
         """Find files exceeding path length limit."""

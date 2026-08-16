@@ -369,6 +369,7 @@ source ~/.bashrc
 - **[Unified Sync Interface](tasks/sync_unification/README.md)** - One CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) for both the `yandex-disk` daemon and the `rclone` backend, with automatic backend detection
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Alternative to the `yandex-disk` daemon for environments without it (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup via rclone
 - **[Delta Scan](tasks/delta_scan/README.md)** - Proposed cheap change detection (disk revision + `-modified` sweep + trash) so the composite snapshot knows where it is stale
+- **[Diff Correctness](tasks/diff_correctness/README.md)** - Why `report diff` never matched anything (cloud stores `/A/B`, local stores `A/B`), and the single comparison path that replaced three copies
 - **[Smart Diff](tasks/smart_diff/README.md)** - How `report diff` builds a composite snapshot (full scan + newer partial scans) instead of just comparing the two latest scans
 - **[CHANGELOG.md](CHANGELOG.md)** - Notable changes, newest first
 - **[Known Issues](docs/KNOWN_ISSUES.md)** - Current limitations that aren't fixed yet

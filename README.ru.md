@@ -360,6 +360,7 @@ source ~/.bashrc
 - **[Единый интерфейс синхронизации](tasks/sync_unification/README.md)** - Один CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) и для демона `yandex-disk`, и для бэкенда `rclone`, с автоопределением бэкенда
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Альтернатива демону `yandex-disk` для окружений без него (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup через rclone
 - **[Delta Scan](tasks/delta_scan/README.md)** - Предлагаемое дешёвое обнаружение изменений (ревизия диска + выборка по `-modified` + корзина), чтобы композитный снимок знал, где он устарел
+- **[Diff Correctness](tasks/diff_correctness/README.md)** - Почему `report diff` никогда ничего не сопоставлял (облако хранит `/A/B`, локальные сканы — `A/B`) и одна реализация сравнения вместо трёх
 - **[Smart Diff](tasks/smart_diff/README.md)** - Как `report diff` строит композитный снимок (полный скан + свежие частичные) вместо сравнения двух последних сканов
 - **[CHANGELOG.md](CHANGELOG.md)** - Заметные изменения, начиная с последних
 - **[Known Issues](docs/KNOWN_ISSUES.md)** - Текущие неисправленные ограничения

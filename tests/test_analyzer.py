@@ -161,6 +161,160 @@ class TestDiffSimple(AnalyzerTestCase):
         self.assertIn("error", result)
 
 
+class TestDiffPathConventions(AnalyzerTestCase):
+    """Cloud scans store parent_path as "/A/B", local scans as "A/B".
+
+    `report diff` compared them raw, so the two sets could never intersect and
+    every file was reported missing on both sides. The tests that existed used
+    "/A" on both sides — which is why nothing caught it for as long as it did.
+    """
+
+    def _cloud_and_local(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_scan(2, "local", "success")
+
+    def test_the_same_file_matches_across_conventions(self):
+        self._cloud_and_local()
+        self.insert_files(1, [("/pro/MuSy", "actor.hpp", "file", 10, None)])
+        self.insert_files(2, [("pro/MuSy", "actor.hpp", "file", 10, None)])
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["matched_count"], 1)
+        self.assertEqual(result["missing_local_count"], 0)
+        self.assertEqual(result["missing_cloud_count"], 0)
+
+    def test_root_level_files_match(self):
+        self._cloud_and_local()
+        self.insert_files(1, [("", "readme.txt", "file", 1, None)])
+        self.insert_files(2, [("", "readme.txt", "file", 1, None)])
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["matched_count"], 1)
+
+    def test_genuinely_missing_files_are_still_reported(self):
+        self._cloud_and_local()
+        self.insert_files(1, [
+            ("/pro", "shared.txt", "file", 1, None),
+            ("/pro", "cloud_only.txt", "file", 1, None),
+        ])
+        self.insert_files(2, [
+            ("pro", "shared.txt", "file", 1, None),
+            ("pro", "local_only.txt", "file", 1, None),
+        ])
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["matched_count"], 1)
+        self.assertEqual(result["missing_local_sample"], ["/pro/cloud_only.txt"])
+        self.assertEqual(result["missing_cloud_sample"], ["/pro/local_only.txt"])
+
+    def test_counts_add_up(self):
+        self._cloud_and_local()
+        self.insert_files(1, [
+            ("/keep", "a.txt", "file", 1, None),
+            ("/keep", "b.txt", "file", 1, None),
+            ("/drop", "c.txt", "file", 1, None),
+        ])
+        self.insert_files(2, [("keep", "a.txt", "file", 1, None)])
+        with open(DEFAULT_CONFIG["exclude_config"], "w") as handle:
+            handle.write("exclude-dirs=drop\n")
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(
+            result["cloud_files_count"],
+            result["matched_count"]
+            + result["excluded_from_sync_count"]
+            + result["missing_local_count"],
+        )
+
+
+class TestDiffExcludeDirs(AnalyzerTestCase):
+    """exclude-dirs is not a list of top-level names: 45 of the 55 entries on
+    the reference machine are nested (`video/Обучение`). Matching only the
+    first path component reported thousands of deliberately unsynced files as
+    missing locally."""
+
+    def setUp(self):
+        super().setUp()
+        self.insert_scan(1, "cloud", "success")
+        self.insert_scan(2, "local", "success")
+
+    def _diff(self, exclude_line):
+        with open(DEFAULT_CONFIG["exclude_config"], "w") as handle:
+            handle.write(f"exclude-dirs={exclude_line}\n")
+        return self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+
+    def test_nested_exclude_entry_is_honoured(self):
+        self.insert_files(1, [
+            ("/video/Обучение", "lecture.mp4", "file", 1, None),
+            ("/video/Obsidian", "keep.mp4", "file", 1, None),
+        ])
+        result = self._diff("video/Обучение")
+        self.assertEqual(result["excluded_from_sync_count"], 1)
+        self.assertEqual(result["missing_local_sample"], ["/video/Obsidian/keep.mp4"])
+
+    def test_exclusion_applies_to_the_whole_subtree(self):
+        self.insert_files(1, [
+            ("/video/Обучение/deep/deeper", "lecture.mp4", "file", 1, None),
+        ])
+        result = self._diff("video/Обучение")
+        self.assertEqual(result["missing_local_count"], 0)
+
+    def test_a_sibling_sharing_a_name_prefix_is_not_excluded(self):
+        self.insert_files(1, [("/videos", "keep.mp4", "file", 1, None)])
+        result = self._diff("video")
+        self.assertEqual(result["missing_local_sample"], ["/videos/keep.mp4"])
+
+    def test_top_level_exclusion_still_works(self):
+        self.insert_files(1, [("/Books/Math", "book.pdf", "file", 1, None)])
+        result = self._diff("Books")
+        self.assertEqual(result["missing_local_count"], 0)
+
+
+class TestCompositeCloudFiles(AnalyzerTestCase):
+    """`WHERE scan_id IN (...) AND parent_path IN (...)` is a cross product of
+    every scan with every folder, not the composite's folder→scan pairing: any
+    scan holding rows for a folder could win, at random."""
+
+    def test_only_the_assigned_scan_supplies_a_folder(self):
+        for scan_id in (1, 2, 3):
+            self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(1, [("/A", "f.txt", "file", 100, None)])
+        self.insert_files(2, [("/A", "f.txt", "file", 200, None)])
+        # Scan 3 owns /B but also happens to hold a row for /A.
+        self.insert_files(3, [
+            ("/B", "g.txt", "file", 300, None),
+            ("/A", "f.txt", "file", 999, None),
+        ])
+        composite = {"base_scan_id": 1, "folder_updates": {"/A": 2, "/B": 3}}
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertEqual(files[("A", "f.txt")], 200)
+        self.assertEqual(files[("B", "g.txt")], 300)
+
+    def test_base_supplies_folders_nobody_updated(self):
+        for scan_id in (1, 2):
+            self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(1, [
+            ("/A", "f.txt", "file", 100, None),
+            ("/C", "h.txt", "file", 400, None),
+        ])
+        self.insert_files(2, [("/A", "f.txt", "file", 200, None)])
+        files = self.analyzer._composite_cloud_files(
+            {"base_scan_id": 1, "folder_updates": {"/A": 2}}
+        )
+        self.assertEqual(files[("A", "f.txt")], 200)
+        self.assertEqual(files[("C", "h.txt")], 400)
+
+    def test_a_file_deleted_in_the_newer_scan_disappears(self):
+        for scan_id in (1, 2):
+            self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(1, [
+            ("/A", "gone.txt", "file", 1, None),
+            ("/A", "kept.txt", "file", 1, None),
+        ])
+        self.insert_files(2, [("/A", "kept.txt", "file", 1, None)])
+        files = self.analyzer._composite_cloud_files(
+            {"base_scan_id": 1, "folder_updates": {"/A": 2}}
+        )
+        self.assertNotIn(("A", "gone.txt"), files)
+        self.assertIn(("A", "kept.txt"), files)
+
+
 class TestCompositeScan(AnalyzerTestCase):
     # Bulks up "full" cloud scans well past any partial scan's file count,
     # so find_last_full_scan()'s size-based heuristic reliably picks the

@@ -5,6 +5,44 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — `report diff` never matched anything
+
+The project's headline feature — compare cloud against the local copy — was
+comparing two sets that cannot intersect. Cloud scans store `parent_path` as
+`/pro/MuSy`, local scans as `pro/MuSy`, and the comparison joined them raw:
+
+```text
+exact join, cloud scan 72 x local scan 105:   0 matches
+after stripping the leading slash:         9428 matches
+```
+
+So every file was reported both as missing locally and as missing in the
+cloud. `missing_cloud_count` equalled the local file count exactly. The
+convention is uniform across the database (0 of 856 338 local rows carry a
+leading slash), so this was the original behavior, not a regression — the
+existing tests used `/A` on both sides and never exercised it.
+
+Four defects, one function:
+
+- **Path conventions.** `normalize_compare_path()` settles it in one place.
+  Storage is left alone: rewriting 856 k historical local rows would mean
+  touching every reader of the local side too.
+- **Nested `exclude-dirs` entries were ignored.** The filter tested only the
+  first path component, but 45 of the 55 entries here are nested
+  (`video/Обучение`). `is_path_excluded()` walks the whole path.
+- **Composite assembly was a cross product.**
+  `WHERE scan_id IN (…) AND parent_path IN (…)` paired every scan with every
+  folder, so any scan holding rows for a folder could win at random instead of
+  the one the composite assigned.
+- **Three copies of the comparison**, one of them unreachable behind earlier
+  `return`s. That is how a defect this size survived: a fix in one copy never
+  reached the others. Now one implementation, 18 576 → 5 595 characters.
+
+On the real database: 14 101 of 14 136 local files matched, 60 880 correctly
+identified as excluded from sync, **1** missing locally and 3 missing in the
+cloud — and every one of those four is explainable. Analysis and remaining
+work: [`tasks/diff_correctness/`](tasks/diff_correctness/README.md).
+
 ## 2026-08-16 — Composite file counts: wrong, and then slow
 
 Surfaced by the previous entry's fix: with the snapshot finally carrying its
