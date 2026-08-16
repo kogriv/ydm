@@ -1138,6 +1138,47 @@ class Analyzer:
             ref_id = config.get("reference_full_scan_id", None)
         return ref_id
 
+    def scan_covers_root(self, scan_id):
+        """True if the scan enumerated the disk root, i.e. it is a full scan.
+
+        A scan started with `--path /Books` records nothing at the root, so it
+        describes one subtree, not the disk. Such a scan may serve as a partial
+        update on top of a base, never as the base itself: everything outside
+        its subtree would silently vanish from the composite snapshot.
+        """
+        conn = self.storage.get_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT 1 FROM files
+                WHERE scan_id = ? AND parent_path IN ('', '/')
+                LIMIT 1
+                """,
+                (scan_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def find_last_root_scan(self):
+        """Newest successful cloud scan that covers the root, or None."""
+        conn = self.storage.get_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, timestamp, status
+                FROM scans
+                WHERE scan_type = 'cloud' AND status = 'success'
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        for scan_id, timestamp, status in rows:
+            if self.scan_covers_root(scan_id):
+                return {"id": scan_id, "timestamp": timestamp, "status": status}
+        return None
+
     def get_full_scan_candidates(self):
         """
         Returns list of recent cloud scans with heuristic metrics for full-scan selection.
@@ -1148,7 +1189,9 @@ class Analyzer:
         if not recent_scans:
             return []
 
-        # Filter only successful scans without pending/in_progress
+        # Filter only successful scans without pending/in_progress, and only
+        # those that actually cover the root: a partial scan of one folder can
+        # be the largest recent scan and still describe almost nothing.
         candidates = []
         for s in recent_scans:
             if s["status"] != "success":
@@ -1156,8 +1199,11 @@ class Analyzer:
             prog = s.get("progress") or {}
             pending = prog.get("pending", 0)
             in_progress = prog.get("in_progress", 0)
-            if pending == 0 and in_progress == 0:
-                candidates.append(s)
+            if pending or in_progress:
+                continue
+            if not self.scan_covers_root(s["id"]):
+                continue
+            candidates.append(s)
 
         if not candidates:
             return []
@@ -1435,23 +1481,22 @@ class Analyzer:
         # 3) Автоматический выбор эталонного скана на основе свежих cloud-сканов
         candidates = self.get_full_scan_candidates()
         if not candidates:
-            # Fallback: если нет кандидатов в окне свежести - используем старое поведение
-            # Берем последний cloud scan (независимо от статуса)
-            last_cloud = conn.execute(
-                "SELECT id, timestamp, status FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not last_cloud:
+            # Fallback: нет свежих кандидатов — берём последний скан, который
+            # реально покрывает корень, даже если он старый. Композит с базой
+            # из частичного скана теряет всё, что вне его поддерева.
+            root_scan = self.find_last_root_scan()
+            if not root_scan:
                 return None
-            
+
             files_count = conn.execute(
                 "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
-                (last_cloud[0],)
+                (root_scan["id"],)
             ).fetchone()[0]
-            
+
             return {
-                "id": last_cloud[0],
-                "timestamp": last_cloud[1],
-                "status": last_cloud[2],
+                "id": root_scan["id"],
+                "timestamp": root_scan["timestamp"],
+                "status": root_scan["status"],
                 "files_count": files_count,
             }
 
@@ -1467,23 +1512,20 @@ class Analyzer:
                 # Safety fallback: взять самый большой по количеству файлов
                 best = max(candidates, key=lambda x: x["files_count"])
             else:
-                # Если нет кандидатов в окне свежести - fallback на старое поведение
-                # Берем последний cloud scan (независимо от статуса)
-                last_cloud = conn.execute(
-                    "SELECT id, timestamp, status FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
-                ).fetchone()
-                if not last_cloud:
+                # Нет кандидатов — последний скан, покрывающий корень.
+                root_scan = self.find_last_root_scan()
+                if not root_scan:
                     return None
-                
+
                 files_count = conn.execute(
                     "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
-                    (last_cloud[0],)
+                    (root_scan["id"],)
                 ).fetchone()[0]
-                
+
                 return {
-                    "id": last_cloud[0],
-                    "timestamp": last_cloud[1],
-                    "status": last_cloud[2],
+                    "id": root_scan["id"],
+                    "timestamp": root_scan["timestamp"],
+                    "status": root_scan["status"],
                     "files_count": files_count,
                 }
 

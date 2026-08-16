@@ -5,6 +5,32 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — A partial scan could become the composite base
+
+`find_last_full_scan()` picked the largest successful cloud scan of the last
+two days, without checking that it covered the disk at all. Scan `93` is a
+`--path /Books` scan: 13 893 files, the largest recent one, and it became the
+**base** of the composite snapshot. Everything outside `/Books` and the
+folder patches then did not exist as far as the snapshot was concerned —
+`sync_tree --path /` showed a single child, and `report diff` was reading the
+same distorted picture.
+
+- `Analyzer.scan_covers_root()`: a scan qualifies as a base only if it has
+  rows at the root (`parent_path` `''`/`'/'`). A scan started at `/Books`
+  writes none, so it can only ever be a folder update.
+- `find_last_root_scan()` replaces "just take the newest cloud scan" in both
+  fallbacks — an old full scan is a valid base, a fresh partial one is not.
+  Here the base went back to scan `72` (2026-03-04, 32 top-level folders)
+  with 149 folder updates on top, which is how the composite is meant to work.
+  No rescan needed.
+- `tests/test_analyzer.py`'s `make_full_scan()` fixture wrote no root rows,
+  so its "full" scans were partial by production's definition. It now seeds
+  them, and a new test class pins the rule.
+
+Cheap change detection — so the composite stops having to guess which folders
+went stale — is designed in [`tasks/delta_scan/README.md`](tasks/delta_scan/README.md),
+with the API costs measured.
+
 ## 2026-08-16 — The daemon backend described in its own terms
 
 Working through the `tasks/sync_unification` manual verification checklist on

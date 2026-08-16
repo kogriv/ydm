@@ -172,8 +172,18 @@ class TestCompositeScan(AnalyzerTestCase):
     PADDING_FILES = [("/_padding", f"pad{i}.bin", "file", 1, None) for i in range(20)]
 
     def make_full_scan(self, scan_id, files):
+        # Root-level rows are what makes a scan a *full* scan in production:
+        # `scan cloud --path /A` writes nothing with parent_path "", and
+        # find_last_full_scan() refuses such a scan as a composite base.
+        rows = list(files) + self.PADDING_FILES
+        top_levels = sorted({
+            parent.strip("/").split("/")[0]
+            for parent, *_ in rows
+            if parent.strip("/")
+        })
         self.insert_scan(scan_id, "cloud", "success")
-        self.insert_files(scan_id, list(files) + self.PADDING_FILES)
+        self.insert_files(scan_id, [("", name, "dir", 0, None) for name in top_levels])
+        self.insert_files(scan_id, rows)
         self.insert_progress(scan_id, "/", status="completed")
 
     def make_partial_scan(self, scan_id, root_path, files):
@@ -277,6 +287,7 @@ class TestFindLastFullScan(AnalyzerTestCase):
 
     def test_heuristic_picks_fresh_successful_scan(self):
         self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("", "A", "dir", 0, None)])
         self.insert_files(1, [("/A", f"f{i}.txt", "file", 1, None) for i in range(5)])
         result = self.analyzer.find_last_full_scan()
         self.assertEqual(result["id"], 1)
@@ -284,6 +295,7 @@ class TestFindLastFullScan(AnalyzerTestCase):
 
     def test_reference_full_scan_id_config_wins_over_heuristic(self):
         self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("", "A", "dir", 0, None)])
         self.insert_files(1, [("/A", f"f{i}.txt", "file", 1, None) for i in range(100)])
         self.insert_scan(2, "cloud", "success")
         self.insert_files(2, [("/A", "only_one.txt", "file", 1, None)])
@@ -292,6 +304,64 @@ class TestFindLastFullScan(AnalyzerTestCase):
         result = self.analyzer.find_last_full_scan()
 
         self.assertEqual(result["id"], 2)
+
+
+class TestPartialScanCannotBecomeBase(AnalyzerTestCase):
+    """A scan of one folder must never be the composite base.
+
+    `scan cloud --path /Books` can easily be the largest recent scan while
+    describing a single subtree. Picking it as the base made the composite
+    claim the whole disk was that subtree: on 2026-08-16 `sync_tree --path /`
+    showed exactly one child because the base was a /Books-only scan.
+    """
+
+    def _full_scan(self, scan_id, folders=("A", "B", "C")):
+        self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(scan_id, [("", name, "dir", 0, None) for name in folders])
+        self.insert_files(
+            scan_id, [(f"/{name}", "f.txt", "file", 1, None) for name in folders]
+        )
+
+    def _partial_scan(self, scan_id, folder="A", files=50):
+        self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(
+            scan_id, [(f"/{folder}", f"f{i}.txt", "file", 1, None) for i in range(files)]
+        )
+
+    def test_scan_covers_root(self):
+        self._full_scan(1)
+        self._partial_scan(2)
+        self.assertTrue(self.analyzer.scan_covers_root(1))
+        self.assertFalse(self.analyzer.scan_covers_root(2))
+
+    def test_bigger_partial_scan_does_not_win_over_smaller_full_scan(self):
+        self._full_scan(1)
+        self._partial_scan(2, files=50)
+        result = self.analyzer.find_last_full_scan()
+        self.assertEqual(result["id"], 1)
+
+    def test_partial_scan_becomes_a_folder_update_instead(self):
+        self._full_scan(1)
+        self._partial_scan(2, folder="A", files=3)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertEqual(composite["base_scan_id"], 1)
+        self.assertIn("/A", composite["folder_updates"])
+        self.assertEqual(composite["folder_updates"]["/A"], 2)
+
+    def test_only_partial_scans_leaves_no_base(self):
+        self._partial_scan(1, folder="A")
+        self._partial_scan(2, folder="B")
+        self.assertIsNone(self.analyzer.find_last_root_scan())
+
+    def test_old_full_scan_beats_fresh_partial_ones(self):
+        self._full_scan(1, folders=("A", "B"))
+        self.conn.execute(
+            "UPDATE scans SET timestamp = datetime('now', '-200 days') WHERE id = 1"
+        )
+        self.conn.commit()
+        self._partial_scan(2, folder="A", files=99)
+        result = self.analyzer.find_last_full_scan()
+        self.assertEqual(result["id"], 1)
 
 
 class TestDuplicates(AnalyzerTestCase):
