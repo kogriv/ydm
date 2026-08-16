@@ -5,6 +5,31 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — The daemon backend described in its own terms
+
+Working through the `tasks/sync_unification` manual verification checklist on
+the live daemon host surfaced three places where rclone-bisync concepts were
+applied to the daemon, where they mean nothing:
+
+- **`sync_tree` showed every synced folder as `[L]` (local orphan).** The
+  daemon's policy is a blacklist — it holds only `disabled` entries — but the
+  tree built membership from the *whitelist* of `bidirectional` paths, which
+  on a daemon host is always empty. It now derives the exclude set and uses
+  the blacklist status pass, and `PolicyContext.blacklist_semantics` makes a
+  path bidirectional unless it or an ancestor is disabled. `/pro` renders as
+  `[B] 100%`, `/video` as `[B~] 5.5%`, excluded folders as `[X]`.
+- **The menu reported `Status: NEEDS RESYNC`, `last bisync: never` and a lock
+  on the daemon backend**, none of which exist there (`run_resync` raises
+  `NotSupportedError`). `load_status()` now asks the daemon and shows its own
+  state plus the exclusion count; the two menu entries named after bisync say
+  what they do on the daemon. A dead `policy_status_payload()` call whose
+  result was discarded is gone.
+- `MenuConfig` carries `exclude_config` instead of three copies of a
+  hardcoded `~/.config/yandex-disk/config.cfg`, honouring `YDM_EXCLUDE_CONFIG`.
+- `sync_tree --format text` printed the whole `folder_updates` dict — 139
+  entries on one line here, pushing the tree off screen. It now prints a count
+  plus the first three, with the full mapping still in `--format json`.
+
 ## 2026-08-16 — Yandex Disk Trash restore tooling
 
 `tools/trash_scan.py` scans a Trash subtree into a YDM-style SQLite database,

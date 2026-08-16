@@ -160,20 +160,41 @@
 
 ## Manual verification checklist
 
-После Phase 4–7:
+Прогон 2026-08-16 на боевой Ubuntu-машине с живым демоном. Ничего из
+отмеченного не меняло `~/.config/yandex-disk/config.cfg` и не перезапускало
+демон: пункты, требующие записи в конфиг, проверены на копии конфига.
 
-- [ ] `ydm-menu` на Ubuntu открывается и показывает `Backend: yandex-disk daemon`
-- [ ] `ydm-sync-add /Books/Math/АнГем` убирает `/Books/Math/АнГем` из `exclude-dirs`
-- [ ] `ydm-sync-rm /Books/Math/АнГем` добавляет `/Books/Math/АнГем` в `exclude-dirs`
-- [ ] `ydm-tree` показывает `[B]` для включённых папок и `[X]` для исключённых
-- [ ] `ydm-menu` → 2 Add from cloud → список подпапок из monitor.db snapshot
-- [ ] После stale snapshot menu предлагает cloud scan
-- [ ] `ydm-menu` с `--backend rclone` на машине с daemon: warning + предложение остановить daemon
-- [ ] На Android `ydm-menu` работает через rclone как раньше
-- [ ] `python3 tools/sync_policy.py migrate --backend daemon --apply` создаёт policy из exclude-dirs
-- [ ] `sync_policy.py add --mode download_only` на daemon падает с понятной ошибкой
-- [ ] `tests/test_sync_backends.py` все зелёные
-- [ ] `tests/test_ydm_menu.py` все зелёные
+- [x] `ydm-menu` на Ubuntu открывается и показывает `Backend: yandex-disk daemon`
+- [x] `ydm-sync-add /Books/Math/АнГем` убирает `/Books/Math/АнГем` из `exclude-dirs` —
+      проверено dry-run'ом на копии боевого конфига: 55 → 97 записей,
+      `Books` уходит, добавляются 24 соседа уровня `Books/` и 19 уровня
+      `Books/Math/`. На живом конфиге не применялось: включать `АнГем` в
+      синхронизацию сейчас не требуется
+- [x] `ydm-sync-rm /Books/Math/АнГем` добавляет `/Books/Math/АнГем` в `exclude-dirs` —
+      обратная операция того же механизма, покрыта `tests/test_sync_policy_daemon.py`
+- [x] `ydm-tree` показывает `[B]` для включённых папок и `[X]` для исключённых —
+      **было сломано**: daemon-ветка строила membership из whitelist
+      `bidirectional`, который в daemon-policy всегда пуст, поэтому всё
+      синхронизируемое рисовалось как `[L]`. Исправлено (см. CHANGELOG 16.08);
+      сейчас `/pro` → `[B] 100%`, `/video` → `[B~] 5.5%`, исключённое → `[X]`
+- [x] `ydm-menu` → 2 Add from cloud → список подпапок из monitor.db snapshot
+- [x] После stale snapshot menu предлагает cloud scan
+- [x] `ydm-menu` с `--backend rclone` на машине с daemon: warning + предложение остановить daemon
+- [ ] На Android `ydm-menu` работает через rclone как раньше — **не проверено**,
+      нужна вторая машина
+- [x] `python3 tools/sync_policy.py migrate --backend daemon --apply` создаёт policy из exclude-dirs —
+      выполнено 16.08 на боевом конфиге (только чтение конфига, запись в
+      `var/sync_policy.json`): 55 записей, dry-run `apply_policy` после этого —
+      чистый no-op
+- [x] `sync_policy.py add --mode download_only` на daemon падает с понятной ошибкой
+- [x] `tests/test_sync_backends.py` все зелёные
+- [x] `tests/test_ydm_menu.py` все зелёные
+
+**Найдено при прогоне и вынесено за рамки этой задачи:** эвристика выбора
+базового скана (`Analyzer.get_full_scan_candidates`) может выбрать *частичный*
+скан как базу композита. Сейчас база — скан `93` (только `/Books`), поэтому
+`sync_tree --path /` показывает единственного ребёнка. Отдельная проблема ядра,
+не daemon-бэкенда; лечится полным облачным сканом и гейтом на покрытие корня.
 
 ---
 

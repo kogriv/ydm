@@ -20,6 +20,7 @@ class MenuConfig:
     policy_path: str
     bisync_filter_path: str
     remote: str
+    exclude_config: str
     backend_name: str
     #: "daemon"/"rclone", or "" when neither backend is available on this host.
     backend_kind: str = ""
@@ -38,6 +39,7 @@ class MenuConfig:
         bisync_filter_path: str | None = None,
         remote: str | None = None,
         backend: str | None = None,
+        exclude_config: str | None = None,
         plain: bool = False,
     ) -> "MenuConfig":
         resolved_local = os.path.expanduser(
@@ -61,6 +63,11 @@ class MenuConfig:
             or policy_bisync_filter_path(resolved_local)
         )
         resolved_remote = remote or os.environ.get("YDM_REMOTE") or DEFAULT_CONFIG["rclone_remote"]
+        resolved_exclude_config = os.path.expanduser(
+            exclude_config
+            or os.environ.get("YDM_EXCLUDE_CONFIG")
+            or DEFAULT_CONFIG["exclude_config"]
+        )
         # A host with neither the daemon nor an rclone remote must still get a
         # usable menu that says so, not an import-time traceback.
         backend_error = None
@@ -73,6 +80,7 @@ class MenuConfig:
                 remote=resolved_remote,
                 policy_path=resolved_policy,
                 bisync_filter_path=resolved_bisync,
+                config_path=resolved_exclude_config,
             )
             backend_name = resolved_backend.name()
             backend_kind = resolved_backend.kind
@@ -86,6 +94,7 @@ class MenuConfig:
             policy_path=resolved_policy,
             bisync_filter_path=resolved_bisync,
             remote=resolved_remote,
+            exclude_config=resolved_exclude_config,
             backend_name=backend_name,
             backend_kind=backend_kind,
             backend_error=backend_error,

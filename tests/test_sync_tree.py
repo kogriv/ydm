@@ -19,12 +19,87 @@ if str(ROOT) not in sys.path:
 from tools.sync_tree_cloud import fetch_child_names, infer_dirs_from_files  # noqa: E402
 from tools.sync_tree_policy import (  # noqa: E402
     display_marker,
+    effective_policy_state,
     load_policy_context,
     local_state,
     path_in_policy,
     policy_mode_for_path,
     policy_summary_line,
 )
+
+
+class BlacklistSemanticsTests(unittest.TestCase):
+    """The daemon's policy is a blacklist: everything not disabled is synced.
+
+    Treating it as a whitelist made every synced folder render as `[L]` (local
+    orphan) — the policy of a daemon host holds only `disabled` entries, so the
+    whitelist was always empty.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.policy_path = os.path.join(self.tmpdir, "sync_policy.json")
+        with open(self.policy_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "ydm_sync_policy:v1",
+                "paths": {
+                    "Books": {"mode": "disabled"},
+                    "video/Обучение": {"mode": "disabled"},
+                },
+            }, handle, ensure_ascii=False)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ctx(self, blacklist):
+        return load_policy_context(
+            self.policy_path, self.tmpdir, blacklist_semantics=blacklist
+        )
+
+    def test_daemon_treats_everything_not_disabled_as_bidirectional(self):
+        ctx = self._ctx(True)
+        self.assertEqual(effective_policy_state("/pro", ctx), ("bidirectional", True))
+        self.assertEqual(effective_policy_state("/video", ctx), ("bidirectional", True))
+        self.assertEqual(effective_policy_state("/", ctx), ("bidirectional", True))
+
+    def test_daemon_inherits_disabled_from_an_ancestor(self):
+        ctx = self._ctx(True)
+        self.assertEqual(effective_policy_state("/Books", ctx), ("disabled", True))
+        self.assertEqual(effective_policy_state("/Books/Math", ctx), ("disabled", True))
+        self.assertEqual(
+            effective_policy_state("/video/Обучение/x", ctx), ("disabled", True)
+        )
+
+    def test_rclone_keeps_whitelist_semantics(self):
+        ctx = self._ctx(False)
+        # Not in the policy at all -> not covered, which is what [L] needs.
+        self.assertEqual(effective_policy_state("/pro", ctx), (None, False))
+        self.assertEqual(effective_policy_state("/Books", ctx), ("disabled", True))
+
+    def test_markers_follow_from_the_state(self):
+        ctx = self._ctx(True)
+        mode, covered = effective_policy_state("/pro", ctx)
+        self.assertEqual(
+            display_marker(
+                policy_mode=mode,
+                in_policy=covered,
+                local_state_value="materialized",
+                has_synced_descendant=False,
+                v1_sync_status="full",
+            ),
+            "[B]",
+        )
+        mode, covered = effective_policy_state("/Books", ctx)
+        self.assertEqual(
+            display_marker(
+                policy_mode=mode,
+                in_policy=covered,
+                local_state_value="disabled",
+                has_synced_descendant=False,
+                v1_sync_status="excluded",
+            ),
+            "[X]",
+        )
 
 
 class SyncTreePolicyTests(unittest.TestCase):

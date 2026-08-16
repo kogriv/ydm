@@ -38,9 +38,17 @@ class PolicyContext:
     bisync_filter_path: Optional[str]
     bisync_filter_hash: Optional[str]
     filter_mismatch: bool
+    #: True for the yandex-disk daemon, whose policy is a pure blacklist:
+    #: a path is synced unless it or an ancestor is disabled.
+    blacklist_semantics: bool = False
 
 
-def load_policy_context(policy_path: str, local_root: str) -> PolicyContext:
+def load_policy_context(
+    policy_path: str,
+    local_root: str,
+    *,
+    blacklist_semantics: bool = False,
+) -> PolicyContext:
     resolved = os.path.expanduser(policy_path)
     policy = None
     try:
@@ -72,6 +80,7 @@ def load_policy_context(policy_path: str, local_root: str) -> PolicyContext:
         bisync_filter_path=bisync_path,
         bisync_filter_hash=bisync_hash,
         filter_mismatch=filter_mismatch,
+        blacklist_semantics=blacklist_semantics,
     )
 
 
@@ -105,6 +114,25 @@ def policy_mode_for_path(path: str, policy: Optional[dict]) -> Optional[str]:
 def path_in_policy(path: str, policy: Optional[dict]) -> bool:
     key, _ = policy_entry_for_path(path, policy)
     return key is not None and rel_path_from_cloud(path) == key
+
+
+def effective_policy_state(path: str, ctx: PolicyContext) -> Tuple[Optional[str], bool]:
+    """Return (mode, covered) for a path under the context's semantics.
+
+    Under blacklist semantics every path is covered: it inherits `disabled`
+    from the nearest matching entry, and is bidirectional otherwise. Under
+    whitelist semantics only an exact policy entry counts as covered, which is
+    what `[L]` (local orphan, not in policy) is built on.
+    """
+    mode = policy_mode_for_path(path, ctx.policy)
+    if not ctx.blacklist_semantics:
+        return mode, path_in_policy(path, ctx.policy)
+    if ctx.policy is None:
+        return mode, path_in_policy(path, ctx.policy)
+    if rel_path_from_cloud(path) == "":
+        # The sync root itself: synced as a whole, minus its exclusions.
+        return "bidirectional", True
+    return ("disabled" if mode == "disabled" else "bidirectional"), True
 
 
 def local_dir_exists(local_root: str, path: str) -> bool:

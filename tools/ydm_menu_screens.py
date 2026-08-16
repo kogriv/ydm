@@ -40,10 +40,15 @@ def render_header(cfg: MenuConfig, status: MenuStatus) -> List[str]:
     lines.append(f"Backend: {cfg.backend_name}")
     if cfg.backend_error:
         lines.append(f"WARN: {_truncate(cfg.backend_error, cfg.width - 6)}")
-    lines.append(f"Status: {status.overall}   last bisync: {status.last_run_short}")
-    lock = "yes" if status.lock_held else "no"
-    resync = "needed" if status.resync_needed else "not needed"
-    lines.append(f"Lock: {lock}          resync: {resync}")
+    if status.bisync_fields_apply:
+        lines.append(f"Status: {status.overall}   last bisync: {status.last_run_short}")
+        lock = "yes" if status.lock_held else "no"
+        resync = "needed" if status.resync_needed else "not needed"
+        lines.append(f"Lock: {lock}          resync: {resync}")
+    else:
+        # The daemon has no bisync run, lock or resync — do not invent them.
+        lines.append(f"Status: {_truncate(status.overall, cfg.width - 8)}")
+        lines.append(f"Excluded: {len(status.disabled)} path(s)")
     bidir = format_path_summary(status.bidirectional, "[B]")
     if bidir:
         lines.append(f"Synced: {bidir}")
@@ -55,13 +60,17 @@ def render_header(cfg: MenuConfig, status: MenuStatus) -> List[str]:
 def render_main_menu(cfg: MenuConfig, status: MenuStatus) -> List[str]:
     lines = render_header(cfg, status)
     lines.append("")
+    is_daemon = cfg.backend_kind == "daemon"
     lines.extend([
         " 1  Show sync tree",
         " 2  Add folder from cloud",
         " 3  Add LOCAL folder to sync",
         " 4  Remove folder from sync",
-        " 5  Run bisync now",
-        " 6  Resync baseline (after path changes)",
+        # The daemon syncs continuously and has no resync baseline; naming
+        # these after rclone bisync misdescribes what they do here.
+        " 5  Restart daemon sync now" if is_daemon else " 5  Run bisync now",
+        " 6  Resync baseline (rclone only)" if is_daemon
+        else " 6  Resync baseline (after path changes)",
         " 7  Cloud scan (update snapshot)",
         " 8  Detailed status",
         " 9  Help",

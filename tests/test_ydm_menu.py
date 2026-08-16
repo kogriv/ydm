@@ -112,15 +112,50 @@ class MenuScopeTests(unittest.TestCase):
 
 
 class MenuStatusTests(unittest.TestCase):
-    def test_load_status_smoke(self):
-        cfg = MenuConfig.from_env_and_args(
+    """The backend must be pinned: which one auto-detection picks depends on
+    what is installed, and the two report status in different terms."""
+
+    def _cfg(self, backend):
+        return MenuConfig.from_env_and_args(
+            backend=backend,
             db_path=str(ROOT / "monitor.db"),
             local_root="/sdcard/Download/ya_disk",
             policy_path=str(ROOT / "var/sync_policy.json"),
             bisync_filter_path="/sdcard/Download/ya_disk.bisync.filters",
         )
-        status = load_status(cfg)
-        self.assertIn(status.overall, {"OK", "NEEDS RESYNC", "CHECK", "BUSY (pid None)"})
+
+    def test_rclone_status_smoke(self):
+        status = load_status(self._cfg("rclone"))
+        self.assertTrue(status.bisync_fields_apply)
+        self.assertTrue(
+            status.overall.startswith(("OK", "NEEDS RESYNC", "CHECK", "BUSY"))
+        )
+
+    def test_daemon_status_uses_the_daemon_not_bisync_terms(self):
+        from tools.sync_common import CommandResult
+
+        fake = CommandResult(
+            cmd=["yandex-disk", "status"],
+            returncode=0,
+            stdout="Sync core status: idle\nPath to Yandex.Disk directory: '/x'",
+            stderr="",
+        )
+        with patch("tools.sync_backends.run_command", return_value=fake):
+            status = load_status(self._cfg("daemon"))
+        self.assertFalse(status.bisync_fields_apply)
+        self.assertEqual(status.overall, "idle")
+        self.assertFalse(status.resync_needed)
+
+    def test_daemon_not_running_is_reported(self):
+        from tools.sync_common import CommandResult
+
+        fake = CommandResult(
+            cmd=["yandex-disk", "status"], returncode=1, stdout="", stderr="not started"
+        )
+        with patch("tools.sync_backends.run_command", return_value=fake):
+            status = load_status(self._cfg("daemon"))
+        self.assertEqual(status.overall, "daemon not running")
+        self.assertIn("not started", status.warnings)
 
 
 class MenuCliTests(unittest.TestCase):

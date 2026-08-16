@@ -53,7 +53,7 @@ def _policy_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
         "format": "json",
         "text_header": False,
         "backend": backend_arg,
-        "exclude_config": "~/.config/yandex-disk/config.cfg",
+        "exclude_config": cfg.exclude_config,
         "apply": False,
     }
     base.update(extra)
@@ -75,7 +75,7 @@ def _bisync_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
         "text_header": False,
         "stream": False,
         "backend": backend_arg,
-        "exclude_config": "~/.config/yandex-disk/config.cfg",
+        "exclude_config": cfg.exclude_config,
     }
     base.update(extra)
     return argparse.Namespace(**base)

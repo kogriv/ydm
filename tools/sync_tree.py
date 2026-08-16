@@ -31,6 +31,7 @@ from tools.sync_common import (  # noqa: E402
 from tools.sync_policy import (  # noqa: E402
     default_policy_path,
     effective_download_paths,
+    policy_paths_by_mode,
 )
 from tools.sync_tree_cloud import (  # noqa: E402
     fetch_child_names,
@@ -41,6 +42,7 @@ from tools.sync_tree_policy import (  # noqa: E402
     SCHEMA_V2,
     PolicyContext,
     display_marker,
+    effective_policy_state,
     is_under_policy_path,
     load_policy_context,
     local_state,
@@ -357,9 +359,8 @@ def apply_policy_overlay(
 ) -> None:
     policy = ctx.policy
     entry_key, _entry_meta = policy_entry_for_path(node.path, policy)
-    node.in_policy = path_in_policy(node.path, policy)
     node.policy_entry = entry_key
-    node.policy_mode = policy_mode_for_path(node.path, policy)
+    node.policy_mode, node.in_policy = effective_policy_state(node.path, ctx)
     node.local_state = local_state(
         policy_mode=node.policy_mode,
         in_policy=node.in_policy,
@@ -445,7 +446,15 @@ def render_v2_header(
         f"snapshot: base scan #{selection.base_scan_id}",
     ]
     if selection.folder_updates:
-        lines.append(f"snapshot_updates: {selection.folder_updates}")
+        # A composite snapshot can carry hundreds of per-folder overrides;
+        # dumping the whole dict pushed the tree itself off the screen.
+        # The full mapping stays available in --format json.
+        updates = sorted(selection.folder_updates.items())
+        shown = ", ".join(f"{path}#{scan}" for path, scan in updates[:3])
+        rest = len(updates) - 3
+        if rest > 0:
+            shown += f", +{rest} more (see --format json)"
+        lines.append(f"snapshot_updates: {len(updates)} folder(s): {shown}")
     if local_scan_id is not None:
         lines.append(f"local_scan_id: {local_scan_id}")
     if ctx.filter_mismatch:
@@ -543,7 +552,11 @@ def main() -> None:
     use_policy = args.use_policy if args.use_policy is not None else True
 
     policy_path = args.policy_path or default_policy_path()
-    policy_ctx = load_policy_context(policy_path, args.local_root) if use_policy else PolicyContext(
+    policy_ctx = load_policy_context(
+        policy_path,
+        args.local_root,
+        blacklist_semantics=effective_backend == "daemon",
+    ) if use_policy else PolicyContext(
         policy=None,
         policy_path=policy_path,
         bidirectional=[],
@@ -571,15 +584,18 @@ def main() -> None:
             source_path = filters_result.filter_path
             source_warnings = filters_result.warnings
     else:
-        # daemon backend: use policy if available; fallback to exclude-dirs
+        # The daemon is a blacklist: everything not in exclude-dirs is synced.
+        # Feeding it the whitelist of "bidirectional" policy entries produced an
+        # empty membership set — a daemon policy holds only `disabled` entries —
+        # so every synced folder rendered as an orphan instead of [B].
         if use_policy and policy_ctx.policy:
-            membership_dirs = set(effective_download_paths(policy_ctx.policy))
+            membership_dirs = normalize_exclude_dirs(
+                policy_paths_by_mode(policy_ctx.policy, "disabled")
+            )
             source_path = policy_path
             source_warnings = []
-            if policy_ctx.filter_mismatch:
-                source_warnings.append("bisync filter out of sync with policy")
         else:
-            exclude_result = load_exclude_dirs()
+            exclude_result = load_exclude_dirs(getattr(args, "exclude_config", None))
             membership_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
             source_path = exclude_result.config_path
             source_warnings = exclude_result.warnings
@@ -604,10 +620,13 @@ def main() -> None:
             local_scan_id = local_result.scan_id
 
     node = build_tree(analyzer, snapshot, root_path, args.depth)
-    compute_status_whitelist(
-        node, membership_dirs, collapse=collapse, policy_paths=policy_path_set,
-        local_root=args.local_root,
-    )
+    if effective_backend == "daemon":
+        compute_status(node, membership_dirs, collapse=collapse)
+    else:
+        compute_status_whitelist(
+            node, membership_dirs, collapse=collapse, policy_paths=policy_path_set,
+            local_root=args.local_root,
+        )
 
     apply_sync_percent(node, analyzer, snapshot, local_scan_id, args.local_root)
 
