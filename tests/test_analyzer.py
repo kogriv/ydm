@@ -306,6 +306,79 @@ class TestFindLastFullScan(AnalyzerTestCase):
         self.assertEqual(result["id"], 2)
 
 
+class TestScanRootPath(AnalyzerTestCase):
+    """`scan cloud --path X` stores X nowhere, so the composite has to infer
+    it. Reading "the scan_progress row with the earliest last_checked" gave a
+    deep leaf — last_checked marks when a folder *finished* — and the "folder
+    must be under the scan root" filter then dropped almost every folder the
+    scan had recorded. On the real database this cost 94% of every partial
+    scan's coverage (136 folder updates where there should have been 2249).
+    """
+
+    def _partial(self, scan_id, folders, finish_order=None):
+        self.insert_scan(scan_id, "cloud", "success")
+        for folder in folders:
+            self.insert_files(scan_id, [(folder, "f.txt", "file", 1, None)])
+        # Folders complete in walk order, not depth order: the deepest leaf
+        # often finishes first.
+        for index, folder in enumerate(finish_order or folders):
+            self.insert_progress(
+                scan_id, folder, last_checked=f"2026-08-16 10:00:{index:02d}"
+            )
+
+    def test_root_is_the_common_ancestor_not_the_first_finished_folder(self):
+        self._partial(
+            1,
+            ["/Books/cpp/new", "/Books/Math/Ferma", "/Books/История"],
+            finish_order=["/Books/Math/Ferma", "/Books/cpp/new", "/Books/История"],
+        )
+        self.assertEqual(self.analyzer.scan_root_path(1), "/Books")
+
+    def test_single_folder_scan(self):
+        self._partial(1, ["/pro/salva"])
+        self.assertEqual(self.analyzer.scan_root_path(1), "/pro/salva")
+
+    def test_falls_back_to_files_when_progress_is_empty(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("/A/B", "f.txt", "file", 1, None)])
+        self.assertEqual(self.analyzer.scan_root_path(1), "/A/B")
+
+    def test_root_level_scan_has_no_partial_root(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("", "A", "dir", 0, None), ("/A", "f.txt", "file", 1, None)])
+        self.assertIsNone(self.analyzer.scan_root_path(1))
+
+    def test_every_folder_of_a_partial_scan_reaches_the_composite(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [("", "Books", "dir", 0, None)])
+        self.insert_files(1, [
+            ("/Books/cpp", "old.txt", "file", 1, None),
+            ("/Books/Math", "old.txt", "file", 1, None),
+            ("/Books/История", "old.txt", "file", 1, None),
+        ])
+        self._partial(
+            2,
+            ["/Books/cpp", "/Books/Math", "/Books/История"],
+            finish_order=["/Books/Math", "/Books/cpp", "/Books/История"],
+        )
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertEqual(composite["base_scan_id"], 1)
+        self.assertEqual(
+            composite["folder_updates"],
+            {"/Books/cpp": 2, "/Books/Math": 2, "/Books/История": 2},
+        )
+
+    def test_common_ancestor_helper(self):
+        lca = self.analyzer._common_ancestor
+        self.assertEqual(lca(["/A/B/C", "/A/B/D"]), "/A/B")
+        self.assertEqual(lca(["/A/B", "/A"]), "/A")
+        self.assertEqual(lca(["/A", "/B"]), "/")
+        self.assertEqual(lca(["/A/B"]), "/A/B")
+        self.assertEqual(lca([""]), "/")
+        # A sibling with a shared name prefix is not an ancestor.
+        self.assertEqual(lca(["/pro", "/protein"]), "/")
+
+
 class TestPartialScanCannotBecomeBase(AnalyzerTestCase):
     """A scan of one folder must never be the composite base.
 

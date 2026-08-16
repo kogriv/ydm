@@ -79,6 +79,23 @@ snapshot date prints a warning saying the list is incomplete, and a disk
 revision that moved while the sweeps found nothing prints the blind-spot
 warning below instead of "no changes".
 
+### What the first use of it turned up
+
+Running the 32 planned rescans and re-checking showed the same folders still
+stale — which exposed a bug in the composite itself, not in the sweep:
+`build_composite_scan()` was keeping roughly 6% of every partial scan (136
+folder updates where 2 249 were due), because it inferred each scan's root
+from the *first folder to finish*, a deep leaf. Fixed in the same session;
+see the CHANGELOG entry "The composite kept 6% of every partial scan".
+
+Afterwards: **67 stale folders → 1**, the sole remainder being files sitting
+directly in the disk root, which only a full scan refreshes.
+
+That is the argument for this tool in one paragraph. The composite had been
+quietly wrong for months and nothing surfaced it, because nothing ever asked
+"is the snapshot actually current?" — a targeted rescan looks identical
+whether it landed or not.
+
 ## Proposed mechanism
 
 Store `disk_revision` alongside each cloud scan. Then:

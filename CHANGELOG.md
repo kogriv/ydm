@@ -5,6 +5,32 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — The composite kept 6% of every partial scan
+
+Found by running the new `cloud_delta.py` against the freshly rescanned
+folders: they were still reported as stale. `build_composite_scan()` filters
+each partial scan's folders by "must be under the scan's root", and derived
+that root as *the `scan_progress` row with the earliest `last_checked`*. But
+`last_checked` marks when a folder **finished**, and the first folder to
+finish is a deep leaf, not the root.
+
+Scan 93 (`scan cloud --path /Books`, 437 folders) resolved to
+`/Books/ментальные карты/yang_super`, so 436 of its 437 folder updates were
+discarded. `/pro` and `/Компьютер WIN-…` fared the same. Across the database
+the composite carried **136 folder updates where it should have carried
+2 249** — partial scans have been mostly decorative, which is exactly the
+"unreliable mechanism" this design was suspected of being.
+
+- `Analyzer.scan_root_path()` derives the root as the common ancestor of
+  every folder the scan recorded (`scan_progress`, falling back to
+  `files.parent_path`). Retroactive: no rescan needed for existing data.
+- The old fallback ("shortest parent_path", implemented as
+  `ORDER BY parent_path LIMIT 1`, i.e. alphabetically first) is gone with it.
+
+After this plus the 31 targeted rescans that `cloud_delta.py` planned, the
+snapshot went from 67 stale folders to 1 — the disk root itself, whose direct
+files only a full scan refreshes.
+
 ## 2026-08-16 — `cloud_delta.py`: which folders of the snapshot went stale
 
 The composite snapshot patches a base scan with targeted partial scans, so it

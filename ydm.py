@@ -1558,6 +1558,61 @@ class Analyzer:
         
         return {row[0] for row in folders}
 
+    @staticmethod
+    def _common_ancestor(paths):
+        """Deepest folder that contains every path in `paths`."""
+        components = None
+        for path in paths:
+            if path is None:
+                continue
+            parts = [part for part in str(path).strip("/").split("/") if part]
+            if components is None:
+                components = parts
+            else:
+                shared = []
+                for left, right in zip(components, parts):
+                    if left != right:
+                        break
+                    shared.append(left)
+                components = shared
+            if not components:
+                break
+        if not components:
+            return "/"
+        return "/" + "/".join(components)
+
+    def scan_root_path(self, scan_id):
+        """Where a scan started, derived from what it recorded.
+
+        `scan cloud --path X` does not store X anywhere, so this has to be
+        inferred. It used to be read as "the scan_progress row with the
+        earliest last_checked" — but last_checked marks when a folder
+        *finished*, and the first folder to finish is a deep leaf, not the
+        root. Scan 93 (`--path /Books`, 437 folders) resolved to
+        `/Books/ментальные карты/yang_super`, and the "folder must be under
+        the scan root" filter in build_composite_scan() then discarded 436 of
+        its 437 folder updates. The common ancestor of everything the scan
+        touched is the honest answer.
+        """
+        conn = self.storage.get_connection()
+        try:
+            paths = [
+                row[0] for row in conn.execute(
+                    "SELECT path FROM scan_progress WHERE scan_id = ?", (scan_id,)
+                )
+            ]
+            paths += [
+                row[0] for row in conn.execute(
+                    "SELECT DISTINCT parent_path FROM files WHERE scan_id = ?", (scan_id,)
+                )
+            ]
+        finally:
+            conn.close()
+        if not paths:
+            return None
+        root = self._common_ancestor(paths)
+        return None if root == "/" else root
+
     def find_partial_scans_after(self, base_scan_id):
         """
         Finds all partial (non-full) cloud scans that occurred after the base scan.
@@ -1597,35 +1652,10 @@ class Analyzer:
         
         result = []
         for scan_id, timestamp, status in partial_scans:
-            # Get root path for this partial scan
-            # First try from scan_progress
-            root_paths = conn.execute(
-                """SELECT path FROM scan_progress 
-                WHERE scan_id = ? 
-                ORDER BY last_checked ASC 
-                LIMIT 1""",
-                (scan_id,)
-            ).fetchone()
-            
-            root_path = root_paths[0] if root_paths else None
-            
-            # If not found in scan_progress, try to determine from files
-            if not root_path:
-                file_paths = conn.execute(
-                    """SELECT DISTINCT parent_path 
-                    FROM files 
-                    WHERE scan_id = ? 
-                    ORDER BY parent_path 
-                    LIMIT 1""",
-                    (scan_id,)
-                ).fetchone()
-                
-                if file_paths:
-                    # Use the shortest parent_path as root (usually the top-level folder)
-                    root_path = file_paths[0]
-                    # If it's not empty, ensure it starts with /
-                    if root_path and not root_path.startswith('/'):
-                        root_path = '/' + root_path
+            # Where this partial scan started: the common ancestor of every
+            # folder it recorded. See scan_root_path() for why "the first
+            # scan_progress row" was wrong.
+            root_path = self.scan_root_path(scan_id)
             
             result.append({
                 "id": scan_id,
