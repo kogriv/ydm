@@ -45,6 +45,24 @@ class MenuConfigTests(unittest.TestCase):
         self.assertTrue(cfg.db_path.endswith("monitor.db"))
         self.assertEqual(cfg.local_root, "/tmp/ydm-test")
 
+    def test_no_backend_available_is_reported_not_raised(self):
+        """A host with neither the daemon nor an rclone remote (CI runners,
+        a fresh checkout) must still get a menu that explains itself."""
+        from tools.sync_backends import BackendError
+        from tools.ydm_menu_screens import render_header
+
+        with patch(
+            "tools.ydm_menu_config.detect_backend",
+            side_effect=BackendError("No sync backend available: ..."),
+        ):
+            cfg = MenuConfig.from_env_and_args(local_root="/tmp/ydm-test")
+        self.assertEqual(cfg.backend_kind, "")
+        self.assertEqual(cfg.backend_name, "none available")
+        self.assertIn("No sync backend available", cfg.backend_error)
+        header = "\n".join(render_header(cfg, load_status(cfg)))
+        self.assertIn("Backend: none available", header)
+        self.assertIn("No sync backend available", header)
+
 
 class MenuScopeTests(unittest.TestCase):
     def test_bisync_scope_lines(self):

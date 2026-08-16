@@ -27,6 +27,12 @@ immediately found the remaining half of the original bug:
 - **`apply_policy()` refuses to clear a non-empty `exclude-dirs`** when the
   policy has no disabled paths — the state you get from running `add --apply`
   before `migrate`. Dry-run reports it as `clears_exclude_dirs` instead.
+- **`ydm_menu.py` crashed on a host with no backend.** `MenuConfig.from_env_and_args()`
+  let `detect_backend()`'s `BackendError` escape, so a machine without the
+  daemon *and* without an rclone remote got a traceback instead of a menu —
+  which is also why CI has been red on master since 2026-08-08. It now reports
+  `Backend: none available` with the reason in the header, and the REPL catches
+  `BackendError` from an action instead of dying.
 - `tests/test_sync_backends.py` never ran the way CI invokes it
   (`python tests/test_sync_backends.py`): it imports `tools.*` without putting
   the repo root on `sys.path`. Added the same bootstrap `test_sync_tree.py`

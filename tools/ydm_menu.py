@@ -25,6 +25,7 @@ from tools.ydm_menu_actions import (  # noqa: E402
     run_cloud_scan,
     run_sync_tree,
 )
+from tools.sync_backends import BackendError  # noqa: E402
 from tools.ydm_menu_config import MenuConfig  # noqa: E402
 from tools.ydm_menu_orphans import format_orphan_label, list_orphan_paths, orphans_to_json  # noqa: E402
 from tools.ydm_menu_prompts import (  # noqa: E402
@@ -266,6 +267,10 @@ def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
                 handler()
             except KeyboardInterrupt:
                 print("\nInterrupted.")
+            except BackendError as exc:
+                # No usable backend, or one that refused the operation: report
+                # it and stay in the menu instead of dropping a traceback.
+                print(f"Backend error: {exc}")
             pause(reader=reader)
         else:
             print("Unknown choice.")
