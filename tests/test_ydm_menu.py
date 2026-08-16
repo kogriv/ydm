@@ -24,6 +24,32 @@ from tools.ydm_menu_prompts import (  # noqa: E402
 from tools.ydm_menu_status import load_status  # noqa: E402
 
 
+def _seed_cloud_db(db_path: str) -> None:
+    """A minimal monitor.db with one successful cloud scan."""
+    import sqlite3
+
+    from tools.sync_common import create_storage
+
+    create_storage(db_path).init_db()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO scans (id, scan_type, status, duration) "
+            "VALUES (1,'cloud','success',1.0)"
+        )
+        conn.executemany(
+            "INSERT INTO files (scan_id,parent_path,name,type,size,md5) VALUES (1,?,?,?,?,?)",
+            [
+                ("", "Books", "dir", 0, None),
+                ("", "video", "dir", 0, None),
+                ("/Books", "readme.txt", "file", 10, "0" * 32),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class MenuPromptTests(unittest.TestCase):
     def test_prompt_int_default(self):
         self.assertEqual(prompt_int("x", default=4, reader=lambda _: ""), 4)
@@ -109,27 +135,48 @@ class MenuCliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("orphans", proc.stdout)
 
-    def test_orphans_json(self):
+    def _run_orphans(self, db_path, tmpdir):
         import subprocess
 
-        proc = subprocess.run(
+        return subprocess.run(
             [
                 sys.executable,
                 str(ROOT / "tools/ydm_menu.py"),
                 "--db-path",
-                str(ROOT / "monitor.db"),
+                db_path,
                 "--local-root",
-                "/sdcard/Download/ya_disk",
+                os.path.join(tmpdir, "ya_disk"),
                 "--policy-path",
-                str(ROOT / "var/sync_policy.json"),
+                os.path.join(tmpdir, "sync_policy.json"),
                 "orphans",
             ],
             capture_output=True,
             text=True,
             timeout=120,
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("ydm_menu_orphans:v1", proc.stdout)
+
+    def test_orphans_json(self):
+        # Self-contained: the repo's own monitor.db is gitignored, so a test
+        # that reads it passes only on the developer's machine.
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(tmpdir, "monitor.db")
+            _seed_cloud_db(db_path)
+            proc = self._run_orphans(db_path, tmpdir)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("ydm_menu_orphans:v1", proc.stdout)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_orphans_without_a_cloud_scan_explains_itself(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            proc = self._run_orphans(os.path.join(tmpdir, "missing.db"), tmpdir)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("No successful cloud scan", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

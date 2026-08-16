@@ -91,6 +91,33 @@ def _collect_orphans_from_node(node, local_root: str, out: List[OrphanEntry]) ->
         _collect_orphans_from_node(child, local_root, out)
 
 
+def cloud_scan_available(db_path: str) -> bool:
+    """True when db_path holds at least one successful cloud scan.
+
+    A fresh checkout has no monitor.db at all (it is gitignored), and an
+    interrupted first run leaves one without the schema. Both used to reach
+    the tree builder and surface as `sqlite3.OperationalError: no such table`.
+    """
+    import sqlite3
+
+    resolved = os.path.expanduser(db_path)
+    if not os.path.exists(resolved):
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM scans WHERE scan_type = 'cloud' AND status = 'success' LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return row is not None
+
+
 def list_orphan_paths(
     db_path: str,
     local_root: str,

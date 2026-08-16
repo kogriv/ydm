@@ -27,7 +27,12 @@ from tools.ydm_menu_actions import (  # noqa: E402
 )
 from tools.sync_backends import BackendError  # noqa: E402
 from tools.ydm_menu_config import MenuConfig  # noqa: E402
-from tools.ydm_menu_orphans import format_orphan_label, list_orphan_paths, orphans_to_json  # noqa: E402
+from tools.ydm_menu_orphans import (  # noqa: E402
+    cloud_scan_available,
+    format_orphan_label,
+    list_orphan_paths,
+    orphans_to_json,
+)
 from tools.ydm_menu_prompts import (  # noqa: E402
     default_reader,
     pause,
@@ -277,6 +282,13 @@ def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
 
 
 def cmd_orphans_json(cfg: MenuConfig) -> int:
+    if not cloud_scan_available(cfg.db_path):
+        print(
+            f"No successful cloud scan in {cfg.db_path}. "
+            f"Run: python3 ydm.py scan cloud",
+            file=sys.stderr,
+        )
+        return 2
     entries = list_orphan_paths(
         cfg.db_path, cfg.local_root, cfg.policy_path, root="/", max_depth=5
     )

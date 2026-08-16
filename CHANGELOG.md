@@ -33,6 +33,12 @@ immediately found the remaining half of the original bug:
   which is also why CI has been red on master since 2026-08-08. It now reports
   `Backend: none available` with the reason in the header, and the REPL catches
   `BackendError` from an action instead of dying.
+- **`ydm_menu.py orphans` on a machine with no `monitor.db`** (a fresh
+  checkout — the DB is gitignored) died with
+  `sqlite3.OperationalError: no such table: scans`. It now checks for a
+  successful cloud scan first and says what to run. The test that covered it
+  read the developer's own `monitor.db`, so it only ever passed locally; it
+  now seeds its own.
 - `tests/test_sync_backends.py` never ran the way CI invokes it
   (`python tests/test_sync_backends.py`): it imports `tools.*` without putting
   the repo root on `sys.path`. Added the same bootstrap `test_sync_tree.py`
