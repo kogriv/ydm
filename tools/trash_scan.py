@@ -20,12 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ydm import StorageManager  # noqa: E402
+from ydm import StorageManager, load_token_from_env  # noqa: E402
 
 
-DEFAULT_TRASH_ROOT = "trash:/Books_25639b9fb1cee52a5b58811baffa033cbf2896a3"
-DEFAULT_RESTORE_ROOT = "/Books"
-DEFAULT_DB_PATH = str(ROOT / "var" / "trash_books.db")
+DEFAULT_DB_PATH = str(ROOT / "var" / "trash_scan.db")
 API_URL = "https://cloud-api.yandex.net/v1/disk/trash/resources"
 RESTORE_URL = "https://cloud-api.yandex.net/v1/disk/trash/resources/restore"
 
@@ -94,6 +92,28 @@ def token_from_rclone(remote: str = "yandex") -> str:
     return access
 
 
+def resolve_token(source: str = "auto", remote: str = "yandex") -> str:
+    """Resolve an OAuth token the way the rest of the project does.
+
+    `.env` (`YANDEX_DISK_TOKEN`) comes first: it is the project's documented
+    convention, and rclone refreshes its own `access_token`, so a value copied
+    out of `rclone.conf` can already be expired by the time it is used — which
+    surfaces as an opaque 401.
+    """
+    if source not in {"auto", "env", "rclone"}:
+        raise SystemExit(f"Unknown token source: {source}")
+    if source in {"auto", "env"}:
+        token = load_token_from_env()
+        if token:
+            return token
+        if source == "env":
+            raise SystemExit(
+                "YANDEX_DISK_TOKEN not found in .env. Add it, or pass "
+                "--token-source rclone to read the rclone remote instead."
+            )
+    return token_from_rclone(remote)
+
+
 class YandexTrashClient:
     def __init__(self, token: str):
         self.headers = {
@@ -149,6 +169,44 @@ class YandexTrashClient:
             return json.load(response)
 
 
+def operation_href_from(body: str) -> Optional[str]:
+    try:
+        href = json.loads(body).get("href")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return href or None
+
+
+def poll_operation(
+    client: "YandexTrashClient",
+    href: str,
+    *,
+    interval_sec: float = 5.0,
+    timeout_sec: float = 600.0,
+    on_status=None,
+    sleep=time.sleep,
+    now=time.monotonic,
+) -> tuple[str, Dict[str, object]]:
+    """Poll /operations/<id> until it resolves or the deadline passes.
+
+    Returns (status, payload). An unresolved operation comes back as
+    "accepted", never as "success": the caller must not record it as done.
+    """
+    deadline = now() + timeout_sec
+    payload: Dict[str, object] = {}
+    status = "accepted"
+    while True:
+        payload = client.get_operation(href)
+        status = str(payload.get("status") or "unknown")
+        if on_status:
+            on_status(status, payload)
+        if status in ("success", "failed"):
+            return status, payload
+        if now() >= deadline:
+            return "accepted", payload
+        sleep(interval_sec)
+
+
 def ensure_extra_schema(db_path: str) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -184,6 +242,7 @@ def ensure_extra_schema(db_path: str) -> None:
                 trash_path TEXT NOT NULL,
                 status TEXT NOT NULL,
                 http_status INTEGER,
+                operation_href TEXT,
                 response TEXT,
                 attempted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(scan_id) REFERENCES scans(id),
@@ -191,6 +250,10 @@ def ensure_extra_schema(db_path: str) -> None:
             )
             """
         )
+        # Databases written before operation polling existed lack the column.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(restore_ops)")}
+        if "operation_href" not in columns:
+            conn.execute("ALTER TABLE restore_ops ADD COLUMN operation_href TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_restore_ops_entry_status ON restore_ops(trash_entry_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_restore_ops_scan_status ON restore_ops(scan_id, status)")
         conn.execute(
@@ -238,8 +301,7 @@ def scan_trash(args: argparse.Namespace) -> dict:
         raise SystemExit(message)
     ensure_extra_schema(db_path)
 
-    token = token_from_rclone(args.remote)
-    client = YandexTrashClient(token)
+    client = YandexTrashClient(resolve_token(args.token_source, args.remote))
 
     if args.resume:
         if not args.scan_id:
@@ -423,9 +485,12 @@ def compare_monitor(args: argparse.Namespace) -> dict:
 
     monitor_db = os.path.expanduser(args.monitor_db)
     monitor_scan_id = args.monitor_scan_id
+    restore_root = args.restore_root.rstrip("/")
+    restore_root_like = restore_root + "/%"
 
     with sqlite3.connect(db_path) as conn:
-        conn.execute(f"ATTACH DATABASE '{monitor_db}' AS monitor")
+        conn.row_factory = sqlite3.Row
+        conn.execute("ATTACH DATABASE ? AS monitor", (monitor_db,))
         trash_counts = conn.execute(
             """
             SELECT COUNT(*), SUM(type='file'), SUM(type='dir'), COALESCE(SUM(CASE WHEN type='file' THEN size ELSE 0 END),0)
@@ -439,7 +504,7 @@ def compare_monitor(args: argparse.Namespace) -> dict:
             FROM monitor.files
             WHERE scan_id=? AND (parent_path=? OR parent_path LIKE ?)
             """,
-            (monitor_scan_id, args.restore_root.rstrip("/"), args.restore_root.rstrip("/") + "/%"),
+            (monitor_scan_id, restore_root, restore_root_like),
         ).fetchone()
         missing_in_trash = conn.execute(
             """
@@ -453,7 +518,7 @@ def compare_monitor(args: argparse.Namespace) -> dict:
             ORDER BY path
             LIMIT ?
             """,
-            (scan_id, monitor_scan_id, args.restore_root.rstrip("/"), args.restore_root.rstrip("/") + "/%", args.limit),
+            (scan_id, monitor_scan_id, restore_root, restore_root_like, args.limit),
         ).fetchall()
         extra_in_trash = conn.execute(
             """
@@ -466,6 +531,41 @@ def compare_monitor(args: argparse.Namespace) -> dict:
             LIMIT ?
             """,
             (monitor_scan_id, scan_id, args.limit),
+        ).fetchall()
+        # The counts above answer "is anything missing"; these answer "is what
+        # came back the same bytes". The incident report quoted both, but only
+        # the first pair was reproducible from this command.
+        matched = conn.execute(
+            """
+            SELECT
+              COUNT(*),
+              SUM(CASE WHEN m.size IS NOT t.size THEN 1 ELSE 0 END),
+              SUM(CASE WHEN m.md5 IS NOT NULL AND t.md5 IS NOT NULL
+                        AND m.md5 <> t.md5 THEN 1 ELSE 0 END),
+              SUM(CASE WHEN m.md5 IS NULL OR t.md5 IS NULL THEN 1 ELSE 0 END)
+            FROM monitor.files m
+            JOIN trash_entries t
+              ON t.scan_id=? AND t.restore_parent_path=m.parent_path AND t.name=m.name
+            WHERE m.scan_id=? AND m.type='file'
+              AND (m.parent_path=? OR m.parent_path LIKE ?)
+            """,
+            (scan_id, monitor_scan_id, restore_root, restore_root_like),
+        ).fetchone()
+        mismatch_sample = conn.execute(
+            """
+            SELECT t.restore_path, m.size AS monitor_size, t.size AS trash_size,
+                   m.md5 AS monitor_md5, t.md5 AS trash_md5
+            FROM monitor.files m
+            JOIN trash_entries t
+              ON t.scan_id=? AND t.restore_parent_path=m.parent_path AND t.name=m.name
+            WHERE m.scan_id=? AND m.type='file'
+              AND (m.parent_path=? OR m.parent_path LIKE ?)
+              AND (m.size IS NOT t.size
+                   OR (m.md5 IS NOT NULL AND t.md5 IS NOT NULL AND m.md5 <> t.md5))
+            ORDER BY t.restore_path
+            LIMIT ?
+            """,
+            (scan_id, monitor_scan_id, restore_root, restore_root_like, args.limit),
         ).fetchall()
         conn.execute("DETACH DATABASE monitor")
 
@@ -484,8 +584,13 @@ def compare_monitor(args: argparse.Namespace) -> dict:
             "dirs": monitor_counts[2],
             "bytes": monitor_counts[3],
         },
+        "matched_files": matched[0],
+        "size_mismatch_matched_files": matched[1] or 0,
+        "md5_mismatch_matched_files": matched[2] or 0,
+        "md5_unavailable_matched_files": matched[3] or 0,
         "missing_in_trash_sample": [row[0] for row in missing_in_trash],
         "extra_in_trash_sample": [row[0] for row in extra_in_trash],
+        "mismatch_sample": [dict(row) for row in mismatch_sample],
     }
 
 
@@ -585,7 +690,7 @@ def restore_plan(args: argparse.Namespace) -> dict:
     }
 
 
-def restore_files(args: argparse.Namespace) -> dict:
+def restore_files(args: argparse.Namespace, client: Optional[YandexTrashClient] = None) -> dict:
     db_path = os.path.expanduser(args.db_path)
     ensure_extra_schema(db_path)
     scan_id = args.scan_id or latest_scan_id(db_path)
@@ -598,8 +703,8 @@ def restore_files(args: argparse.Namespace) -> dict:
     prefix = normalize_restore_path(args.prefix) if args.prefix else restore_root
     like_prefix = prefix.rstrip("/") + "/%"
     order_by = _restore_order_clause(args.order)
-    token = token_from_rclone(args.remote) if args.apply else ""
-    client = YandexTrashClient(token) if args.apply else None
+    if args.apply and client is None:
+        client = YandexTrashClient(resolve_token(args.token_source, args.remote))
 
     where = [
         "e.scan_id=?",
@@ -633,6 +738,7 @@ def restore_files(args: argparse.Namespace) -> dict:
 
     attempted = 0
     successes = 0
+    accepted = 0
     errors: List[dict] = []
     dry_run_sample: List[dict] = []
     started = time.time()
@@ -651,27 +757,66 @@ def restore_files(args: argparse.Namespace) -> dict:
         assert client is not None
         attempted += 1
         http_status, body = client.restore(row["trash_path"], overwrite=args.overwrite)
-        status = "success" if http_status in (200, 201, 202, 204) else "error"
+        operation_href = None
+        operation = None
+
+        if http_status in (200, 201, 204):
+            status = "success"
+        elif http_status == 202:
+            # 202 is *accepted*, not done. This very incident had accepted
+            # operations later report "failed"; recording them as success made
+            # restore-plan skip them forever.
+            operation_href = operation_href_from(body)
+            status = "accepted"
+            if operation_href and args.poll:
+                status, operation = poll_operation(
+                    client,
+                    operation_href,
+                    interval_sec=args.poll_interval_sec,
+                    timeout_sec=args.poll_timeout_sec,
+                )
+        else:
+            status = "error"
+
         if status == "success":
             successes += 1
+        elif status == "accepted":
+            accepted += 1
         else:
             errors.append(
                 {
                     "restore_path": row["restore_path"],
                     "trash_path": row["trash_path"],
                     "http_status": http_status,
+                    "operation_status": status,
                     "response": body[:1000],
                 }
             )
 
+        response_record = body[:4000]
+        if operation is not None:
+            response_record = json.dumps(
+                {"restore_response": body[:2000], "operation": operation},
+                ensure_ascii=False,
+            )[:4000]
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 """
                 INSERT INTO restore_ops
-                (scan_id, trash_entry_id, restore_path, trash_path, status, http_status, response)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (scan_id, trash_entry_id, restore_path, trash_path, status,
+                 http_status, operation_href, response)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (scan_id, row["id"], row["restore_path"], row["trash_path"], status, http_status, body[:4000]),
+                (
+                    scan_id,
+                    row["id"],
+                    row["restore_path"],
+                    row["trash_path"],
+                    status,
+                    http_status,
+                    operation_href,
+                    response_record,
+                ),
             )
             conn.commit()
 
@@ -682,6 +827,7 @@ def restore_files(args: argparse.Namespace) -> dict:
                         "status": status,
                         "attempted": attempted,
                         "successes": successes,
+                        "accepted": accepted,
                         "errors": len(errors),
                         "restore_path": row["restore_path"],
                         "http_status": http_status,
@@ -691,7 +837,7 @@ def restore_files(args: argparse.Namespace) -> dict:
                 flush=True,
             )
 
-        if status == "error" and args.stop_on_error:
+        if status in ("error", "failed") and args.stop_on_error:
             break
         if args.sleep_sec:
             time.sleep(args.sleep_sec)
@@ -704,6 +850,7 @@ def restore_files(args: argparse.Namespace) -> dict:
         "selected": len(rows),
         "attempted": attempted,
         "successes": successes,
+        "accepted_unresolved": accepted,
         "errors_count": len(errors),
         "errors_sample": errors[:20],
         "dry_run_sample": dry_run_sample[:20],
@@ -711,7 +858,62 @@ def restore_files(args: argparse.Namespace) -> dict:
     }
 
 
-def restore_root(args: argparse.Namespace) -> dict:
+def poll_ops(args: argparse.Namespace, client: Optional[YandexTrashClient] = None) -> dict:
+    """Resolve restore_ops rows still sitting at 'accepted'.
+
+    Without this, an interrupted or timed-out `restore-files` leaves rows that
+    are neither success nor error: restore-plan retries them (correct, but
+    wasteful) and no one ever learns whether the operation actually landed.
+    """
+    db_path = os.path.expanduser(args.db_path)
+    ensure_extra_schema(db_path)
+    scan_id = args.scan_id or latest_scan_id(db_path)
+    if not scan_id:
+        raise SystemExit("No trash scan found")
+    if client is None:
+        client = YandexTrashClient(resolve_token(args.token_source, args.remote))
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, restore_path, operation_href
+            FROM restore_ops
+            WHERE scan_id=? AND status='accepted' AND operation_href IS NOT NULL
+            ORDER BY id
+            LIMIT ?
+            """,
+            (scan_id, args.limit),
+        ).fetchall()
+
+    resolved = {"success": 0, "failed": 0, "accepted": 0}
+    for row in rows:
+        status, payload = poll_operation(
+            client,
+            row["operation_href"],
+            interval_sec=args.poll_interval_sec,
+            timeout_sec=args.poll_timeout_sec,
+        )
+        resolved[status] = resolved.get(status, 0) + 1
+        if status == "accepted":
+            continue
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE restore_ops SET status=?, response=? WHERE id=?",
+                (status, json.dumps(payload, ensure_ascii=False)[:4000], row["id"]),
+            )
+            conn.commit()
+
+    return {
+        "scan_id": scan_id,
+        "checked": len(rows),
+        "resolved_success": resolved["success"],
+        "resolved_failed": resolved["failed"],
+        "still_accepted": resolved["accepted"],
+    }
+
+
+def restore_root(args: argparse.Namespace, client: Optional[YandexTrashClient] = None) -> dict:
     db_path = os.path.expanduser(args.db_path)
     ensure_extra_schema(db_path)
     scan_id = args.scan_id or latest_scan_id(db_path)
@@ -732,36 +934,33 @@ def restore_root(args: argparse.Namespace) -> dict:
             "overwrite": args.overwrite,
         }
 
-    client = YandexTrashClient(token_from_rclone(args.remote))
+    if client is None:
+        client = YandexTrashClient(resolve_token(args.token_source, args.remote))
     http_status, body = client.restore(trash_root, overwrite=args.overwrite)
     operation_href = None
     operation_status = "accepted" if http_status in (200, 201, 202, 204) else "error"
     operation_payload: Dict[str, object] = {}
 
     if http_status == 202:
-        try:
-            operation_href = json.loads(body).get("href")
-        except json.JSONDecodeError:
-            operation_href = None
+        operation_href = operation_href_from(body)
         if operation_href and args.poll:
-            deadline = time.time() + args.poll_timeout_sec
-            while True:
-                operation_payload = client.get_operation(operation_href)
-                operation_status = str(operation_payload.get("status") or "unknown")
+            def _report(status: str, _payload: Dict[str, object]) -> None:
                 if args.progress:
                     print(
                         json.dumps(
-                            {
-                                "operation_href": operation_href,
-                                "operation_status": operation_status,
-                            },
+                            {"operation_href": operation_href, "operation_status": status},
                             ensure_ascii=False,
                         ),
                         flush=True,
                     )
-                if operation_status in ("success", "failed") or time.time() >= deadline:
-                    break
-                time.sleep(args.poll_interval_sec)
+
+            operation_status, operation_payload = poll_operation(
+                client,
+                operation_href,
+                interval_sec=args.poll_interval_sec,
+                timeout_sec=args.poll_timeout_sec,
+                on_status=_report,
+            )
     elif http_status in (200, 201, 204):
         operation_status = "success"
 
@@ -807,16 +1006,35 @@ def render(payload: dict, fmt: str) -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scanner/restorer for a Yandex Disk Trash subtree")
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
     parser.add_argument("--format", choices=["json", "text"], default="json")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def token_flags(p):
+        p.add_argument("--remote", default="yandex", help="rclone remote, for --token-source rclone")
+        p.add_argument(
+            "--token-source",
+            choices=["auto", "env", "rclone"],
+            default="auto",
+            help="Where to read the OAuth token: .env first (auto), .env only, or rclone.conf",
+        )
+
+    def poll_flags(p):
+        p.add_argument(
+            "--poll",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Poll /operations for HTTP 202 responses instead of assuming success",
+        )
+        p.add_argument("--poll-interval-sec", type=float, default=5.0)
+        p.add_argument("--poll-timeout-sec", type=float, default=600.0)
+
     scan = sub.add_parser("scan")
-    scan.add_argument("--trash-root", default=DEFAULT_TRASH_ROOT)
-    scan.add_argument("--restore-root", default=DEFAULT_RESTORE_ROOT)
-    scan.add_argument("--remote", default="yandex")
+    scan.add_argument("--trash-root", required=True, help="e.g. trash:/Books_<hash>")
+    scan.add_argument("--restore-root", required=True, help="where it will be restored, e.g. /Books")
+    token_flags(scan)
     scan.add_argument("--limit", type=int, default=1000)
     scan.add_argument("--progress", action="store_true")
     scan.add_argument("--resume", action="store_true")
@@ -824,19 +1042,19 @@ def parse_args() -> argparse.Namespace:
 
     summ = sub.add_parser("summary")
     summ.add_argument("--scan-id", type=int)
-    summ.add_argument("--restore-root", default=DEFAULT_RESTORE_ROOT)
+    summ.add_argument("--restore-root", required=True)
     summ.add_argument("--limit", type=int, default=50)
 
     comp = sub.add_parser("compare-monitor")
     comp.add_argument("--scan-id", type=int)
     comp.add_argument("--monitor-db", default=str(ROOT / "monitor.db"))
-    comp.add_argument("--monitor-scan-id", type=int, default=1)
-    comp.add_argument("--restore-root", default=DEFAULT_RESTORE_ROOT)
+    comp.add_argument("--monitor-scan-id", type=int, required=True)
+    comp.add_argument("--restore-root", required=True)
     comp.add_argument("--limit", type=int, default=50)
 
     plan = sub.add_parser("restore-plan")
     plan.add_argument("--scan-id", type=int)
-    plan.add_argument("--restore-root", default=DEFAULT_RESTORE_ROOT)
+    plan.add_argument("--restore-root", required=True)
     plan.add_argument("--prefix")
     plan.add_argument("--limit", type=int, default=50)
     plan.add_argument("--order", choices=["path", "size-asc", "size-desc"], default="path")
@@ -844,9 +1062,10 @@ def parse_args() -> argparse.Namespace:
 
     restore = sub.add_parser("restore-files")
     restore.add_argument("--scan-id", type=int)
-    restore.add_argument("--restore-root", default=DEFAULT_RESTORE_ROOT)
+    restore.add_argument("--restore-root", required=True)
     restore.add_argument("--prefix")
-    restore.add_argument("--remote", default="yandex")
+    token_flags(restore)
+    poll_flags(restore)
     restore.add_argument("--limit", type=int, default=10)
     restore.add_argument("--order", choices=["path", "size-asc", "size-desc"], default="path")
     restore.add_argument("--retry-failed", action="store_true")
@@ -857,19 +1076,23 @@ def parse_args() -> argparse.Namespace:
     restore.add_argument("--apply", action="store_true")
     restore.add_argument("--yes", default="")
 
+    poll = sub.add_parser("poll-ops", help="Resolve restore_ops rows still marked 'accepted'")
+    poll.add_argument("--scan-id", type=int)
+    token_flags(poll)
+    poll_flags(poll)
+    poll.add_argument("--limit", type=int, default=100)
+
     root_restore = sub.add_parser("restore-root")
     root_restore.add_argument("--scan-id", type=int)
-    root_restore.add_argument("--trash-root", default=DEFAULT_TRASH_ROOT)
-    root_restore.add_argument("--restore-root", default=DEFAULT_RESTORE_ROOT)
-    root_restore.add_argument("--remote", default="yandex")
+    root_restore.add_argument("--trash-root", required=True)
+    root_restore.add_argument("--restore-root", required=True)
+    token_flags(root_restore)
+    poll_flags(root_restore)
     root_restore.add_argument("--overwrite", action="store_true")
-    root_restore.add_argument("--poll", action="store_true")
-    root_restore.add_argument("--poll-interval-sec", type=float, default=5.0)
-    root_restore.add_argument("--poll-timeout-sec", type=float, default=600.0)
     root_restore.add_argument("--progress", action="store_true")
     root_restore.add_argument("--apply", action="store_true")
     root_restore.add_argument("--yes", default="")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -884,6 +1107,8 @@ def main() -> None:
         payload = restore_plan(args)
     elif args.command == "restore-files":
         payload = restore_files(args)
+    elif args.command == "poll-ops":
+        payload = poll_ops(args)
     elif args.command == "restore-root":
         payload = restore_root(args)
     else:

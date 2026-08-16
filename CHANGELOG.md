@@ -5,6 +5,35 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — Yandex Disk Trash restore tooling
+
+`tools/trash_scan.py` scans a Trash subtree into a YDM-style SQLite database,
+compares it against a `monitor.db` snapshot, and restores it whole or file by
+file. Written during the `/Books` recovery; the notes below are what it took
+to make it a permanent tool rather than a one-incident script. Full log:
+[`docs/incidents/yandex-books-restore-2026-08-15.md`](docs/incidents/yandex-books-restore-2026-08-15.md).
+
+- **HTTP 202 is no longer recorded as a completed restore.** `restore-files`
+  now reads the operation href, polls `/operations/<id>` and stores
+  `success`/`failed`/`accepted`. Since `restore-plan` retires an entry only on
+  a `success` row, the old behavior meant a file whose operation later
+  reported `failed` — which happened during this very incident — was skipped
+  forever. New `poll-ops` resolves rows left at `accepted`.
+- **`--trash-root` and `--restore-root` are required arguments.** They used to
+  default to the August 2026 trash resource and `/Books`, so a bare
+  `restore-root --apply --yes RESTORE_ROOT` was a mutating command aimed at
+  one specific incident.
+- **The token comes from `.env` (`YANDEX_DISK_TOKEN`) first**, as everywhere
+  else in the project; `--token-source rclone` still reads `rclone.conf`.
+  rclone refreshes its `access_token`, so a stale copy 401s with no
+  explanation.
+- **`compare-monitor` reports the metrics the incident write-up quotes** —
+  `matched_files`, `size_mismatch_matched_files`, `md5_mismatch_matched_files`
+  plus a mismatch sample. They previously came from ad-hoc SQL and could not
+  be reproduced with the committed tool.
+- `tests/test_trash_scan.py` covers all of it offline against a fake API
+  client.
+
 ## 2026-08-16 — Ancestor-sibling coercion fixed, on a test bench this time
 
 `tests/test_sync_policy_daemon.py` is the environment the previous entry's

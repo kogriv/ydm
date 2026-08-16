@@ -34,6 +34,7 @@ jobs:
           python tools/sync_bisync.py --help
           python tools/sync_policy.py --help
           python tools/ydm_menu.py --help
+          python tools/trash_scan.py --help
           python tasks/junk/plan_cleanup.py --help
           python tasks/junk/run_cleanup.py --help
 
@@ -51,6 +52,9 @@ jobs:
 
       - name: Unit tests (ydm_menu)
         run: python tests/test_ydm_menu.py -v
+
+      - name: Unit tests (trash_scan restore/compare, offline fake client)
+        run: python tests/test_trash_scan.py -v
 
       - name: Regression suite (tests/test_ydm_fixes.sh)
         run: bash tests/test_ydm_fixes.sh

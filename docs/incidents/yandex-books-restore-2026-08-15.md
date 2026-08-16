@@ -4,21 +4,38 @@ Date: 2026-08-15
 
 ## Summary
 
-An external agent running on another machine created an empty `Books` folder via
-the Yandex Disk API after the original cloud `disk:/Books` tree had been moved
-to Trash. The web Trash UI did not expose a useful one-folder restore path, and
-Yandex support initially said they could only restore all Trash contents.
+The cloud `disk:/Books` tree (13 893 files, 113,6 GB) was moved to Trash, and
+an empty `Books` folder was created over it via the API. The web Trash UI did
+not expose a useful one-folder restore path, and Yandex support initially said
+they could only restore all Trash contents.
+
+**Attribution correction (2026-08-16).** This document originally blamed "an
+external agent running on another machine". It was not external: the deletion
+was caused by an AI-agent session in *this* repository, via a bug in
+`_policy_coerce_for_daemon()` that removed `Books` from the daemon's
+`exclude-dirs` shortly before its local copy was deleted. Root cause, evidence
+and timeline: [`yandex-books-delete-2026-08-14.md`](./yandex-books-delete-2026-08-14.md).
 
 This repo now contains a diagnostic/recovery helper:
 
 ```bash
-python3 tools/trash_scan.py --db-path var/trash_books.db scan --progress
-python3 tools/trash_scan.py --db-path var/trash_books.db summary
-python3 tools/trash_scan.py --db-path var/trash_books.db restore-plan
-python3 tools/trash_scan.py --db-path var/trash_books.db restore-root --poll --apply --yes RESTORE_ROOT
+DB=var/trash_scan.db
+TRASH_ROOT='trash:/<name reported by the trash listing>'
+
+python3 tools/trash_scan.py --db-path $DB scan \
+  --trash-root "$TRASH_ROOT" --restore-root /Books --progress
+python3 tools/trash_scan.py --db-path $DB summary --restore-root /Books
+python3 tools/trash_scan.py --db-path $DB restore-plan --restore-root /Books
+python3 tools/trash_scan.py --db-path $DB restore-root \
+  --trash-root "$TRASH_ROOT" --restore-root /Books --apply --yes RESTORE_ROOT
 ```
 
-The local scan database `var/trash_books.db` is intentionally not committed.
+`--trash-root` / `--restore-root` are required: a mutating command must not
+carry one incident's paths as defaults. The token comes from `.env`
+(`YANDEX_DISK_TOKEN`) by default; `--token-source rclone` reads the rclone
+remote instead.
+
+The local scan database `var/trash_scan.db` is intentionally not committed.
 
 ## Recovered Resource
 
@@ -61,7 +78,9 @@ dirs: 823
 bytes: 112378920102
 ```
 
-Comparison with historical `/Books`:
+Comparison with historical `/Books` (`compare-monitor` reports all five of
+these; the size/md5 metrics came from ad-hoc SQL when this was written and are
+part of the command since 2026-08-16):
 
 ```text
 matched_files: 13726
@@ -101,18 +120,19 @@ The whole-folder restore initially returned:
 
 Per-file restore of nested Trash entries returned `404 DiskNotFoundError` for
 some files. Restoring top-level child directories accepted operations (`202`)
-but the operations later reported `failed`.
+but the operations later reported `failed`. That is exactly why `restore-files`
+now polls `/operations/<id>` and records `accepted`/`failed` instead of taking
+a `202` for a completed restore (`poll-ops` resolves leftovers later).
 
 After verifying that active cloud `/Books` did not exist, the root Trash resource
 restore was retried:
 
 ```bash
 python3 tools/trash_scan.py \
-  --db-path var/trash_books.db \
+  --db-path var/trash_scan.db \
   restore-root \
   --trash-root 'trash:/Books_25639b9fb1cee52a5b58811baffa033cbf2896a3' \
   --restore-root /Books \
-  --poll \
   --apply \
   --yes RESTORE_ROOT
 ```
