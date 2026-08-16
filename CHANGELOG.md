@@ -5,6 +5,27 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — `report prune`, and a guard against the previous entry
+
+- **`report prune`** deletes scans the composite no longer needs. Dry-run by
+  default; `--apply` deletes, `--vacuum` shrinks the file. It never touches
+  the composite base, any scan the composite draws a folder from, an explicit
+  `reference_full_scan_id`, the `--keep-root-scans` most recent full scans
+  (history is a purpose of this project, not overhead), anything newer than
+  the base, or the `--keep-local` most recent local scans — and it prints
+  what it kept and why. On the reference database: 46 scans kept, 91
+  prunable, 1 192 805 of 1 439 569 rows (82.9%).
+- **`TestDiffInvariant`**: a cloud scan and a local scan describing the same
+  tree must diff to nothing — with each side written in its own native
+  convention. This is the test that would have caught the path-convention
+  defect on day one; every earlier diff test built both sides from the same
+  string, so they agreed by accident. A companion test asserts the invariant
+  still detects a single planted difference, because a guard that always
+  reports zero is worse than none.
+- The `parent_path` convention is now documented in
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), including why storage keeps
+  two conventions rather than being migrated to one.
+
 ## 2026-08-16 — `report diff` never matched anything
 
 The project's headline feature — compare cloud against the local copy — was

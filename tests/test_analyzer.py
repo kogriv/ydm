@@ -223,6 +223,74 @@ class TestDiffPathConventions(AnalyzerTestCase):
         )
 
 
+class TestDiffInvariant(AnalyzerTestCase):
+    """Invariant: a cloud scan and a local scan describing the *same* tree
+    must diff to nothing.
+
+    This is the test that would have caught the path-convention defect on day
+    one. Every earlier diff test constructed both sides with the same string,
+    so they agreed by accident rather than by comparison. Here each side is
+    written in its own native convention, exactly as its scanner stores it.
+    """
+
+    TREE = [
+        ("", "root.txt"),
+        ("pro", "a.txt"),
+        ("pro/MuSy", "actor.hpp"),
+        ("pro/MuSy/.vscode", "settings.json"),
+        ("Books/Math/АнГем", "book.pdf"),
+        ("brtn/Перс/Дом", "скан.pdf"),
+    ]
+
+    def _populate(self, cloud_id, local_id, tree):
+        self.insert_scan(cloud_id, "cloud", "success")
+        self.insert_scan(local_id, "local", "success")
+        # Cloud stores "/pro/MuSy"; local stores "pro/MuSy". Root is "" in both.
+        self.insert_files(cloud_id, [
+            (f"/{parent}" if parent else "", name, "file", 7, "md5")
+            for parent, name in tree
+        ])
+        self.insert_files(local_id, [
+            (parent, name, "file", 7, "md5") for parent, name in tree
+        ])
+
+    def test_identical_trees_diff_to_nothing(self):
+        self._populate(1, 2, self.TREE)
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["matched_count"], len(self.TREE))
+        self.assertEqual(result["missing_local_count"], 0, result["missing_local_sample"])
+        self.assertEqual(result["missing_cloud_count"], 0, result["missing_cloud_sample"])
+
+    def test_the_invariant_still_detects_a_single_difference(self):
+        """A guard that reports zero no matter what is worse than none."""
+        self._populate(1, 2, self.TREE)
+        self.insert_files(1, [("/pro/MuSy", "extra.hpp", "file", 7, "md5")])
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["missing_local_count"], 1)
+        self.assertEqual(result["missing_local_sample"], ["/pro/MuSy/extra.hpp"])
+
+    def test_invariant_holds_through_the_composite_path(self):
+        self.insert_scan(1, "cloud", "success")
+        self.insert_scan(2, "local", "success")
+        self.insert_files(1, [("", "Books", "dir", 0, None)])
+        self.insert_files(1, [
+            (f"/{parent}" if parent else "", name, "file", 7, "md5")
+            for parent, name in self.TREE
+        ])
+        self.insert_files(2, [
+            (parent, name, "file", 7, "md5") for parent, name in self.TREE
+        ])
+        # A partial rescan of /pro/MuSy that found exactly the same content.
+        self.insert_scan(3, "cloud", "success")
+        self.insert_files(3, [("/pro/MuSy", "actor.hpp", "file", 7, "md5")])
+        self.insert_progress(3, "/pro/MuSy", last_checked="2026-08-16 10:00:00")
+
+        result = self.analyzer.get_diff(local_scan_id=2, use_composite=True)
+        self.assertIn("composite", str(result["compare_scans"]["cloud"]))
+        self.assertEqual(result["missing_local_count"], 0, result["missing_local_sample"])
+        self.assertEqual(result["missing_cloud_count"], 0, result["missing_cloud_sample"])
+
+
 class TestDiffExcludeDirs(AnalyzerTestCase):
     """exclude-dirs is not a list of top-level names: 45 of the 55 entries on
     the reference machine are nested (`video/Обучение`). Matching only the
@@ -589,6 +657,121 @@ class TestPartialScanCannotBecomeBase(AnalyzerTestCase):
         self._partial_scan(2, folder="A", files=99)
         result = self.analyzer.find_last_full_scan()
         self.assertEqual(result["id"], 1)
+
+
+class TestPrune(AnalyzerTestCase):
+    """Retention. The database only grows — every partial scan adds rows and
+    old full scans are never reclaimed — but deleting scans destroys history,
+    which is one of the things this project is for. So the rule protects
+    everything the composite needs plus an explicit amount of history, and
+    does nothing at all unless asked."""
+
+    def _full_scan(self, scan_id, timestamp=None):
+        self.insert_scan(scan_id, "cloud", "success", timestamp=timestamp)
+        self.insert_files(scan_id, [("", "A", "dir", 0, None)])
+        self.insert_files(scan_id, [("/A", f"f{scan_id}.txt", "file", 1, None)])
+
+    def _partial_scan(self, scan_id, folder="/A"):
+        self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(scan_id, [(folder, f"p{scan_id}.txt", "file", 1, None)])
+        self.insert_progress(scan_id, folder, last_checked="2026-08-16 10:00:00")
+
+    def _local_scan(self, scan_id):
+        self.insert_scan(scan_id, "local", "success")
+        self.insert_files(scan_id, [("A", f"l{scan_id}.txt", "file", 1, None)])
+
+    def _kept_ids(self, plan):
+        return {item["scan_id"] for item in plan["kept"]}
+
+    def _prunable_ids(self, plan):
+        return {item["scan_id"] for item in plan["prunable"]}
+
+    def test_composite_base_and_its_updates_are_protected(self):
+        self._full_scan(1)
+        self._full_scan(2)
+        self._partial_scan(3)
+        plan = self.analyzer.prune_plan(keep_root_scans=1)
+        base = plan["base_scan_id"]
+        self.assertIn(base, self._kept_ids(plan))
+        self.assertIn(3, self._kept_ids(plan))
+
+    def test_old_full_scans_beyond_the_history_budget_are_prunable(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        plan = self.analyzer.prune_plan(keep_root_scans=1)
+        # 3 is the base (newest full scan); 1 and 2 are older history.
+        self.assertEqual(plan["base_scan_id"], 3)
+        self.assertEqual(self._prunable_ids(plan), {1, 2})
+
+    def test_keep_root_scans_widens_the_history_budget(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        plan = self.analyzer.prune_plan(keep_root_scans=3)
+        self.assertEqual(self._prunable_ids(plan), set())
+
+    def test_only_the_newest_local_scans_survive(self):
+        self._full_scan(1)
+        for scan_id in (2, 3, 4, 5):
+            self._local_scan(scan_id)
+        plan = self.analyzer.prune_plan(keep_local=2, keep_root_scans=1)
+        self.assertEqual(self._prunable_ids(plan), {2, 3})
+
+    def test_reference_full_scan_id_is_never_touched(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        self.config["reference_full_scan_id"] = 1
+        plan = self.analyzer.prune_plan(keep_root_scans=1)
+        self.assertIn(1, self._kept_ids(plan))
+        self.assertNotIn(1, self._prunable_ids(plan))
+
+    def test_cloud_scans_newer_than_the_base_are_kept(self):
+        self._full_scan(1)
+        self.insert_scan(2, "cloud", "failed")  # newer, empty, may yet matter
+        plan = self.analyzer.prune_plan(keep_root_scans=1)
+        self.assertIn(2, self._kept_ids(plan))
+
+    def test_dry_run_deletes_nothing(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        before = self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        result = self.analyzer.prune(keep_root_scans=1)
+        self.assertFalse(result["applied"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0], before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0], 3)
+
+    def test_apply_removes_the_scan_its_files_and_its_progress(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        self.insert_progress(1, "/A", last_checked="2026-08-16 10:00:00")
+        result = self.analyzer.prune(keep_root_scans=1, apply=True)
+        self.assertTrue(result["applied"])
+        remaining = {row[0] for row in self.conn.execute("SELECT id FROM scans")}
+        self.assertEqual(remaining, {3})
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM files WHERE scan_id IN (1,2)").fetchone()[0], 0
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM scan_progress WHERE scan_id = 1").fetchone()[0], 0
+        )
+
+    def test_the_composite_still_builds_after_pruning(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        self._partial_scan(4)
+        self.analyzer.prune(keep_root_scans=1, apply=True)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertNotIn("error", composite)
+        self.assertEqual(composite["base_scan_id"], 3)
+        self.assertIn("/A", composite["folder_updates"])
+
+    def test_row_accounting(self):
+        for scan_id in (1, 2, 3):
+            self._full_scan(scan_id)
+        plan = self.analyzer.prune_plan(keep_root_scans=1)
+        self.assertEqual(
+            plan["prunable_rows"], sum(item["rows"] for item in plan["prunable"])
+        )
+        self.assertLess(plan["prunable_rows"], plan["total_rows"])
 
 
 class TestDuplicates(AnalyzerTestCase):

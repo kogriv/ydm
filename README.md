@@ -450,6 +450,7 @@ See [PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md) for more on the architec
 - `report long-paths --scan-id ID [--limit-chars N]` - files with long paths
 - `report duplicates --scan-id ID [--by-hash|--by-name]` - find duplicates
 - `report clean-duplicates [--scan-id ID]` - remove duplicate rows left by an older bug (see [CHANGELOG.md](CHANGELOG.md))
+- `report prune [--apply] [--vacuum] [--keep-local N] [--keep-root-scans N]` - delete scans the composite no longer needs; dry-run by default, and it lists what it protects and why
 - `report analyze-scan --scan-id ID` - integrity analysis
 - `report full-scan-info` / `report full-scan-candidates` - inspect which scan is used as the composite-diff base and why
 

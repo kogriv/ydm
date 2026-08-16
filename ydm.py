@@ -98,6 +98,45 @@ def is_path_excluded(compare_path, exclude_dirs):
     return False
 
 
+def format_prune_plan(plan):
+    """Readable summary of a prune plan — the full lists stay in --format json."""
+    from collections import Counter
+
+    lines = [
+        f"composite base: scan #{plan['base_scan_id']} "
+        f"({plan['folder_updates']} folder updates)",
+        f"keeping {len(plan['kept'])} scan(s), pruning {plan['prunable_scans']}",
+        f"rows: {plan['prunable_rows']} of {plan['total_rows']} "
+        f"({plan['prunable_share_percent']}%)",
+        "",
+        "kept because:",
+    ]
+    for reason, count in sorted(Counter(item["reason"] for item in plan["kept"]).items()):
+        lines.append(f"  {count:>4}  {reason}")
+
+    biggest = sorted(plan["prunable"], key=lambda item: -item["rows"])[:10]
+    if biggest:
+        lines += ["", "largest scans to delete:"]
+        for item in biggest:
+            lines.append(
+                f"  #{item['scan_id']:<4} {item['scan_type']:<6} {item['timestamp']}  "
+                f"{item['rows']} rows"
+            )
+        rest = plan["prunable_scans"] - len(biggest)
+        if rest > 0:
+            lines.append(f"  … and {rest} more (see --format json)")
+
+    lines.append("")
+    if plan.get("applied"):
+        lines.append(
+            "APPLIED. " + ("VACUUM done." if plan.get("vacuumed") else
+                           "Run with --vacuum to shrink the file on disk.")
+        )
+    else:
+        lines.append("Dry run — nothing deleted. Add --apply to delete.")
+    return "\n".join(lines)
+
+
 def is_termination_requested():
     """Check if SIGTERM/SIGUSR1 requested graceful stop."""
     return _terminate_requested
@@ -2234,6 +2273,124 @@ class Analyzer:
         result["total_duplicates"] = len(result["duplicates"])
         return result
 
+    def prune_plan(self, keep_local=3, keep_root_scans=2):
+        """Which scans are safe to delete, and what they cost.
+
+        This database only grows: every partial scan adds rows, and old full
+        scans are never reclaimed. Deleting is not free of meaning, though —
+        tracking change over time is one of the project's purposes — so the
+        rule is conservative and everything it protects is listed explicitly.
+
+        Kept, always:
+          - the composite base and every scan the composite draws a folder from
+          - an explicit `reference_full_scan_id` from the config
+          - the `keep_root_scans` most recent scans covering the disk root
+          - every cloud scan newer than the base (they may become updates)
+          - the `keep_local` most recent successful local scans
+        """
+        composite = self.build_composite_scan(use_cache=False)
+        base_scan_id = composite.get("base_scan_id")
+        folder_updates = composite.get("folder_updates") or {}
+
+        conn = self.storage.get_connection()
+        try:
+            scans = conn.execute(
+                "SELECT id, scan_type, status, timestamp FROM scans ORDER BY id"
+            ).fetchall()
+            row_counts = dict(
+                conn.execute("SELECT scan_id, COUNT(*) FROM files GROUP BY scan_id").fetchall()
+            )
+        finally:
+            conn.close()
+
+        keep = {}
+
+        def protect(scan_id, reason):
+            if scan_id is not None:
+                keep.setdefault(scan_id, reason)
+
+        protect(base_scan_id, "composite base")
+        for scan_id in set(folder_updates.values()):
+            protect(scan_id, "supplies folders to the composite")
+        reference = self._get_config_reference_full_scan_id()
+        if reference:
+            try:
+                protect(int(reference), "reference_full_scan_id in config")
+            except (TypeError, ValueError):
+                pass
+
+        cloud_ids = [row[0] for row in scans if row[1] == "cloud"]
+        root_scans = [sid for sid in sorted(cloud_ids, reverse=True) if self.scan_covers_root(sid)]
+        for scan_id in root_scans[:keep_root_scans]:
+            protect(scan_id, "recent root scan")
+        if base_scan_id is not None:
+            for scan_id in cloud_ids:
+                if scan_id > base_scan_id:
+                    protect(scan_id, "newer than the composite base")
+
+        local_ids = [row[0] for row in scans if row[1] == "local" and row[2] == "success"]
+        for scan_id in sorted(local_ids, reverse=True)[:keep_local]:
+            protect(scan_id, "recent local scan")
+
+        prunable = []
+        for scan_id, scan_type, status, timestamp in scans:
+            if scan_id in keep:
+                continue
+            prunable.append({
+                "scan_id": scan_id,
+                "scan_type": scan_type,
+                "status": status,
+                "timestamp": timestamp,
+                "rows": row_counts.get(scan_id, 0),
+            })
+
+        total_rows = sum(row_counts.values())
+        prunable_rows = sum(item["rows"] for item in prunable)
+        return {
+            "base_scan_id": base_scan_id,
+            "folder_updates": len(folder_updates),
+            "keep_local": keep_local,
+            "keep_root_scans": keep_root_scans,
+            "kept": [
+                {"scan_id": scan_id, "reason": reason}
+                for scan_id, reason in sorted(keep.items())
+            ],
+            "prunable": prunable,
+            "prunable_scans": len(prunable),
+            "prunable_rows": prunable_rows,
+            "total_rows": total_rows,
+            "prunable_share_percent": round(prunable_rows * 100 / total_rows, 1) if total_rows else 0.0,
+        }
+
+    def prune(self, keep_local=3, keep_root_scans=2, apply=False, vacuum=False):
+        """Delete the scans prune_plan() reports as safe. Dry-run by default."""
+        plan = self.prune_plan(keep_local=keep_local, keep_root_scans=keep_root_scans)
+        plan["applied"] = False
+        plan["vacuumed"] = False
+        if not apply or not plan["prunable"]:
+            return plan
+
+        ids = [item["scan_id"] for item in plan["prunable"]]
+        conn = self.storage.get_connection()
+        try:
+            # Chunked so the statement stays well inside SQLite's variable limit.
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                conn.execute(f"DELETE FROM files WHERE scan_id IN ({placeholders})", chunk)
+                conn.execute(f"DELETE FROM scan_progress WHERE scan_id IN ({placeholders})", chunk)
+                conn.execute(f"DELETE FROM scans WHERE id IN ({placeholders})", chunk)
+            conn.commit()
+            plan["applied"] = True
+            if vacuum:
+                conn.isolation_level = None
+                conn.execute("VACUUM")
+                plan["vacuumed"] = True
+        finally:
+            conn.close()
+        self._composite_cache.clear()
+        return plan
+
     def clean_duplicates(self, scan_id=None):
         """Remove duplicate file entries from database.
         
@@ -2346,6 +2503,7 @@ class YDM_CLI:
             "analyze-scan",
             "duplicates",
             "clean-duplicates",
+            "prune",
             "full-scan-info",
             "full-scan-candidates",
         ], help="Report type")
@@ -2357,6 +2515,10 @@ class YDM_CLI:
         report_parser.add_argument("--limit-chars", type=int, default=240, help="Path length limit for long-paths report")
         report_parser.add_argument("--by-hash", action="store_true", default=True, help="Find duplicates by MD5 hash (default) or --by-name")
         report_parser.add_argument("--by-name", action="store_true", help="Find duplicates by size+name instead of hash")
+        report_parser.add_argument("--apply", action="store_true", help="prune: actually delete (dry-run otherwise)")
+        report_parser.add_argument("--vacuum", action="store_true", help="prune: VACUUM after deleting, to shrink the file")
+        report_parser.add_argument("--keep-local", type=int, default=3, help="prune: how many recent local scans to keep")
+        report_parser.add_argument("--keep-root-scans", type=int, default=2, help="prune: how many recent root-covering cloud scans to keep")
 
     def render(self, data, success=True):
         """Renders output in chosen format."""
@@ -2758,6 +2920,18 @@ class YDM_CLI:
             if self.args.type == "clean-duplicates":
                 result = analyzer.clean_duplicates(self.args.scan_id)
                 self.render(result)
+                return True
+            if self.args.type == "prune":
+                result = analyzer.prune(
+                    keep_local=self.args.keep_local,
+                    keep_root_scans=self.args.keep_root_scans,
+                    apply=self.args.apply,
+                    vacuum=self.args.vacuum,
+                )
+                if self.args.format == "json":
+                    self.render(result)
+                else:
+                    self.render(format_prune_plan(result))
                 return True
 
         return False

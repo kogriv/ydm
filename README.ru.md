@@ -441,6 +441,7 @@ source ~/.bashrc
 - `report long-paths --scan-id ID [--limit-chars N]` - файлы с длинными путями
 - `report duplicates --scan-id ID [--by-hash|--by-name]` - поиск дубликатов
 - `report clean-duplicates [--scan-id ID]` - убрать дублирующиеся строки от старого бага (см. [CHANGELOG.md](CHANGELOG.md))
+- `report prune [--apply] [--vacuum] [--keep-local N] [--keep-root-scans N]` - удалить сканы, которые больше не нужны композиту; по умолчанию dry-run, показывает что и почему сохраняется
 - `report analyze-scan --scan-id ID` - анализ целостности
 - `report full-scan-info` / `report full-scan-candidates` - какой скан используется как база композитного diff и почему
 
