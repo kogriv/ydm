@@ -167,13 +167,24 @@ termux-job-scheduler --pending
 No pending jobs
 ```
 
-Temporary cloud folders existed and were intentionally left untouched:
+Temporary cloud folders existed and were left untouched at the time:
 
 ```text
-Books (1)/
-Books_LOCAL_142_20260815/
-Books_TEST_RESTORE_FILE_20260815/
+Books (1)/                          1 file   (an agent's test.txt)
+Books_LOCAL_142_20260815/         142 files  (894 MB safety copy)
+Books_TEST_RESTORE_FILE_20260815/   1 file   (single-file restore test)
 ```
 
-Do not re-enable bidirectional sync until `/Books` is verified from the target
-machine and the temporary folders are reviewed.
+**Removed 2026-08-16**, after verifying against the post-restore full scan
+(`93`) of `/Books` that every one of the 142 files exists there with identical
+size and md5 — 0 missing, 0 mismatches — and that the test-restore file's
+content (`1254fc02f859bd67cbc4947c5b94b37d`) is present in `/Books` in four
+places. They went to Trash, not permanent deletion. Their names stay in
+`exclude-dirs` deliberately: removing them would need a daemon restart, which
+is not worth doing for stale entries pointing at paths that no longer exist.
+
+`/Books` was verified from the target machine on 2026-08-15 (scan `93` vs the
+last full pre-incident scan `72`: 0 files lost). Do not re-enable
+bidirectional sync for paths whose local copy is incomplete — see
+[`yandex-books-delete-2026-08-14.md`](./yandex-books-delete-2026-08-14.md) and
+the `deletion_risk_paths` guard it produced.
