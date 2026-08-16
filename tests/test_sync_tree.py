@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tools.sync_tree import count_cloud_files_for_path  # noqa: E402
 from tools.sync_tree_cloud import fetch_child_names, infer_dirs_from_files  # noqa: E402
 from tools.sync_tree_policy import (  # noqa: E402
     display_marker,
@@ -180,6 +181,81 @@ class SyncTreePolicyTests(unittest.TestCase):
         self.assertIn("[B]", summary)
         self.assertIn("Books/Math/База", summary)
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class CompositeFileCountTests(unittest.TestCase):
+    """The composite resolves per folder: each folder is served by the newest
+    scan that covered it, the base scan otherwise. Counting has to follow the
+    same rule — the old implementation added recursive totals and subtracted
+    recursive totals, which double-subtracted nested updates and matched
+    siblings by raw prefix (`/pro` swallowed `/protein`)."""
+
+    class _Storage:
+        def __init__(self, path):
+            self.path = path
+
+        def get_connection(self):
+            return sqlite3.connect(self.path)
+
+    class _Snapshot:
+        def __init__(self, base_scan_id, folder_updates):
+            self.base_scan_id = base_scan_id
+            self.folder_updates = folder_updates
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "cloud.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, scan_id INTEGER, "
+            "parent_path TEXT, name TEXT, type TEXT, size INTEGER, md5 TEXT)"
+        )
+        rows = []
+        # Base scan 1: two files in each folder, plus a same-prefix sibling.
+        for folder in ("", "/pro", "/pro/a", "/pro/a/b", "/protein"):
+            rows += [(1, folder, f"base{i}.txt", "file", 1, None) for i in range(2)]
+        # Scan 2 refreshed /pro/a (3 files), scan 3 refreshed /pro/a/b (5).
+        rows += [(2, "/pro/a", f"s2_{i}.txt", "file", 1, None) for i in range(3)]
+        rows += [(3, "/pro/a/b", f"s3_{i}.txt", "file", 1, None) for i in range(5)]
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size, md5) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
+        class FakeAnalyzer:
+            pass
+
+        self.analyzer = FakeAnalyzer()
+        self.analyzer.storage = self._Storage(self.db_path)
+        self.snapshot = self._Snapshot(1, {"/pro/a": 2, "/pro/a/b": 3})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def count(self, path):
+        return count_cloud_files_for_path(self.analyzer, self.snapshot, path)
+
+    def test_nested_updates_are_counted_once_each(self):
+        # /pro (2 from base) + /pro/a (3 from scan 2) + /pro/a/b (5 from scan 3)
+        self.assertEqual(self.count("/pro"), 10)
+
+    def test_updated_folder_uses_its_own_scan(self):
+        self.assertEqual(self.count("/pro/a"), 8)   # 3 + 5
+        self.assertEqual(self.count("/pro/a/b"), 5)
+
+    def test_same_prefix_sibling_is_not_included(self):
+        self.assertEqual(self.count("/protein"), 2)
+
+    def test_root_covers_everything_including_root_level_files(self):
+        # root 2 + /pro 2 + /pro/a 3 + /pro/a/b 5 + /protein 2
+        self.assertEqual(self.count("/"), 14)
+
+    def test_folder_without_an_update_falls_back_to_the_base(self):
+        snapshot = self._Snapshot(1, {})
+        self.assertEqual(count_cloud_files_for_path(self.analyzer, snapshot, "/pro"), 6)
 
 
 class SyncTreeCloudTests(unittest.TestCase):

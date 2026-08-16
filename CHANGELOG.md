@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — Composite file counts: wrong, and then slow
+
+Surfaced by the previous entry's fix: with the snapshot finally carrying its
+real 2 249 folder updates, `sync_tree --path /` took **176 seconds**.
+
+`count_cloud_files_for_path()` added the base scan's recursive total for a
+subtree, subtracted a recursive total per updated folder, then added each
+updated folder's recursive total back. Three problems:
+
+- **Nested updates were subtracted twice.** `/A` and `/A/B` both updated
+  meant `/A/B`'s files came off the base count once for each.
+- **Siblings were matched by raw string prefix**, so counting `/pro` also
+  pulled in `/protein`.
+- It issued several `COUNT(*)` queries per updated folder — ~13 000 queries
+  over 1.4 M rows for the root.
+
+It now sums per folder, the way the composite actually resolves, with one
+`GROUP BY` per scan involved: **176 s → 0.07 s** for the root, and `/Books`
+counts 13 893 files, matching the verified restore.
+
+The same bug was inflating the tree's percentages — `brtn` used to render at
+208% synced.
+
 ## 2026-08-16 — The composite kept 6% of every partial scan
 
 Found by running the new `cloud_delta.py` against the freshly rescanned

@@ -216,31 +216,74 @@ def _count_files_for_prefix(conn, scan_id: int, prefix: str) -> int:
     return total
 
 
+def _folder_file_counts(conn, scan_id: int, subtree: str) -> Dict[str, int]:
+    """{parent_path: file count} for one scan, restricted to a subtree.
+
+    Cloud scans always store parent_path with a leading slash ("" at the
+    root), so one GROUP BY answers for every folder at once.
+    """
+    if subtree:
+        rows = conn.execute(
+            """
+            SELECT parent_path, COUNT(*)
+            FROM files
+            WHERE scan_id = ? AND type = 'file'
+              AND (parent_path = ? OR parent_path LIKE ?)
+            GROUP BY parent_path
+            """,
+            (scan_id, subtree, f"{subtree}/%"),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT parent_path, COUNT(*)
+            FROM files
+            WHERE scan_id = ? AND type = 'file'
+            GROUP BY parent_path
+            """,
+            (scan_id,),
+        ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
 def count_cloud_files_for_path(analyzer: Analyzer, snapshot, path: str) -> int:
-    prefix = normalize_path(path)
-    if prefix == "/":
-        prefix = ""
-    base_scan_id = select_scan_id_for_path(path, snapshot)
+    """Files under `path` in the composite snapshot.
+
+    The composite resolves *per folder*: each folder is served by the newest
+    scan that covered it, and by the base scan otherwise. Counting therefore
+    means summing per folder, not adding and subtracting recursive totals —
+    the previous implementation did the latter, which double-subtracted
+    whenever one updated folder sat inside another, and matched siblings by
+    raw string prefix (`/pro` also picked up `/protein`). It also issued a
+    handful of COUNT queries per updated folder: 176 s for the root here once
+    the snapshot legitimately carried 2 249 folder updates.
+    """
     rel = rel_path_from_cloud(path)
-    deeper_updates = [
-        folder for folder in snapshot.folder_updates.keys()
-        if folder and (rel == "" or folder.startswith(rel) or folder.startswith(rel + "/"))
-    ]
+    subtree = "" if rel in ("", "/") else normalize_path(rel)
+
+    updates = {
+        folder: scan_id
+        for folder, scan_id in snapshot.folder_updates.items()
+        if folder and (not subtree or folder == subtree or folder.startswith(subtree + "/"))
+    }
+    by_scan: Dict[int, List[str]] = {}
+    for folder, scan_id in updates.items():
+        by_scan.setdefault(scan_id, []).append(folder)
 
     conn = analyzer.storage.get_connection()
     try:
-        base_count = _count_files_for_prefix(conn, base_scan_id, prefix or rel)
-        for folder in deeper_updates:
-            base_count -= _count_files_for_prefix(conn, base_scan_id, folder)
-
-        updated_count = 0
-        for folder in deeper_updates:
-            scan_id = snapshot.folder_updates[folder]
-            updated_count += _count_files_for_prefix(conn, scan_id, folder)
+        total = sum(
+            count
+            for folder, count in _folder_file_counts(conn, snapshot.base_scan_id, subtree).items()
+            if folder not in updates
+        )
+        for scan_id, folders in by_scan.items():
+            counts = _folder_file_counts(conn, scan_id, subtree)
+            total += sum(counts.get(folder, 0) for folder in folders)
     finally:
         conn.close()
 
-    return max(base_count + updated_count, 0)
+    return total
 
 
 def count_local_files_for_path(storage, local_scan_id: int, path: str) -> int:
