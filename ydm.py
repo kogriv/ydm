@@ -83,6 +83,10 @@ DEFAULT_CONFIG = {
     # yandex-disk daemon's exclude-dirs config; on --backend rclone this is
     # meaningless (no daemon) — Этап 4 introduces the filter-file equivalent.
     "exclude_config": "~/.config/yandex-disk/config.cfg",
+    # Sync backend for the unified CLI: "auto" detects the yandex-disk daemon
+    # first, then an rclone remote. Override per profile in ydm_config.json,
+    # with YDM_BACKEND, or with --backend.
+    "backend": "auto",
 }
 
 def load_config(profile="prod"):

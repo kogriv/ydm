@@ -12,9 +12,9 @@
 | 0.1 | Написать GAP.md | ✅ | `tasks/sync_unification/GAP.md` |
 | 0.2 | Написать DESIGN.md | ✅ | `tasks/sync_unification/DESIGN.md` |
 | 0.3 | Написать BACKLOG.md | ✅ | `tasks/sync_unification/BACKLOG.md` |
-| 0.4 | Написать HOW_TO_USE.md | 🔄 | `tasks/sync_unification/HOW_TO_USE.md` |
-| 0.5 | Обновить README.md / README.ru.md | ⏳ | `README.md`, `README.ru.md` |
-| 0.6 | Link from tasks/ydm_menu/README.md | ⏳ | `tasks/ydm_menu/README.md` |
+| 0.4 | Написать HOW_TO_USE.md | ✅ | `tasks/sync_unification/HOW_TO_USE.md` |
+| 0.5 | Обновить README.md / README.ru.md | ✅ | `README.md`, `README.ru.md` |
+| 0.6 | Link from tasks/ydm_menu/README.md | ✅ | `tasks/ydm_menu/README.md` |
 
 **Exit:** docs readable standalone; design approved before code.
 
