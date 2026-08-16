@@ -5,6 +5,33 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-16 — Ancestor-sibling coercion fixed, on a test bench this time
+
+`tests/test_sync_policy_daemon.py` is the environment the previous entry's
+incident lacked: a synthetic `monitor.db`, a throwaway `config.cfg` and a
+patched `stop_start_daemon`, so the daemon-backend policy path can be
+exercised without the live config, the daemon, or the cloud in reach. It
+immediately found the remaining half of the original bug:
+
+- **`_policy_coerce_for_daemon()` only excluded siblings one level deep.**
+  Including `/Books/Math/АнГем` dropped `Books` from `exclude-dirs` and
+  excluded `Books/*` except `Math` — but nothing under `Books/Math`, so the
+  daemon would still pull down the whole of `Books/Math`. It now walks every
+  level from the removed ancestor to the target. Verified against the real
+  snapshot in dry-run: 55 → 97 exclude entries, 24 siblings at `Books/` plus
+  19 at `Books/Math/`, with `/Books/Math/АнГем` the only addition to sync.
+- **Coercion without a snapshot of an intermediate level now refuses.** It
+  used to log a warning, drop the ancestor anyway and add no siblings — which
+  hands the entire branch to the daemon. It raises `PolicyCoercionError` and
+  leaves the policy file untouched; `add` reports it as a normal error.
+- **`apply_policy()` refuses to clear a non-empty `exclude-dirs`** when the
+  policy has no disabled paths — the state you get from running `add --apply`
+  before `migrate`. Dry-run reports it as `clears_exclude_dirs` instead.
+- `tests/test_sync_backends.py` never ran the way CI invokes it
+  (`python tests/test_sync_backends.py`): it imports `tools.*` without putting
+  the repo root on `sys.path`. Added the same bootstrap `test_sync_tree.py`
+  already had.
+
 ## 2026-08-15 — Deletion guard for the daemon backend, after a 113 GB near-loss
 
 The work below was validated against the **live** `yandex-disk` daemon and

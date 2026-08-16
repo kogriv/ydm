@@ -223,6 +223,16 @@ class DaemonBackend(SyncBackend):
     ) -> Dict:
         exclude_dirs = self._policy_to_exclude_dirs(policy)
         before = self._parse_exclude_dirs(self._read_config_lines())
+        clears_exclude_dirs = bool(before) and not exclude_dirs
+        if clears_exclude_dirs and not dry_run and not force_unsafe:
+            raise BackendError(
+                f"Refusing to clear all {len(before)} exclude-dirs entries: the "
+                f"policy has no disabled paths, so the daemon would pull the "
+                f"whole cloud down. If the policy simply doesn't know about the "
+                f"current exclusions yet, import them: python3 "
+                f"tools/sync_policy.py migrate --backend daemon --apply. "
+                f"Pass force_unsafe=True to sync everything on purpose."
+            )
         risky = self.deletion_risk_paths(before, exclude_dirs)
         if risky and not dry_run and not force_unsafe:
             raise BackendError(
@@ -244,6 +254,7 @@ class DaemonBackend(SyncBackend):
             "removed": sorted(set(before) - set(exclude_dirs)),
             "daemon_restart": not dry_run,
             "deletion_risk_paths": risky,
+            "clears_exclude_dirs": clears_exclude_dirs,
             "error": None,
         }
         if not dry_run:

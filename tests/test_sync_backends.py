@@ -5,13 +5,19 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools import sync_policy
-from tools.sync_backends import (
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools import sync_policy  # noqa: E402
+from tools.sync_backends import (  # noqa: E402
     BackendError,
     DaemonBackend,
     NotSupportedError,

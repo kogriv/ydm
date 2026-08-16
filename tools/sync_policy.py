@@ -60,6 +60,10 @@ SANITIZE_MAP = str.maketrans({
 VALID_MODES = {"bidirectional", "download_only", "disabled"}
 
 
+class PolicyCoercionError(RuntimeError):
+    """Ancestor conflicts could not be resolved safely for the daemon backend."""
+
+
 @dataclass
 class CloudFile:
     parent_path: str
@@ -198,8 +202,16 @@ def _policy_coerce_for_daemon(
     blocks every descendant. When the user adds a descendant as bidirectional
     (or download_only), we must:
       1. Remove disabled entries that are ancestors of the target.
-      2. For every removed ancestor, add all its other children as disabled
-         so they stay excluded.
+      2. Exclude the siblings of the target's own path on *every* level between
+         the removed ancestor and the target — not just the first one. For
+         ancestor `Books` and target `Books/Math/АнГем` that means excluding
+         `Books/*` except `Math` **and** `Books/Math/*` except `АнГем`; stopping
+         after the first level leaves the whole of `Books/Math` synced.
+
+    Both steps need a cloud snapshot of every intermediate level. Without it
+    the siblings are unknown, and dropping the ancestor anyway would hand the
+    entire branch to the daemon — so this raises `PolicyCoercionError` and
+    leaves the policy untouched instead of guessing.
 
     Returns a list of human-readable changes.
     """
@@ -208,42 +220,58 @@ def _policy_coerce_for_daemon(
         return changes
 
     paths = policy.get("paths", {})
-    ancestors_to_remove = [
-        entry for entry, meta in paths.items()
-        if meta.get("mode") == "disabled" and _is_disabled_ancestor(entry, target)
-    ]
+    ancestors_to_remove = sorted(
+        (
+            entry for entry, meta in paths.items()
+            if meta.get("mode") == "disabled" and _is_disabled_ancestor(entry, target)
+        ),
+        key=lambda entry: entry.count("/"),
+    )
     if not ancestors_to_remove:
         return changes
 
     storage = create_storage(db_path)
+    target_parts = target.split("/")
+
+    # Resolve everything before touching the policy: a failure halfway through
+    # must not leave the ancestor removed with its siblings unaccounted for.
+    siblings: List[str] = []
+    shallowest = ancestors_to_remove[0]
+    start_depth = len(shallowest.split("/")) if shallowest else 0
+    for depth in range(start_depth, len(target_parts)):
+        parent_entry = "/".join(target_parts[:depth])
+        parent_path = f"/{parent_entry}" if parent_entry else "/"
+        keep = target_parts[depth]
+
+        scan_id = _find_scan_with_children(storage, parent_path)
+        if scan_id is None:
+            raise PolicyCoercionError(
+                f"No cloud snapshot of {parent_path}: cannot tell which sibling "
+                f"folders must stay excluded. Run "
+                f"`python3 ydm.py scan cloud --path {parent_path}` first."
+            )
+        child_names = fetch_child_dirs(storage, scan_id, parent_path)
+        if keep not in child_names:
+            raise PolicyCoercionError(
+                f"/{'/'.join(target_parts[:depth + 1])} is not in the cloud "
+                f"snapshot of {parent_path} (scan {scan_id}). Rescan that path "
+                f"before including it."
+            )
+        for child_name in child_names:
+            if child_name == keep:
+                continue
+            siblings.append(f"{parent_entry}/{child_name}" if parent_entry else child_name)
 
     for ancestor in ancestors_to_remove:
         del paths[ancestor]
         changes.append(f"removed disabled ancestor: /{ancestor}")
 
-        # The removed ancestor itself becomes the parent whose children we enumerate.
-        # ancestor = "Books", target = "Books/Math/АнГем" -> next_child = "Math"
-        ancestor_parts = ancestor.split("/") if ancestor else []
-        target_parts = target.split("/")
-        if len(target_parts) <= len(ancestor_parts):
+    for sibling_entry in siblings:
+        # Don't overwrite an explicitly managed path
+        if sibling_entry in paths:
             continue
-        next_child = target_parts[len(ancestor_parts)]
-        parent_path = f"/{ancestor}" if ancestor else "/"
-
-        scan_id = _find_scan_with_children(storage, parent_path)
-        if scan_id is None:
-            changes.append(f"WARNING: no scan data for {parent_path}, could not add siblings")
-            continue
-        child_names = fetch_child_dirs(storage, scan_id, parent_path)
-        for child_name in child_names:
-            if child_name == next_child:
-                continue
-            sibling_entry = f"{ancestor}/{child_name}" if ancestor else child_name
-            # Don't overwrite an explicitly managed path
-            if sibling_entry in paths:
-                continue
-            paths[sibling_entry] = {"mode": "disabled"}
-            changes.append(f"added disabled sibling: /{sibling_entry}")
+        paths[sibling_entry] = {"mode": "disabled"}
+        changes.append(f"added disabled sibling: /{sibling_entry}")
 
     return changes
 
@@ -554,7 +582,15 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         if backend_name == "auto":
             backend_name = _resolve_backend_name(args)
         if backend_name == "daemon":
-            coerce_changes = _policy_coerce_for_daemon(policy, entry, requested_mode, args.db_path)
+            try:
+                coerce_changes = _policy_coerce_for_daemon(
+                    policy, entry, requested_mode, args.db_path
+                )
+            except PolicyCoercionError as exc:
+                # Leave the policy file as it was: a half-applied coercion is
+                # what un-excluded /Books on 2026-08-14.
+                result["error"] = str(exc)
+                return result
             if coerce_changes:
                 result["coerce_changes"] = coerce_changes
 

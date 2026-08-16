@@ -43,6 +43,9 @@ jobs:
       - name: Unit tests (sync_backends abstraction)
         run: python tests/test_sync_backends.py -v
 
+      - name: Unit tests (daemon policy bench — synthetic db, temp config.cfg)
+        run: python tests/test_sync_policy_daemon.py -v
+
       - name: Unit tests (sync_tree policy/cloud)
         run: python tests/test_sync_tree.py -v
 
