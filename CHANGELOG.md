@@ -5,6 +5,28 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-23 — the staleness warning stops crying wolf
+
+The freshness warning added earlier the same day was correct and useless. It
+reported that 48% of the snapshot came from a 172-day-old scan and that
+findings there might be stale — but all 36 028 of those files sit under
+`exclude-dirs` (`downloads`, `журналы`, `music` and eighteen others), which
+nothing ever compares against the local copy. There are no findings there to
+be stale about. The warning would have fired on every run for the rest of the
+project's life while changing no decision, and a warning that always fires is
+one nobody reads when it finally means something.
+
+- `snapshot_freshness()` now splits base-served files into
+  `stale_compared_files` and `stale_excluded_files`, and warns only about the
+  first. The age and share are still reported either way — the fact was never
+  the problem, the alarm was. `sync_tree`'s header says which kind it is
+  (`… serves 48.0% of the files (none of them synced)`).
+- `report diff` passes its own exclusion list in, so "never compared" means
+  exactly what that diff means by not comparing it, rather than two readers
+  deriving it separately and drifting.
+- `load_exclude_dirs()` is now one function instead of an inline block inside
+  `get_diff()`.
+
 ## 2026-08-23 — the diff reconciles exactly, for the first time
 
 Both sides of `report diff` now add up with nothing left over:

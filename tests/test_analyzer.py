@@ -914,6 +914,49 @@ class TestSnapshotFreshness(AnalyzerTestCase):
         self.assertTrue(result["warnings"])
         self.assertEqual(result["snapshot_freshness"]["base_scan_id"], 1)
 
+    def test_an_old_base_serving_only_excluded_folders_does_not_warn(self):
+        """The whole point of the split.
+
+        On the real disk every one of the 36 028 files still served by the
+        March base sits under exclude-dirs. Warning about them would fire on
+        every run forever while changing no decision — and a warning that
+        always fires is one nobody reads when it finally means something.
+        """
+        self._base(1, "2020-01-01 00:00:00", {"/downloads": 5})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 1)
+        freshness = self.analyzer.snapshot_freshness(exclude_dirs={"downloads"})
+        self.assertEqual(freshness["files_from_base"], 5)
+        self.assertEqual(freshness["stale_excluded_files"], 5)
+        self.assertEqual(freshness["stale_compared_files"], 0)
+        self.assertEqual(freshness["warnings"], [])
+
+    def test_an_old_base_still_warns_about_the_synced_part(self):
+        """Mixed case: the alarm must survive being made quieter."""
+        self._base(1, "2020-01-01 00:00:00", {"/downloads": 5, "/pro": 2})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 1)
+        freshness = self.analyzer.snapshot_freshness(exclude_dirs={"downloads"})
+        self.assertEqual(freshness["stale_excluded_files"], 5)
+        self.assertEqual(freshness["stale_compared_files"], 2)
+        self.assertTrue(freshness["warnings"])
+        self.assertIn("2 synced file(s)", freshness["warnings"][0])
+
+    def test_the_split_covers_every_base_served_file(self):
+        """No third bucket: each stale file is either compared or it is not."""
+        self._base(1, "2020-01-01 00:00:00", {"/downloads": 5, "/pro": 2, "/music": 3})
+        freshness = self.analyzer.snapshot_freshness(exclude_dirs={"downloads", "music"})
+        self.assertEqual(
+            freshness["files_from_base"],
+            freshness["stale_compared_files"] + freshness["stale_excluded_files"],
+        )
+
+    def test_nested_exclude_entry_counts_as_excluded(self):
+        """`video/Обучение` excludes its subtree; `video` alone does not."""
+        self._base(1, "2020-01-01 00:00:00", {"/video/Обучение/курс": 4, "/video/личное": 1})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 1)
+        freshness = self.analyzer.snapshot_freshness(exclude_dirs={"video/Обучение"})
+        self.assertEqual(freshness["stale_excluded_files"], 4)
+        self.assertEqual(freshness["stale_compared_files"], 1)
+
 
 class TestPrune(AnalyzerTestCase):
     """Retention. The database only grows — every partial scan adds rows and

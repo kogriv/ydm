@@ -500,11 +500,22 @@ def render_v2_header(
             shown += f", +{rest} more (see --format json)"
         lines.append(f"snapshot_updates: {len(updates)} folder(s): {shown}")
     if freshness and freshness.get("base_age_days") is not None:
-        lines.append(
+        line = (
             f"snapshot_age: base #{freshness['base_scan_id']} is "
             f"{freshness['base_age_days']} day(s) old and serves "
             f"{freshness['base_share_percent']}% of the files"
         )
+        # Without this the age reads as a problem. Most of what the old base
+        # still serves is under exclude-dirs and is never compared with
+        # anything, so saying how much of it matters is the difference between
+        # a fact and an alarm.
+        compared = freshness.get("stale_compared_files")
+        if compared is not None:
+            line += (
+                f" ({compared} of them synced)" if compared
+                else " (none of them synced)"
+            )
+        lines.append(line)
     for warning in (freshness or {}).get("warnings", []):
         lines.append(f"WARN: {warning}")
     if local_scan_id is not None:

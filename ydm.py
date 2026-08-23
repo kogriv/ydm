@@ -80,6 +80,28 @@ def normalize_compare_path(parent_path):
     return str(parent_path).strip("/")
 
 
+def load_exclude_dirs(config_path=None):
+    """The daemon's `exclude-dirs` as a set, or empty if it cannot be read.
+
+    Lives here rather than inside get_diff() because the freshness check needs
+    the same answer: whether a stale folder is worth warning about depends
+    entirely on whether anything ever compares it. Two readers deriving the
+    exclusion list separately is how they would drift apart.
+    """
+    path = os.path.expanduser(config_path or DEFAULT_CONFIG["exclude_config"])
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, "r") as handle:
+            for line in handle:
+                if line.startswith("exclude-dirs="):
+                    dirs = line.split("=", 1)[1].strip()
+                    return {d.strip() for d in dirs.split(",") if d.strip()}
+    except OSError:
+        pass
+    return set()
+
+
 def is_path_excluded(compare_path, exclude_dirs):
     """True if `compare_path` sits under any entry of exclude-dirs.
 
@@ -2205,7 +2227,9 @@ class Analyzer:
         if not folder_updates:
             return self._compare_simple_scan(base_scan_id, local_id, exclude_dirs)
 
-        freshness = self.snapshot_freshness(composite)
+        # Same exclusion list the comparison itself uses, so "stale but never
+        # compared" means exactly what this diff means by not comparing it.
+        freshness = self.snapshot_freshness(composite, exclude_dirs=exclude_dirs)
         return self._diff_file_sets(
             self._composite_cloud_files(composite),
             local_id,
@@ -2247,17 +2271,7 @@ class Analyzer:
         Returns:
             dict: Comparison results with missing files counts and samples
         """
-        # Читаем исключения из конфига
-        exclude_dirs = set()
-        config_path = os.path.expanduser(DEFAULT_CONFIG["exclude_config"])
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    for line in f:
-                        if line.startswith("exclude-dirs="):
-                            dirs = line.split("=", 1)[1].strip()
-                            exclude_dirs = set(d.strip() for d in dirs.split(","))
-            except: pass
+        exclude_dirs = load_exclude_dirs()
 
         conn = self.storage.get_connection()
         
@@ -2483,8 +2497,8 @@ class Analyzer:
         finally:
             conn.close()
 
-    def snapshot_freshness(self, composite=None, stale_after_days=30):
-        """How old the composite snapshot actually is, and where.
+    def snapshot_freshness(self, composite=None, stale_after_days=30, exclude_dirs=None):
+        """How old the composite snapshot actually is, and where it matters.
 
         Every consumer reads the composite as if it were current. It is not:
         folders nobody rescanned are served by the base, which here is five
@@ -2492,11 +2506,23 @@ class Analyzer:
         locally when in truth it had been deleted from the cloud in a folder
         no scan has visited since March. Reporting a finding without saying
         how old the evidence is invites chasing ghosts.
+
+        Age alone, though, is not a reason to warn. On this disk all 36 028
+        files still served by the March base sit under `exclude-dirs` —
+        `downloads`, `журналы`, `music` and eighteen others — which nothing
+        ever compares against the local copy. A warning about them would fire
+        on every run for the rest of the project's life while changing no
+        decision, and a warning that always fires is one nobody reads when it
+        finally means something. So staleness is split: files that some
+        comparison could actually reach, and files that no comparison touches.
+        Only the first kind warns.
         """
         composite = composite or self.build_composite_scan(use_cache=False)
         if "error" in composite:
             return {"error": composite["error"]}
 
+        if exclude_dirs is None:
+            exclude_dirs = load_exclude_dirs()
         base_scan_id = composite["base_scan_id"]
         folder_updates = composite.get("folder_updates") or {}
 
@@ -2512,9 +2538,17 @@ class Analyzer:
             conn.close()
 
         base_counts = self._folder_file_counts(base_scan_id)
-        files_from_base = sum(
-            count for folder, count in base_counts.items() if folder not in folder_updates
-        )
+        files_from_base = 0
+        stale_compared = 0  # served by the old base AND reachable by a diff
+        stale_excluded = 0  # served by the old base but never compared
+        for folder, count in base_counts.items():
+            if folder in folder_updates:
+                continue
+            files_from_base += count
+            if is_path_excluded(normalize_compare_path(folder), exclude_dirs):
+                stale_excluded += count
+            else:
+                stale_compared += count
         by_scan = {}
         for folder, scan_id in folder_updates.items():
             by_scan.setdefault(scan_id, set()).add(folder)
@@ -2538,12 +2572,12 @@ class Analyzer:
         base_age = age_days(base_at)
 
         warnings = []
-        if base_age is not None and base_age > stale_after_days and files_from_base:
-            share = round(files_from_base * 100 / total, 1) if total else 0.0
+        if base_age is not None and base_age > stale_after_days and stale_compared:
+            share = round(stale_compared * 100 / total, 1) if total else 0.0
             warnings.append(
-                f"{share}% of the snapshot ({files_from_base} files) comes from "
-                f"scan #{base_scan_id}, {base_age} days old. Findings in those "
-                f"folders may be stale. Check with: "
+                f"{stale_compared} synced file(s) ({share}% of the snapshot) come "
+                f"from scan #{base_scan_id}, {base_age} days old, and are compared "
+                f"against the local copy. Findings there may be stale. Refresh with: "
                 f"python3 tools/cloud_delta.py changes"
             )
 
@@ -2556,6 +2590,9 @@ class Analyzer:
             "files_from_base": files_from_base,
             "files_from_updates": files_from_updates,
             "base_share_percent": round(files_from_base * 100 / total, 1) if total else 0.0,
+            # The split that decides whether the age above is worth acting on.
+            "stale_compared_files": stale_compared,
+            "stale_excluded_files": stale_excluded,
             "warnings": warnings,
         }
 
