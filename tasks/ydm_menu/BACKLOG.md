@@ -137,21 +137,32 @@ Not a substitute for `sync_policy.py`; convenience wrapper only.
 > `exclude-dirs` и **начать реальную синхронизацию** `/Books` — операцию из
 > инцидента 14.08.
 >
-> Заменяется автоматическими проверками на стенде:
-> [`tasks/sync_bench/BACKLOG.md`](../sync_bench/BACKLOG.md) Phase 3.
-> Список ниже сохранён как перечень того, *что* должно проверяться; где
-> проверять — сказано там.
+> Заменено 2026-08-23 автоматическими проверками на стенде —
+> [`tests/test_sync_bench.py`](../../tests/test_sync_bench.py),
+> [`tasks/sync_bench/`](../sync_bench/README.md).
 
-After Phase 4–6 on device:
+### Что было ручным пунктом и чем стало
 
-- [ ] `ydm` → status header correct vs `ydm-sync-state`
-- [ ] Menu 3: list includes `Books/Math/АнГем` when orphan
-- [ ] Menu 3: add as `[B]` → `ydm-tree` shows `[B]` for АнГем
-- [ ] Resync prompt appears when needed; skip shows warning
-- [ ] Menu 4: remove path updates policy JSON
-- [ ] Menu 5: bisync respects lock
-- [ ] `ydm-sync-add /path` still works unchanged
-- [ ] Agent JSON tools unchanged
+| Пункт | Где проверяется теперь |
+|---|---|
+| шапка `ydm` согласована с фактами | `TestMenuHeader.test_header_counts_match_the_policy_file` — списки режимов в шапке сверяются с файлом политики |
+| шапка не показывает чужого | `test_header_lists_the_bench_policy_not_the_real_one` |
+| Menu 3: список включает сироту | `test_orphans_finds_the_prepared_orphans_and_only_those` — сверяется **точное множество**, не вхождение |
+| список сирот согласован с деревом | `test_the_orphan_list_agrees_with_the_tree` — меню и дерево выводят `[L]` разными путями; расхождение означает, что меню предлагает добавить то, чего дерево не показывает |
+| Menu 3: добавленное рисуется `[B]` | `TestTreeMarkers` — все девять маркеров, обе семантики |
+| Menu 4: remove правит политику | `TestPolicyEditingStaysOnTheBench` — правится файл стенда, боевой сверяется побайтно до и после |
+| правка видна в рендере | `test_removing_a_path_changes_its_marker` — `[B~]` → `[L]` |
+| Menu 8 не падает | `test_the_menu_renders_when_the_backend_is_unavailable` |
+| шапка демона не выдумывает bisync | `test_the_daemon_header_does_not_invent_bisync_facts` |
+
+### Осталось ручным
+
+| Пункт | Почему |
+|---|---|
+| Menu 5: bisync уважает lock | Реальный процесс и реальный обмен данными — стенд отвечает на «что система *говорит*», не «что делает с файлами» |
+| Resync prompt при необходимости | То же: осмысленно только на живом bisync |
+| `ydm-menu` через rclone на Android | Нужна вторая машина; [`tasks/sync_unification/BACKLOG.md`](../sync_unification/BACKLOG.md) |
+| `ydm-sync-add /path`, agent JSON tools | Покрыты своими тестами (`test_ydm_menu.py`, `test_sync_backends.py`); отдельным ручным пунктом быть перестали |
 
 ---
 

@@ -5,6 +5,40 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-23 — the tree and the menu get checked against a bench
+
+Implements what the previous entry recorded.
+[`tests/bench.py`](tests/bench.py) builds a policy, a local disk and a cloud
+snapshot in a temporary directory; [`tests/test_sync_bench.py`](tests/test_sync_bench.py)
+asks the real tools what they make of it. 227 tests, up from 194.
+
+- **All nine markers, both semantics.** The sample tree is 15 paths chosen so
+  every value of `display_marker()` is reached, rendered under whitelist and
+  blacklist policy and compared against a table written before the code ran.
+  It also pins something previously unstated: `[D]`, `[D?]`, `[L]`, `[P]` and
+  `[.]` cannot arise under blacklist semantics at all, because every path is
+  covered there.
+- **The truth table went from four values to nine**, plus a test that it has
+  not quietly stopped being exhaustive.
+- **Two findings on the first run.** Counts are subtree-wide, so a folder is
+  `[B]` only when everything beneath it is materialized — the first draft of
+  the table put a `[B?]` case inside a `[B]` case and the parent correctly came
+  out `[B~]`. And under whitelist semantics a folder inside a *disabled* one
+  renders `[P]`, "parent of a synced path", although nothing below it is
+  synced: `is_under_policy_path()` counts a disabled entry as a policy path.
+  Recorded as G6 and asserted as it behaves, so it cannot change unnoticed.
+- **The checks were checked.** Four mutations were applied to the source and
+  reverted. One — moving the `[P]` branch above the mode branches — **passed
+  everything**, because no case had a folder with both a mode of its own and a
+  synced descendant; those cases now exist, and it fails as it should. Another
+  — collapsing the dual-convention path lookup — is caught **only** by the
+  bench and not by the unit tests, which is the whole argument for the
+  end-to-end layer.
+- **Both manual checklists are retired**, replaced by a table mapping each item
+  to the test that now covers it, and an explicit list of what stays manual:
+  bisync and the lock (real data movement), the resync prompt, and Android via
+  rclone (still needs a second machine).
+
 ## 2026-08-23 — what is left unverified, written down before it rots
 
 No code in this entry. [`tasks/sync_bench/`](tasks/sync_bench/README.md)

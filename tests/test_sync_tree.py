@@ -118,36 +118,107 @@ class SyncTreePolicyTests(unittest.TestCase):
         self.assertTrue(path_in_policy("/Books/Math", policy))
         self.assertEqual(policy_mode_for_path("/Books/Math", policy), "download_only")
 
+    #: Every value display_marker() can return, with the state that produces
+    #: it. Four of the nine used to be covered; the five that were not include
+    #: `[.]`, the default every unmatched case falls into — a wrong branch
+    #: order above it would return `[.]` and nothing would have noticed.
+    #: These stay alongside the end-to-end checks in tests/test_sync_bench.py:
+    #: this table says what the function decides, the bench says whether the
+    #: right facts reach it.
+    MARKER_TABLE = [
+        ("[X]", dict(policy_mode="disabled", in_policy=True,
+                     local_state_value="disabled",
+                     has_synced_descendant=False, v1_sync_status="excluded")),
+        ("[B]", dict(policy_mode="bidirectional", in_policy=True,
+                     local_state_value="materialized",
+                     has_synced_descendant=False, v1_sync_status="full")),
+        ("[B?]", dict(policy_mode="bidirectional", in_policy=True,
+                      local_state_value="missing",
+                      has_synced_descendant=False, v1_sync_status="full")),
+        ("[B~]", dict(policy_mode="bidirectional", in_policy=True,
+                      local_state_value="partial",
+                      has_synced_descendant=False, v1_sync_status="full")),
+        ("[D]", dict(policy_mode="download_only", in_policy=True,
+                     local_state_value="materialized",
+                     has_synced_descendant=False, v1_sync_status="excluded")),
+        ("[D?]", dict(policy_mode="download_only", in_policy=True,
+                      local_state_value="missing",
+                      has_synced_descendant=False, v1_sync_status="excluded")),
+        ("[D?]", dict(policy_mode="download_only", in_policy=True,
+                      local_state_value="cloud_only",
+                      has_synced_descendant=False, v1_sync_status="excluded")),
+        # A folder with a mode of its own keeps it even when synced folders sit
+        # below. Without these two rows the [P] branch can be moved above the
+        # mode branches and every test still passes — verified by mutation on
+        # 2026-08-23, which is why they exist.
+        ("[D]", dict(policy_mode="download_only", in_policy=True,
+                     local_state_value="materialized",
+                     has_synced_descendant=True, v1_sync_status="partial")),
+        ("[B]", dict(policy_mode="bidirectional", in_policy=True,
+                     local_state_value="materialized",
+                     has_synced_descendant=True, v1_sync_status="partial")),
+        ("[P]", dict(policy_mode=None, in_policy=False,
+                     local_state_value="cloud_only",
+                     has_synced_descendant=True, v1_sync_status="excluded")),
+        ("[P]", dict(policy_mode=None, in_policy=False,
+                     local_state_value="cloud_only",
+                     has_synced_descendant=False, v1_sync_status="partial")),
+        ("[L]", dict(policy_mode=None, in_policy=False,
+                     local_state_value="orphan",
+                     has_synced_descendant=False, v1_sync_status="excluded")),
+        ("[L]", dict(policy_mode=None, in_policy=False,
+                     local_state_value="materialized",
+                     has_synced_descendant=False, v1_sync_status="excluded")),
+        ("[.]", dict(policy_mode=None, in_policy=False,
+                     local_state_value="cloud_only",
+                     has_synced_descendant=False, v1_sync_status="excluded")),
+    ]
+
     def test_display_markers(self):
+        for expected, state in self.MARKER_TABLE:
+            with self.subTest(expected=expected, **state):
+                self.assertEqual(display_marker(**state), expected)
+
+    def test_the_table_covers_every_marker(self):
+        """A truth table that quietly stops being exhaustive is worse than none."""
+        self.assertEqual(
+            {expected for expected, _ in self.MARKER_TABLE},
+            {"[B]", "[B?]", "[B~]", "[D]", "[D?]", "[X]", "[P]", "[L]", "[.]"},
+        )
+
+    def test_disabled_wins_over_everything_else(self):
+        """`[X]` is checked first, and must stay first.
+
+        A folder excluded from sync but sitting above synced ones would
+        otherwise render `[P]` and read as participating in sync.
+        """
+        self.assertEqual(
+            display_marker(
+                policy_mode="disabled",
+                in_policy=True,
+                local_state_value="materialized",
+                has_synced_descendant=True,
+                v1_sync_status="partial",
+            ),
+            "[X]",
+        )
+
+    def test_a_mode_only_applies_to_its_own_entry(self):
+        """`in_policy` is what separates "this folder" from "somewhere above it".
+
+        Under whitelist semantics an inherited mode must not mark a child as
+        synced in its own right — that is what makes `[L]` possible under a
+        disabled ancestor.
+        """
         self.assertEqual(
             display_marker(
                 policy_mode="bidirectional",
-                in_policy=True,
-                local_state_value="materialized",
-                has_synced_descendant=False,
-                v1_sync_status="full",
-            ),
-            "[B]",
-        )
-        self.assertEqual(
-            display_marker(
-                policy_mode=None,
                 in_policy=False,
                 local_state_value="orphan",
                 has_synced_descendant=False,
                 v1_sync_status="excluded",
             ),
             "[L]",
-        )
-        self.assertEqual(
-            display_marker(
-                policy_mode="download_only",
-                in_policy=True,
-                local_state_value="missing",
-                has_synced_descendant=False,
-                v1_sync_status="excluded",
-            ),
-            "[D?]",
         )
 
     def test_local_state_orphan(self):
