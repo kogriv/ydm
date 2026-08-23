@@ -64,7 +64,7 @@
 | 4.3 | `sync_common.build_composite_snapshot()` не теряет причину | `tools/sync_common.py` | `RuntimeError` содержит текст ошибки композита |
 | 4.4 | Тест на каждый вид негодного скана в роли кандидата в базу | `tests/test_analyzer.py` | частичный, `--depth`, `crashed` — ни один не становится базой |
 | 4.5 | Тест: `get_diff()` на такой базе даёт честное одиночное сравнение, а не молчаливую ложь | `tests/test_analyzer.py` | `compare_scans.cloud` явно называет один скан |
-| 4.6 | Снять `deferred` с `sync_tree` 3.4 | `tasks/sync_tree/BACKLOG.md` | ссылка на этот Phase |
+| 4.6 | Снять `deferred` с `sync_tree` 3.4 | ✅ `tasks/sync_tree/BACKLOG.md` | помечено ✅ со ссылкой на этот Phase |
 
 **Exit:** ни при каком состоянии базы композит не выдаёт снимок, опирающийся
 на скан, который не покрывает корень.
