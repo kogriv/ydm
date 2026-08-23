@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import shutil
 import atexit
 import signal
@@ -96,6 +96,18 @@ def is_path_excluded(compare_path, exclude_dirs):
         if prefix in exclude_dirs:
             return True
     return False
+
+
+def _parse_db_timestamp(value):
+    """SQLite CURRENT_TIMESTAMP is UTC, 'YYYY-MM-DD HH:MM:SS'."""
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(str(value), fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def format_prune_plan(plan):
@@ -2012,6 +2024,7 @@ class Analyzer:
         if not folder_updates:
             return self._compare_simple_scan(base_scan_id, local_id, exclude_dirs)
 
+        freshness = self.snapshot_freshness(composite)
         return self._diff_file_sets(
             self._composite_cloud_files(composite),
             local_id,
@@ -2024,7 +2037,11 @@ class Analyzer:
                 "composite_info": {
                     "base_scan_id": base_scan_id,
                     "updated_folders_count": len(folder_updates),
-                }
+                },
+                # Without this, a finding reads as fact even when the evidence
+                # under it is months old.
+                "snapshot_freshness": freshness,
+                "warnings": freshness.get("warnings", []),
             },
         )
 
@@ -2272,6 +2289,94 @@ class Analyzer:
         
         result["total_duplicates"] = len(result["duplicates"])
         return result
+
+    def _folder_file_counts(self, scan_id):
+        """{parent_path: file count} for one scan."""
+        conn = self.storage.get_connection()
+        try:
+            return dict(conn.execute(
+                "SELECT parent_path, COUNT(*) FROM files "
+                "WHERE scan_id = ? AND type = 'file' GROUP BY parent_path",
+                (scan_id,),
+            ).fetchall())
+        finally:
+            conn.close()
+
+    def snapshot_freshness(self, composite=None, stale_after_days=30):
+        """How old the composite snapshot actually is, and where.
+
+        Every consumer reads the composite as if it were current. It is not:
+        folders nobody rescanned are served by the base, which here is five
+        months old — that is why `report diff` reported a file as missing
+        locally when in truth it had been deleted from the cloud in a folder
+        no scan has visited since March. Reporting a finding without saying
+        how old the evidence is invites chasing ghosts.
+        """
+        composite = composite or self.build_composite_scan(use_cache=False)
+        if "error" in composite:
+            return {"error": composite["error"]}
+
+        base_scan_id = composite["base_scan_id"]
+        folder_updates = composite.get("folder_updates") or {}
+
+        conn = self.storage.get_connection()
+        try:
+            wanted = set(folder_updates.values()) | {base_scan_id}
+            times = dict(conn.execute(
+                "SELECT id, timestamp FROM scans WHERE id IN (%s)"
+                % ",".join("?" * len(wanted)),
+                tuple(wanted),
+            ).fetchall())
+        finally:
+            conn.close()
+
+        base_counts = self._folder_file_counts(base_scan_id)
+        files_from_base = sum(
+            count for folder, count in base_counts.items() if folder not in folder_updates
+        )
+        by_scan = {}
+        for folder, scan_id in folder_updates.items():
+            by_scan.setdefault(scan_id, set()).add(folder)
+        files_from_updates = 0
+        for scan_id, folders in by_scan.items():
+            counts = self._folder_file_counts(scan_id)
+            files_from_updates += sum(counts.get(folder, 0) for folder in folders)
+
+        def age_days(timestamp):
+            parsed = _parse_db_timestamp(timestamp)
+            if parsed is None:
+                return None
+            # scans.timestamp is UTC; comparing against local time would
+            # skew the age by the machine's offset (+07 here).
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            return (now - parsed).days
+
+        base_at = times.get(base_scan_id)
+        update_times = [times[s] for s in by_scan if times.get(s)]
+        total = files_from_base + files_from_updates
+        base_age = age_days(base_at)
+
+        warnings = []
+        if base_age is not None and base_age > stale_after_days and files_from_base:
+            share = round(files_from_base * 100 / total, 1) if total else 0.0
+            warnings.append(
+                f"{share}% of the snapshot ({files_from_base} files) comes from "
+                f"scan #{base_scan_id}, {base_age} days old. Findings in those "
+                f"folders may be stale. Check with: "
+                f"python3 tools/cloud_delta.py changes"
+            )
+
+        return {
+            "base_scan_id": base_scan_id,
+            "base_at": base_at,
+            "base_age_days": base_age,
+            "folder_updates": len(folder_updates),
+            "newest_update_at": max(update_times) if update_times else None,
+            "files_from_base": files_from_base,
+            "files_from_updates": files_from_updates,
+            "base_share_percent": round(files_from_base * 100 / total, 1) if total else 0.0,
+            "warnings": warnings,
+        }
 
     def prune_plan(self, keep_local=3, keep_root_scans=2):
         """Which scans are safe to delete, and what they cost.

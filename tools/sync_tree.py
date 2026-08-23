@@ -479,6 +479,7 @@ def render_v2_header(
     collapsed: bool,
     local_scan_started: Optional[bool],
     extra_warnings: List[str],
+    freshness: Optional[Dict] = None,
 ) -> List[str]:
     lines = [
         f"schema: {SCHEMA_V2}",
@@ -498,6 +499,14 @@ def render_v2_header(
         if rest > 0:
             shown += f", +{rest} more (see --format json)"
         lines.append(f"snapshot_updates: {len(updates)} folder(s): {shown}")
+    if freshness and freshness.get("base_age_days") is not None:
+        lines.append(
+            f"snapshot_age: base #{freshness['base_scan_id']} is "
+            f"{freshness['base_age_days']} day(s) old and serves "
+            f"{freshness['base_share_percent']}% of the files"
+        )
+    for warning in (freshness or {}).get("warnings", []):
+        lines.append(f"WARN: {warning}")
     if local_scan_id is not None:
         lines.append(f"local_scan_id: {local_scan_id}")
     if ctx.filter_mismatch:
@@ -684,6 +693,10 @@ def main() -> None:
     if local_scan_error:
         extra_warnings.append(f"local_scan_error: {local_scan_error}")
 
+    # The composite is only as fresh as the folders someone rescanned; say so
+    # rather than letting the tree read as current.
+    freshness = analyzer.snapshot_freshness()
+
     if args.format == "json":
         if schema == SCHEMA_V2:
             payload = {
@@ -697,12 +710,13 @@ def main() -> None:
                         "base_scan_id": selection.base_scan_id,
                         "folder_updates": selection.folder_updates,
                         "freshness_warning": selection.warning,
+                        "snapshot_freshness": freshness,
                     },
                     "local_scan_id": local_scan_id,
                     "legend": LEGEND_LINES,
                 },
                 "root": node.to_dict(include_children=True, schema=schema),
-                "warnings": extra_warnings + selection.warnings,
+                "warnings": extra_warnings + selection.warnings + freshness.get("warnings", []),
                 "collapsed": collapse,
                 "local_scan_started": local_scan_started,
                 "local_scan_error": local_scan_error,
@@ -716,7 +730,7 @@ def main() -> None:
                 "root_children_count": node.children_count,
                 "root_visible_children_count": node.visible_children_count,
                 "config_path": source_path,
-                "warnings": extra_warnings + selection.warnings,
+                "warnings": extra_warnings + selection.warnings + freshness.get("warnings", []),
                 "collapsed": collapse,
                 "local_scan_started": local_scan_started,
                 "local_scan_error": local_scan_error,
@@ -734,6 +748,7 @@ def main() -> None:
                     collapsed=collapse,
                     local_scan_started=local_scan_started,
                     extra_warnings=extra_warnings,
+                    freshness=freshness,
                 ):
                     print(line)
             else:

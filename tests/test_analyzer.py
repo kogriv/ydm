@@ -31,6 +31,8 @@ if str(ROOT_DIR) not in sys.path:
 # behind `if __name__ == "__main__"`). Harmless for unittest, but worth
 # knowing if this module is ever imported alongside something that relies
 # on default signal handling.
+from datetime import datetime, timezone  # noqa: E402
+
 from ydm import Analyzer, StorageManager, DEFAULT_CONFIG  # noqa: E402
 
 
@@ -657,6 +659,69 @@ class TestPartialScanCannotBecomeBase(AnalyzerTestCase):
         self._partial_scan(2, folder="A", files=99)
         result = self.analyzer.find_last_full_scan()
         self.assertEqual(result["id"], 1)
+
+
+class TestSnapshotFreshness(AnalyzerTestCase):
+    """Every consumer reads the composite as if it were current. It is not:
+    folders nobody rescanned are served by the base. Reporting a finding
+    without saying how old the evidence under it is invites chasing ghosts —
+    `report diff` flagged a file as missing locally when it had in fact been
+    deleted from the cloud in a folder unvisited since March."""
+
+    def _base(self, scan_id, timestamp, folders):
+        self.insert_scan(scan_id, "cloud", "success", timestamp=timestamp)
+        self.insert_files(scan_id, [("", "A", "dir", 0, None)])
+        for folder, count in folders.items():
+            self.insert_files(
+                scan_id, [(folder, f"f{i}.txt", "file", 1, None) for i in range(count)]
+            )
+
+    def _partial(self, scan_id, timestamp, folder, count):
+        self.insert_scan(scan_id, "cloud", "success", timestamp=timestamp)
+        self.insert_files(
+            scan_id, [(folder, f"p{i}.txt", "file", 1, None) for i in range(count)]
+        )
+        self.insert_progress(scan_id, folder, last_checked=timestamp)
+
+    def test_reports_which_share_comes_from_the_base(self):
+        self._base(1, "2026-03-04 08:00:00", {"/A": 4, "/B": 6})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 4)
+        freshness = self.analyzer.snapshot_freshness()
+        self.assertEqual(freshness["base_scan_id"], 1)
+        self.assertEqual(freshness["files_from_base"], 6)     # /B only
+        self.assertEqual(freshness["files_from_updates"], 4)  # /A from scan 2
+        self.assertEqual(freshness["base_share_percent"], 60.0)
+
+    def test_an_old_base_warns(self):
+        self._base(1, "2020-01-01 00:00:00", {"/A": 1})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 1)
+        # /A is covered by scan 2, but /A's base rows are superseded, so add a
+        # folder nobody rescanned to keep base-served files non-zero.
+        self.insert_files(1, [("/B", "old.txt", "file", 1, None)])
+        freshness = self.analyzer.snapshot_freshness()
+        self.assertTrue(freshness["warnings"])
+        self.assertIn("cloud_delta", freshness["warnings"][0])
+
+    def test_a_fresh_base_does_not_warn(self):
+        recent = (datetime.now(timezone.utc).replace(tzinfo=None)).strftime("%Y-%m-%d %H:%M:%S")
+        self._base(1, recent, {"/A": 3})
+        self.assertEqual(self.analyzer.snapshot_freshness()["warnings"], [])
+
+    def test_a_base_covering_nothing_does_not_warn(self):
+        """If every folder has been rescanned, the base's age is irrelevant."""
+        self._base(1, "2020-01-01 00:00:00", {"/A": 2})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 2)
+        freshness = self.analyzer.snapshot_freshness()
+        self.assertEqual(freshness["files_from_base"], 0)
+        self.assertEqual(freshness["warnings"], [])
+
+    def test_diff_carries_the_warning(self):
+        self._base(1, "2020-01-01 00:00:00", {"/A": 2})
+        self._partial(2, "2026-08-16 08:00:00", "/B", 1)
+        self.insert_scan(3, "local", "success")
+        result = self.analyzer.get_diff(local_scan_id=3, use_composite=True)
+        self.assertTrue(result["warnings"])
+        self.assertEqual(result["snapshot_freshness"]["base_scan_id"], 1)
 
 
 class TestPrune(AnalyzerTestCase):

@@ -114,14 +114,37 @@ carries `path`, `size`, `md5`, `modified`.
 **Step 2 — deletions.** Page `/trash/resources?sort=-deleted` the same way.
 `origin_path` says what vanished and from where.
 
-**Step 3 — not built: write the delta into the snapshot.** Persist it as a
-scan whose rows are the changed paths, and teach `build_composite_scan()` to
-overlay per *file* rather than per folder. Today a folder update replaces a
-whole `parent_path` bucket, which is wrong for a per-file delta — that is the
-design work this needs. Until then step 2's output feeds the existing
-`scan cloud --path …`, which is also what supplies the things the flat file
-listing cannot: directory rows, empty folders, and the fact that something in
-a folder is *gone* rather than merely changed.
+**Step 3 — decided against (2026-08-23).** The idea was to persist the delta
+as a scan whose rows are the changed paths and teach `build_composite_scan()`
+to overlay per *file* rather than per folder. We are not building it:
+
+- A per-file overlay is a second, weaker way to write the snapshot, layered on
+  a mechanism that produced three serious defects in one week (a partial scan
+  becoming the base, the composite discarding 94% of every partial scan, and
+  a diff that never matched a single file). Adding a second write path there
+  buys speed at the cost of the property that was hardest to get back.
+- A flat `/files` listing cannot express what the composite needs: directory
+  rows, empty folders, and *absence* — that a file which used to be in a
+  folder is gone. A per-folder replacement carries all three for free; a
+  per-file overlay would have to reconstruct them, and would be silently wrong
+  when it guessed.
+- The thing it would save is not expensive. Rescanning the 31 folders that
+  steps 0–2 flagged took **4 minutes and 0 failures**. That is the whole
+  saving on the table, against a permanent correctness risk.
+
+So steps 0–2 stay a *pointer*: they say which folders went stale, and the
+existing `scan cloud --path …` refreshes exactly those. That keeps one writer
+for the snapshot and one meaning for a folder update.
+
+**Built instead: the snapshot says how stale it is.** `Analyzer.
+snapshot_freshness()` reports the base scan's age and what share of the
+snapshot still comes from it, and warns when an old base still serves a large
+part of the tree. It is surfaced in `report diff` (`snapshot_freshness` and
+`warnings`) and in `sync_tree` (a `snapshot_age:` line and `WARN:` lines in
+text, `header.cloud_snapshot.snapshot_freshness` in JSON). This is the gap
+that actually bit: on 2026-08-16 `report diff` presented a March-era artifact
+as a live finding, because nothing in the snapshot said 48% of it was 165 days
+old.
 
 ## Known blind spots
 

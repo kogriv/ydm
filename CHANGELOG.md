@@ -5,6 +5,27 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-23 — the snapshot now says how stale it is
+
+- **`snapshot_freshness()`** reports the composite base's age, how many files
+  still come from it, and what share of the snapshot that is. It warns when an
+  old base still serves a large part of the tree, and points at
+  `tools/cloud_delta.py changes` for what to rescan. On the reference
+  database: 48.1% of the snapshot (36 029 files) came from scan #72, 165 days
+  old — which is why the previous day's "1 missing file" was a March artifact
+  presented as a live finding.
+- Surfaced where the numbers are read: `report diff` gains
+  `snapshot_freshness` and `warnings`; `sync_tree` prints a `snapshot_age:`
+  line plus `WARN:` lines, and carries
+  `header.cloud_snapshot.snapshot_freshness` in JSON.
+- **Delta scan step 3 is decided against**, with the reasoning recorded in
+  [`tasks/delta_scan/README.md`](tasks/delta_scan/README.md). A per-file
+  overlay would be a second, weaker writer for the snapshot — it cannot
+  express directory rows, empty folders, or absence — and the only thing it
+  saves is the 4 minutes that rescanning the 31 flagged folders actually took.
+  Steps 0–2 stay a pointer at what to rescan; `scan cloud --path …` stays the
+  single writer.
+
 ## 2026-08-16 — `report prune`, and a guard against the previous entry
 
 - **`report prune`** deletes scans the composite no longer needs. Dry-run by
