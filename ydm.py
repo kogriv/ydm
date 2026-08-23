@@ -1909,26 +1909,37 @@ class Analyzer:
         # Otherwise, use heuristic reference full scan based on freshness window and config.
         base_scan = self.find_last_full_scan(cloud_scan_id)
         if not base_scan or "error" in base_scan:
-            # Fallback: try to use the last cloud scan as base (old behavior)
-            conn = self.storage.get_connection()
-            last_cloud = conn.execute(
-                "SELECT id, timestamp, status FROM scans WHERE scan_type = 'cloud' ORDER BY id DESC LIMIT 1"
+            # There used to be a fallback here that took the most recent cloud
+            # scan, whatever it was, with no check that it covered the disk
+            # root. That turned the coverage gate off at the exact moment it
+            # had done its job: find_last_full_scan() returns None only when
+            # every candidate was rejected, and the fallback then installed a
+            # rejected one anyway — a `--path /Books` scan, a `--depth 1` scan
+            # of three files, or a crashed one — as the base for the whole
+            # disk. Silently. See tasks/diff_correctness/GAP.md.
+            #
+            # The distinction that path missed: a fallback may relax the *soft*
+            # criterion, freshness, and never the *hard* one, coverage.
+            # find_last_full_scan() already relaxes freshness internally, by
+            # falling back to the newest root-covering scan however old it is.
+            # So its None is not "try something else", it is the final answer.
+            if isinstance(base_scan, dict) and "error" in base_scan:
+                return {"error": base_scan["error"]}
+            has_cloud_scan = conn.execute(
+                "SELECT 1 FROM scans WHERE scan_type = 'cloud' LIMIT 1"
             ).fetchone()
-            if not last_cloud:
-                # No cloud scans at all
-                return {"error": base_scan.get("error", "No full scan found") if isinstance(base_scan, dict) else "No cloud scan found"}
-
-            # Use last cloud scan as base without heuristics
-            base_scan = {
-                "id": last_cloud[0],
-                "timestamp": last_cloud[1],
-                "status": last_cloud[2],
-                "files_count": conn.execute(
-                    "SELECT COUNT(*) FROM files WHERE scan_id = ? AND type = 'file'",
-                    (last_cloud[0],),
-                ).fetchone()[0],
+            if not has_cloud_scan:
+                return {"error": "No cloud scan found"}
+            return {
+                "error": (
+                    "No cloud scan covers the disk root, so there is no base to "
+                    "build a snapshot on. Every scan present describes one subtree "
+                    "or was depth-limited; using one as the base would claim the "
+                    "whole disk is that subtree. Run `python3 ydm.py scan cloud` "
+                    "without --path or --depth."
+                )
             }
-        
+
         base_scan_id = base_scan["id"]
 
         # 2. Find all partial scans after base

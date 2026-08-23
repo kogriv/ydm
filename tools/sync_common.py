@@ -496,7 +496,13 @@ def build_composite_snapshot(analyzer: Analyzer) -> CompositeSnapshot:
     base_scan_id = composite.get("base_scan_id")
     folder_updates = composite.get("folder_updates") or {}
     if base_scan_id is None:
-        raise RuntimeError("Composite scan is missing base_scan_id")
+        # The composite says why it could not be built — most usefully when no
+        # scan covers the disk root, which tells the user to run a full scan.
+        # Reporting only "missing base_scan_id" throws that away and leaves
+        # them with a symptom instead of a cause.
+        raise RuntimeError(
+            composite.get("error") or "Composite scan is missing base_scan_id"
+        )
     return CompositeSnapshot(
         base_scan_id=base_scan_id,
         folder_updates=folder_updates,

@@ -43,7 +43,7 @@
 | 3.1 | `infer_dirs_from_files()` | ✅ |
 | 3.2 | Dual `parent_path` lookup in counts | ✅ |
 | 3.3 | `select_snapshot_for_tree()` | ✅ |
-| 3.4 | Analyzer fallback improvement | deferred |
+| 3.4 | Analyzer fallback improvement | ✅ 2026-08-23 — сделано в [`tasks/diff_correctness/`](../diff_correctness/GAP.md) Phase 4. Запасной путь в `build_composite_scan()` брал последний облачный скан без проверки покрытия; теперь `None` от `find_last_full_scan()` = окончательный ответ «базы нет», с ошибкой, называющей лекарство |
 
 ## Phase 4 — UX polish (partial) ✅
 

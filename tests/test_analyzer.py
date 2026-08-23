@@ -852,6 +852,86 @@ class TestRetiredFolders(AnalyzerTestCase):
         self.assertIn(("other", "untouched.txt"), files)
 
 
+class TestNoBaseWithoutCoverage(AnalyzerTestCase):
+    """The coverage gate must have no back door.
+
+    `build_composite_scan()` used to fall back to "the most recent cloud scan,
+    whatever it is" when no acceptable base was found — which turned the gate
+    off at the exact moment it had just rejected everything. A `--path /Books`
+    scan, a `--depth 1` scan of three files, or a crashed one could become the
+    base for the whole disk, with no error and no warning. See
+    tasks/diff_correctness/GAP.md.
+    """
+
+    def _partial(self, scan_id, folder="/Books", files=5, **scope):
+        self.insert_scan(scan_id, "cloud", scope.pop("status", "success"),
+                         scan_root=scope.pop("scan_root", f"/{folder.strip('/')}"),
+                         scan_depth=scope.pop("scan_depth", None))
+        self.insert_files(
+            scan_id, [(folder, f"f{i}.txt", "file", 1, None) for i in range(files)]
+        )
+
+    def _bounded_root(self, scan_id):
+        self.insert_scan(scan_id, "cloud", "success", scan_root="/", scan_depth=1)
+        self.insert_files(scan_id, [("", "root.txt", "file", 1, None)])
+
+    def test_partial_scans_only_yields_an_error_not_a_base(self):
+        self._partial(1)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertIn("error", composite)
+        self.assertNotIn("base_scan_id", composite)
+
+    def test_a_depth_limited_root_scan_is_not_a_base_of_last_resort(self):
+        """The exact reproduction from the gap note."""
+        self._partial(1)
+        self._bounded_root(2)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertIn("error", composite)
+
+    def test_a_crashed_scan_is_not_a_base_of_last_resort(self):
+        self.insert_scan(1, "cloud", "crashed", scan_root="/")
+        self.insert_files(1, [("", "A", "dir", 0, None), ("/A", "f.txt", "file", 1, None)])
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertIn("error", composite)
+
+    def test_the_error_says_what_to_run(self):
+        """An error that names no remedy just relocates the confusion."""
+        self._partial(1)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertIn("scan cloud", composite["error"])
+
+    def test_no_cloud_scans_at_all_is_its_own_message(self):
+        self.insert_scan(1, "local", "success")
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertEqual(composite["error"], "No cloud scan found")
+
+    def test_an_old_root_scan_is_still_an_acceptable_base(self):
+        """Freshness is the soft criterion; only coverage is hard.
+
+        Refusing an old-but-complete scan would trade one silent wrong answer
+        for a loud refusal to answer at all, on a disk that is fine.
+        """
+        self.insert_scan(1, "cloud", "success", timestamp="2020-01-01 00:00:00",
+                         scan_root="/")
+        self.insert_files(1, [("", "A", "dir", 0, None), ("/A", "f.txt", "file", 1, None)])
+        self._partial(2, folder="/A", files=3, scan_root="/A")
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertEqual(composite["base_scan_id"], 1)
+
+    def test_diff_falls_back_to_an_honestly_labelled_single_scan(self):
+        """Refusing the composite must not make the diff silently wrong.
+
+        get_diff() drops to comparing one scan, and says so in compare_scans —
+        the caller can see it is one subtree, not a whole-disk snapshot.
+        """
+        self._partial(1, folder="/Books", files=2)
+        self.insert_scan(2, "local", "success")
+        self.insert_files(2, [("Books", "f0.txt", "file", 1, None)])
+        result = self.analyzer.get_diff(local_scan_id=2, use_composite=True)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["compare_scans"]["cloud"], 1)
+
+
 class TestSnapshotFreshness(AnalyzerTestCase):
     """Every consumer reads the composite as if it were current. It is not:
     folders nobody rescanned are served by the base. Reporting a finding

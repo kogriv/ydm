@@ -5,6 +5,38 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-23 — the coverage gate loses its back door
+
+The rule the whole month was built on — a partial scan must never be the
+composite's base — had a path around it. When `find_last_full_scan()` returned
+nothing, `build_composite_scan()` took the most recent cloud scan instead,
+with no check of coverage or status. That turned the gate off at the exact
+moment it had done its job: it returns nothing only when every candidate was
+rejected, and the fallback then installed a rejected one anyway.
+
+Reproduced on a synthetic database holding only partial scans: the composite
+named a depth-limited one-file scan of `/` as the base for the whole disk,
+with no error and no warning.
+
+- The distinction the old path missed: a fallback may relax the *soft*
+  criterion, freshness, and never the *hard* one, coverage.
+  `find_last_full_scan()` already relaxes freshness internally by falling back
+  to the newest root-covering scan however old it is — so its `None` is the
+  final answer, not an invitation to try something else. The composite now
+  returns an error naming the remedy (`scan cloud` without `--path`/`--depth`).
+- Callers already survive that error: `get_diff()` drops to a single-scan
+  comparison that says so in `compare_scans`, `cloud_delta` raises with the
+  text. `sync_common.build_composite_snapshot()` used to replace the reason
+  with "missing base_scan_id" and now passes it through.
+- Recorded as [`tasks/diff_correctness/GAP.md`](tasks/diff_correctness/GAP.md)
+  and Phase 4 of that backlog. It had been sitting as `sync_tree` 3.4
+  "Analyzer fallback improvement — deferred" since 2026-08-08, which is how it
+  survived the month of work on exactly this defect class.
+
+Nothing changed for the reference database: base #72, 2251 folder updates.
+The gap was a mine, not a fire — it would have gone off after an aggressive
+`report prune`, on a new machine, or anywhere the full scan was lost.
+
 ## 2026-08-23 — the staleness warning stops crying wolf
 
 The freshness warning added earlier the same day was correct and useless. It
