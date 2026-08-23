@@ -159,7 +159,12 @@ than an honest full scan.
   kept their original `modified` **and** their original `revision`; only the
   folder's revision moved. Invisible to a `-modified` sweep.
 - **Changes older than the retained trash.** The trash is finite; a deletion
-  purged from it leaves no record.
+  purged from it leaves no record. *Partly answered on 2026-08-23:* a
+  successful, non-depth-limited rescan of a subtree now retires the base's
+  rows for folders inside it that the rescan did not find, so a deletion the
+  delta can no longer see is still corrected the next time anyone rescans that
+  subtree. It does not tell you *which* subtree to rescan — that part remains
+  a blind spot.
 
 Mitigation: keep the full scan as a periodic floor (quarterly, say), with
 deltas in between, and record in the snapshot which mechanism produced each

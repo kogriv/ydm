@@ -5,6 +5,43 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-23 — the diff reconciles exactly, for the first time
+
+Both sides of `report diff` now add up with nothing left over:
+`74 984 cloud = 14 104 matched + 60 880 excluded + 0 missing` and
+`14 138 local = 14 104 matched + 34 ignored + 0 missing`.
+
+- **Scans record their own scope.** `scans.scan_root` and `scans.scan_depth`
+  store what a scan was *asked* to cover. Scope used to be reconstructed from
+  the rows a scan left behind, and that inference was wrong twice — once
+  naming a deep leaf as a partial scan's root, once about to let a shallow
+  scan of `/` pass for a full one. Both columns are nullable; older scans
+  carry NULL, keep the inference path, and are granted none of the new
+  powers below.
+- **`scan cloud --path / --depth N`** bounds the walk. The disk root was the
+  one folder with no cheap refresh — a full walk of `/` is 1.5 TB, while the
+  files sitting directly in it are eight requests. Measured: **0.9 seconds**.
+  A depth-limited scan is a partial update by construction and can never
+  become the composite base.
+- **A rescan can now report a folder as gone.** The composite served any
+  folder no partial scan touched from the base, which is right for a folder
+  nobody looked at and wrong for one that was looked at and no longer exists.
+  That is why `report diff` still claimed a file under `/brtn/Запчасти/фото`,
+  a folder deleted long enough ago to be out of the trash — invisible to any
+  delta sweep, and unfixable by rescanning, because "absent" and "uncovered"
+  were the same thing. A scan may retire a folder only if it is `success`,
+  recorded a non-root `scan_root`, and was not depth-limited.
+- **`local_ignored_count`** declares the files under `.sync` that the local
+  side used to drop silently. The cloud side has always declared its
+  exclusions; an undeclared hole on the other side is how the last three
+  defects stayed invisible for months. A companion invariant test asserts the
+  local counts balance, alongside the cloud one that already existed.
+- Three dead entries (`Books (1)`, `Books_LOCAL_142_20260815`,
+  `Books_TEST_RESTORE_FILE_20260815`) removed from `var/sync_policy.json` and
+  the daemon's `exclude-dirs`, 55 → 52, after confirming via the API that all
+  three are absent from the cloud and from `/data/ya_disk`. `Books` itself
+  stays excluded.
+
 ## 2026-08-23 — the snapshot now says how stale it is
 
 - **`snapshot_freshness()`** reports the composite base's age, how many files

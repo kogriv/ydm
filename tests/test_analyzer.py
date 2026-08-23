@@ -63,16 +63,25 @@ class AnalyzerTestCase(unittest.TestCase):
 
     # --- fixture helpers -----------------------------------------------
 
-    def insert_scan(self, scan_id, scan_type, status, timestamp=None, duration=0):
+    def insert_scan(self, scan_id, scan_type, status, timestamp=None, duration=0,
+                    scan_root=None, scan_depth=None):
+        """Insert a scan row.
+
+        `scan_root`/`scan_depth` default to NULL, which is what every scan
+        written before those columns existed carries — so tests that omit them
+        exercise the inference path the old databases still rely on.
+        """
         if timestamp is not None:
             self.conn.execute(
-                "INSERT INTO scans (id, timestamp, scan_type, status, duration) VALUES (?, ?, ?, ?, ?)",
-                (scan_id, timestamp, scan_type, status, duration),
+                "INSERT INTO scans (id, timestamp, scan_type, status, duration, scan_root, scan_depth)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (scan_id, timestamp, scan_type, status, duration, scan_root, scan_depth),
             )
         else:
             self.conn.execute(
-                "INSERT INTO scans (id, scan_type, status, duration) VALUES (?, ?, ?, ?)",
-                (scan_id, scan_type, status, duration),
+                "INSERT INTO scans (id, scan_type, status, duration, scan_root, scan_depth)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (scan_id, scan_type, status, duration, scan_root, scan_depth),
             )
         self.conn.commit()
 
@@ -222,6 +231,31 @@ class TestDiffPathConventions(AnalyzerTestCase):
             result["matched_count"]
             + result["excluded_from_sync_count"]
             + result["missing_local_count"],
+        )
+
+    def test_local_counts_add_up_too(self):
+        """The local side has to balance as well.
+
+        It did not: files under `.sync` were skipped without being counted, so
+        14 138 local files reconciled to 14 104 and the missing 34 appeared
+        nowhere. An undeclared hole on one side of a comparison is how the
+        defects this suite exists for stayed invisible.
+        """
+        self._cloud_and_local()
+        self.insert_files(1, [("/keep", "a.txt", "file", 1, None)])
+        self.insert_files(2, [
+            ("keep", "a.txt", "file", 1, None),
+            ("keep", "local_only.txt", "file", 1, None),
+            (".sync", "core.log", "file", 1, None),
+            (".sync/nested", "core-1.log.gz", "file", 1, None),
+        ])
+        result = self.analyzer.get_diff(cloud_scan_id=1, local_scan_id=2, use_composite=False)
+        self.assertEqual(result["local_ignored_count"], 2)
+        self.assertEqual(
+            result["local_files_count"],
+            result["matched_count"]
+            + result["local_ignored_count"]
+            + result["missing_cloud_count"],
         )
 
 
@@ -659,6 +693,163 @@ class TestPartialScanCannotBecomeBase(AnalyzerTestCase):
         self._partial_scan(2, folder="A", files=99)
         result = self.analyzer.find_last_full_scan()
         self.assertEqual(result["id"], 1)
+
+
+class TestBoundedRootScan(AnalyzerTestCase):
+    """`scan cloud --path / --depth 1` refreshes the disk root cheaply.
+
+    It is the one folder that had no cheap refresh: a full walk of `/` is the
+    whole disk. A bounded scan writes root rows like a full scan does, which
+    makes it the most dangerous thing that could be handed to base selection —
+    promoting one would collapse the snapshot to whatever sits directly in the
+    root. The recorded `scan_depth` is what keeps them apart.
+    """
+
+    def _full_scan(self, scan_id, folders=("A", "B", "C")):
+        self.insert_scan(scan_id, "cloud", "success", scan_root="/")
+        self.insert_files(scan_id, [("", name, "dir", 0, None) for name in folders])
+        self.insert_files(scan_id, [("", "root.txt", "file", 1, None)])
+        self.insert_files(
+            scan_id, [(f"/{name}", "f.txt", "file", 1, None) for name in folders]
+        )
+
+    def _bounded_root_scan(self, scan_id, folders=("A", "B", "C"), files=("root.txt", "new.txt")):
+        self.insert_scan(scan_id, "cloud", "success", scan_root="/", scan_depth=1)
+        self.insert_files(scan_id, [("", name, "dir", 0, None) for name in folders])
+        self.insert_files(scan_id, [("", name, "file", 1, None) for name in files])
+
+    def test_bounded_scan_is_not_a_full_scan(self):
+        self._full_scan(1)
+        self._bounded_root_scan(2)
+        self.assertTrue(self.analyzer.scan_covers_root(1))
+        self.assertFalse(self.analyzer.scan_covers_root(2))
+
+    def test_bounded_scan_never_becomes_the_base(self):
+        self._full_scan(1)
+        self._bounded_root_scan(2)
+        self.assertEqual(self.analyzer.find_last_full_scan()["id"], 1)
+        self.assertEqual(self.analyzer.find_last_root_scan()["id"], 1)
+
+    def test_bounded_scan_updates_only_the_root_bucket(self):
+        self._full_scan(1)
+        self._bounded_root_scan(2)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertEqual(composite["base_scan_id"], 1)
+        # The root bucket now comes from the bounded scan...
+        self.assertEqual(composite["folder_updates"].get(""), 2)
+        # ...and the subtrees it did not walk still come from the base.
+        for folder in ("/A", "/B", "/C"):
+            self.assertNotIn(folder, composite["folder_updates"])
+
+    def test_bounded_scan_does_not_lose_the_subtrees(self):
+        """The whole risk in one assertion: the file count must not collapse."""
+        self._full_scan(1)
+        self._bounded_root_scan(2)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        # 2 root files from the bounded scan + 3 subtree files from the base.
+        self.assertEqual(len(files), 5)
+        self.assertIn(("A", "f.txt"), files)
+        self.assertIn(("", "new.txt"), files)
+
+    def test_recorded_root_beats_inference(self):
+        """A scan that says where it started is not second-guessed."""
+        self.insert_scan(1, "cloud", "success", scan_root="/Books")
+        self.insert_files(1, [("/Books/Math", "f.txt", "file", 1, None)])
+        self.assertEqual(self.analyzer.scan_root_path(1), "/Books")
+
+    def test_scan_without_recorded_scope_still_infers(self):
+        """Databases written before the columns existed keep working."""
+        self.insert_scan(1, "cloud", "success")
+        self.insert_files(1, [
+            ("/Books/Math", "f.txt", "file", 1, None),
+            ("/Books/Phys", "g.txt", "file", 1, None),
+        ])
+        self.assertEqual(self.analyzer.scan_root_path(1), "/Books")
+
+    def test_depth_of_counts_levels_below_the_start(self):
+        from ydm import CloudScanner
+        self.assertEqual(CloudScanner._depth_of("/", "/"), 0)
+        self.assertEqual(CloudScanner._depth_of("/A", "/"), 1)
+        self.assertEqual(CloudScanner._depth_of("/A/B", "/"), 2)
+        self.assertEqual(CloudScanner._depth_of("/Books/Math", "/Books"), 1)
+        self.assertEqual(CloudScanner._depth_of("/Books", "/Books"), 0)
+
+
+class TestRetiredFolders(AnalyzerTestCase):
+    """A folder a partial scan looked for and did not find is gone.
+
+    Serving it from the base is what kept `report diff` reporting a file under
+    a folder that had been deleted from the cloud months earlier — too long ago
+    to still be in the trash, so no delta sweep could see it, and rescanning
+    the parent did not help because "absent" and "uncovered" looked the same.
+    """
+
+    def _base(self, scan_id=1):
+        self.insert_scan(scan_id, "cloud", "success", scan_root="/")
+        self.insert_files(scan_id, [
+            ("", "brtn", "dir", 0, None),
+            ("/brtn", "keep.txt", "file", 1, None),
+            ("/brtn/gone", "ghost.txt", "file", 1, None),
+            ("/brtn/stays", "real.txt", "file", 1, None),
+            ("/other", "untouched.txt", "file", 1, None),
+        ])
+
+    def _rescan(self, scan_id=2, status="success", scan_root="/brtn", scan_depth=None):
+        self.insert_scan(scan_id, "cloud", status, scan_root=scan_root, scan_depth=scan_depth)
+        self.insert_files(scan_id, [
+            ("/brtn", "keep.txt", "file", 1, None),
+            ("/brtn/stays", "real.txt", "file", 1, None),
+        ])
+
+    def test_folder_the_rescan_did_not_find_stops_serving_files(self):
+        self._base()
+        self._rescan()
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertNotIn(("brtn/gone", "ghost.txt"), files)
+        self.assertIn(("brtn/stays", "real.txt"), files)
+
+    def test_retirement_stays_inside_the_rescanned_subtree(self):
+        self._base()
+        self._rescan()
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertIn(("other", "untouched.txt"), files)
+
+    def test_a_crashed_scan_retires_nothing(self):
+        """An interrupted walk has not finished looking."""
+        self._base()
+        self._rescan(status="crashed")
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertIn(("brtn/gone", "ghost.txt"), files)
+
+    def test_a_depth_limited_scan_retires_nothing(self):
+        """It stopped early on purpose; absence proves nothing below the cut."""
+        self._base()
+        self._rescan(scan_depth=1)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertIn(("brtn/gone", "ghost.txt"), files)
+
+    def test_a_scan_without_recorded_scope_retires_nothing(self):
+        """Old databases keep their stale rows rather than lose live ones."""
+        self._base()
+        self._rescan(scan_root=None)
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertIn(("brtn/gone", "ghost.txt"), files)
+
+    def test_a_scan_rooted_at_the_disk_root_retires_nothing(self):
+        """One ambiguous row must not be able to empty the whole snapshot."""
+        self._base()
+        self.insert_scan(2, "cloud", "success", scan_root="/")
+        self.insert_files(2, [("/brtn", "keep.txt", "file", 1, None)])
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertIn(("brtn/gone", "ghost.txt"), files)
+        self.assertIn(("other", "untouched.txt"), files)
 
 
 class TestSnapshotFreshness(AnalyzerTestCase):

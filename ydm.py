@@ -359,6 +359,23 @@ class StorageManager:
         except Exception as e:
             print(f"Warning: Checkpoint failed: {e}", file=sys.stderr)
     
+    @staticmethod
+    def _ensure_scan_scope_columns(conn):
+        """Add `scans.scan_root` / `scans.scan_depth` to a pre-existing database.
+
+        Both are nullable on purpose. A NULL means "this scan predates the
+        columns" and readers fall back to inferring the scope from the rows,
+        which is what they did before. Nothing rewrites history: a scan that
+        never recorded its scope is not going to acquire one retroactively.
+        """
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+        if not existing:
+            return  # No scans table yet; the CREATE above carries the columns.
+        if "scan_root" not in existing:
+            conn.execute("ALTER TABLE scans ADD COLUMN scan_root TEXT")
+        if "scan_depth" not in existing:
+            conn.execute("ALTER TABLE scans ADD COLUMN scan_depth INTEGER")
+
     def _init_final_db(self):
         """Initialize final DB schema if it doesn't exist."""
         try:
@@ -374,7 +391,9 @@ class StorageManager:
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                     scan_type TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    duration REAL
+                    duration REAL,
+                    scan_root TEXT,
+                    scan_depth INTEGER
                 );
                 """,
                 """
@@ -422,6 +441,7 @@ class StorageManager:
             
             for statement in schema:
                 conn.execute(statement)
+            self._ensure_scan_scope_columns(conn)
             conn.commit()
             conn.close()
         except Exception as e:
@@ -489,7 +509,9 @@ class StorageManager:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 scan_type TEXT NOT NULL,
                 status TEXT NOT NULL,
-                duration REAL
+                duration REAL,
+                scan_root TEXT,
+                scan_depth INTEGER
             );
             """,
             """
@@ -540,6 +562,7 @@ class StorageManager:
                 cursor = conn.cursor()
                 for statement in schema:
                     cursor.execute(statement)
+                self._ensure_scan_scope_columns(conn)
                 conn.commit()
             return True, f"Database initialized successfully at {self.db_path}"
         except Exception as e:
@@ -583,30 +606,41 @@ class StorageManager:
         
         return crashed
 
-    def start_scan(self, scan_type):
-        """Creates a new scan record with 'started' status."""
+    def start_scan(self, scan_type, scan_root=None, scan_depth=None):
+        """Creates a new scan record with 'started' status.
+
+        `scan_root` and `scan_depth` record what the scan was *asked* to cover.
+        Until they existed, scope had to be reconstructed from the rows a scan
+        left behind, and that inference has been wrong twice: once picking a
+        deep leaf as a partial scan's root, and once about to let a shallow
+        scan of `/` pass for a full one. Recording the intent removes the
+        guess for every scan written from here on.
+        """
         # Получить правильный scan_id из финальной БД
         next_scan_id = self._get_next_scan_id()
-        
+
         conn = self.get_connection()
         cursor = conn.cursor()
-        
+
         # Если tmpfs режим - используем явный scan_id
         if self.temp_mode:
             cursor.execute(
-                "INSERT INTO scans (id, scan_type, status, duration) VALUES (?, ?, ?, ?)",
-                (next_scan_id, scan_type, 'started', 0)
+                "INSERT INTO scans (id, scan_type, status, duration, scan_root, scan_depth)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (next_scan_id, scan_type, 'started', 0, scan_root, scan_depth)
             )
             scan_id = next_scan_id
-            
+
             # IMPORTANT: Also write to disk DB immediately so scan is tracked even if interrupted before checkpoint
             try:
                 if not os.path.exists(self.final_db_path):
                     self._init_final_db()
                 disk_conn = sqlite3.connect(self.final_db_path)
+                self._ensure_scan_scope_columns(disk_conn)
                 disk_conn.execute(
-                    "INSERT OR IGNORE INTO scans (id, scan_type, status, duration) VALUES (?, ?, ?, ?)",
-                    (next_scan_id, scan_type, 'started', 0)
+                    "INSERT OR IGNORE INTO scans (id, scan_type, status, duration, scan_root, scan_depth)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (next_scan_id, scan_type, 'started', 0, scan_root, scan_depth)
                 )
                 disk_conn.commit()
                 disk_conn.close()
@@ -614,8 +648,9 @@ class StorageManager:
                 print(f"Warning: Failed to record scan start in disk DB: {e}", file=sys.stderr)
         else:
             cursor.execute(
-                "INSERT INTO scans (scan_type, status, duration) VALUES (?, ?, ?)",
-                (scan_type, 'started', 0)
+                "INSERT INTO scans (scan_type, status, duration, scan_root, scan_depth)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (scan_type, 'started', 0, scan_root, scan_depth)
             )
             scan_id = cursor.lastrowid
         
@@ -1048,14 +1083,31 @@ class CloudScanner:
         self.report_progress = report_progress
         self.config = config or DEFAULT_CONFIG
 
-    def scan(self, scan_id, storage, resume=False, start_path=None):
-        """Walks through cloud recursively with resumable support."""
+    @staticmethod
+    def _depth_of(path, root):
+        """How many levels below `root` the folder `path` sits. Root itself is 0."""
+        root_parts = [p for p in str(root or "/").strip("/").split("/") if p]
+        path_parts = [p for p in str(path or "/").strip("/").split("/") if p]
+        return len(path_parts) - len(root_parts)
+
+    def scan(self, scan_id, storage, resume=False, start_path=None, max_depth=None):
+        """Walks through cloud recursively with resumable support.
+
+        `max_depth` bounds the walk: depth 1 lists the start folder's own
+        entries and descends no further. This is what makes the disk root
+        refreshable at all — a full walk of `/` is 1.5 TB, while the handful
+        of files sitting directly in the root is eight requests. A bounded
+        scan covers exactly the `parent_path` buckets it visited, which is the
+        unit the composite snapshot already replaces, so it slots in without
+        a second kind of update.
+        """
         batch_size = self.config.get("cloud_batch_size", DEFAULT_CONFIG["cloud_batch_size"])
         batch = []
         files_count = 0
         total_processed = 0
-        
+
         visited = set()
+        walk_root = start_path if start_path else "/"
 
         def flush_and_terminate(current_path, offset, total):
             # Сохранить текущий batch в RAM БД, затем сделать checkpoint на диск
@@ -1080,9 +1132,8 @@ class CloudScanner:
                 }, ensure_ascii=False))
         else:
             # Если указана конкретная папка - начинаем с неё, иначе с корня
-            root = start_path if start_path else "/"
-            queue = [root]
-            storage.update_folder_status(scan_id, root, "pending")
+            queue = [walk_root]
+            storage.update_folder_status(scan_id, walk_root, "pending")
 
         while queue:
             current_path = queue.pop(0)
@@ -1147,9 +1198,14 @@ class CloudScanner:
                     
                     if item['type'] == 'dir':
                         sub_path = (parent + '/' + name) if parent else ("/" + name)
-                        queue.append(sub_path)
-                        # Mark subfolder as pending
-                        storage.update_folder_status(scan_id, sub_path, 'pending')
+                        # The directory row is always recorded — the composite
+                        # needs to know the folder exists. Only the descent is
+                        # bounded, and a folder never entered is left out of
+                        # scan_progress so nothing claims it was covered.
+                        if max_depth is None or self._depth_of(sub_path, walk_root) < max_depth:
+                            queue.append(sub_path)
+                            # Mark subfolder as pending
+                            storage.update_folder_status(scan_id, sub_path, 'pending')
                     else:
                         files_count += 1
                 
@@ -1223,16 +1279,47 @@ class Analyzer:
             ref_id = config.get("reference_full_scan_id", None)
         return ref_id
 
+    @staticmethod
+    def _recorded_scope(conn, scan_id):
+        """`(scan_root, scan_depth)` as the scan recorded them, or None.
+
+        None means the question cannot be answered from the scans table — the
+        row is missing, or the database predates the columns and was never
+        opened for writing since. Callers fall back to inferring from rows.
+        """
+        try:
+            return conn.execute(
+                "SELECT scan_root, scan_depth FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+
     def scan_covers_root(self, scan_id):
-        """True if the scan enumerated the disk root, i.e. it is a full scan.
+        """True if the scan walked the whole disk, i.e. it can serve as a base.
 
         A scan started with `--path /Books` records nothing at the root, so it
         describes one subtree, not the disk. Such a scan may serve as a partial
         update on top of a base, never as the base itself: everything outside
         its subtree would silently vanish from the composite snapshot.
+
+        Having a row at the root is necessary but no longer sufficient. A
+        depth-bounded scan (`--path / --depth 1`) also writes root rows while
+        covering almost nothing, and promoting one to base would collapse the
+        snapshot from tens of thousands of files to a handful. So a recorded
+        `scan_depth` disqualifies a scan outright, and a recorded `scan_root`
+        other than the disk root does too. Scans written before those columns
+        existed carry NULL in both and fall back to the row test, which is the
+        behaviour they were built under.
         """
         conn = self.storage.get_connection()
         try:
+            scope = self._recorded_scope(conn, scan_id)
+            if scope is not None:
+                scan_root, scan_depth = scope
+                if scan_depth is not None:
+                    return False
+                if scan_root is not None and str(scan_root).strip("/"):
+                    return False
             row = conn.execute(
                 """
                 SELECT 1 FROM files
@@ -1678,9 +1765,23 @@ class Analyzer:
         the scan root" filter in build_composite_scan() then discarded 436 of
         its 437 folder updates. The common ancestor of everything the scan
         touched is the honest answer.
+
+        Scans written since `scans.scan_root` exists do not need inferring at
+        all — they said where they started. The common-ancestor path stays for
+        the scans that came before.
         """
         conn = self.storage.get_connection()
         try:
+            scope = self._recorded_scope(conn, scan_id)
+            if scope is not None and scope[0] is not None:
+                recorded = str(scope[0]).strip("/")
+                # A recorded "/" means the scan deliberately started at the disk
+                # root, which is a real scope. The inference path below returns
+                # None for the same string, because there "the common ancestor
+                # is /" means only "this scan spans folders with nothing in
+                # common" — an answer, not a scope. Same character, opposite
+                # amounts of knowledge, so they must not collapse together.
+                return "/" + recorded if recorded else "/"
             paths = [
                 row[0] for row in conn.execute(
                     "SELECT path FROM scan_progress WHERE scan_id = ?", (scan_id,)
@@ -1721,20 +1822,21 @@ class Analyzer:
         
         base_timestamp = base_scan[1]
         
-        # Find all cloud scans after base scan that are NOT full scans
-        partial_scans = conn.execute("""
+        # Find all cloud scans after the base that are NOT full scans. "Full"
+        # is whatever scan_covers_root() says it is — this used to be its own
+        # SQL test (`has a scan_progress row for '/'`), and a depth-limited
+        # scan of the root satisfies that test while covering almost nothing.
+        # Such a scan would then be dropped from the updates entirely, which
+        # is the opposite of what it is for. One definition, one place.
+        candidates = conn.execute("""
             SELECT s.id, s.timestamp, s.status
             FROM scans s
             WHERE s.scan_type = 'cloud'
             AND s.id > ?
-            AND s.id NOT IN (
-                SELECT DISTINCT sp.scan_id 
-                FROM scan_progress sp 
-                WHERE sp.path = '/'
-            )
             ORDER BY s.id ASC
         """, (base_scan_id,)).fetchall()
-        
+        partial_scans = [row for row in candidates if not self.scan_covers_root(row[0])]
+
         result = []
         for scan_id, timestamp, status in partial_scans:
             # Where this partial scan started: the common ancestor of every
@@ -1830,7 +1932,10 @@ class Analyzer:
                 root_path = partial_scan["root_path"]
                 timestamp = partial_scan.get("timestamp")
 
-                if not root_path:
+                # None means the scan's scope could not be determined; skip it
+                # rather than guess. "/" is a determined scope — a scan that
+                # recorded starting at the disk root — and is kept.
+                if root_path is None:
                     continue
 
                 # Store metadata for this scan
@@ -1888,6 +1993,10 @@ class Analyzer:
             # (two scans claiming the *same* folder_path) are already
             # resolved above by preferring the higher/more recent scan_id.
 
+            self._retire_deleted_folders(
+                conn, base_scan_id, sorted_partial_scans, folder_to_scan
+            )
+
         result = {
             "base_scan_id": base_scan_id,
             "folder_updates": folder_to_scan,
@@ -1909,6 +2018,69 @@ class Analyzer:
 
         return result
     
+    def _retire_deleted_folders(self, conn, base_scan_id, partial_scans, folder_to_scan):
+        """Let a partial scan report that a folder inside its subtree is gone.
+
+        The composite serves any folder no partial scan touched from the base,
+        which is right for a folder that simply was not looked at, and wrong
+        for one that was looked at and no longer exists. `report diff` was
+        still claiming a file under `/brtn/Запчасти/фото` on 2026-08-23; the
+        folder had been deleted from the disk long enough ago to be out of the
+        trash, so no delta sweep could see it either, and a rescan of the
+        parent did not help because "absent" was indistinguishable from
+        "uncovered".
+
+        A scan only gets to retire a folder when it is beyond doubt that it
+        would have found one: it must be `success` (not crashed or
+        interrupted mid-walk), it must have recorded where it started, and it
+        must not have been depth-limited. Scans predating `scans.scan_root`
+        carry NULL and are trusted for nothing here — the old behaviour, which
+        keeps stale rows, is the safe direction to be wrong in.
+
+        Retirement is expressed as an ordinary folder update rather than a new
+        kind of entry. The scan that proved the folder gone becomes its
+        serving scan, and since that scan holds no rows for it, every existing
+        reader already yields zero files without knowing this concept exists.
+        """
+        trustworthy = []
+        for partial in partial_scans:
+            scope = self._recorded_scope(conn, partial["id"])
+            if scope is None or scope[0] is None or scope[1] is not None:
+                continue
+            if partial.get("status") != "success":
+                continue
+            root = str(scope[0]).strip("/")
+            if not root:
+                # A scan rooted at the disk root that walked everything is a
+                # full scan and would have replaced the base outright. Reaching
+                # here means it is partial for some other reason, and letting
+                # it retire folders would put the entire snapshot in range of
+                # one ambiguous row. Not worth the blast radius.
+                continue
+            trustworthy.append((partial["id"], root))
+        if not trustworthy:
+            return
+
+        # Newest first, so a retired folder records the most recent scan that
+        # looked for it. Any of them yields the same (empty) file set, but the
+        # scan id is what a human reads when asking why a folder went away.
+        trustworthy.reverse()
+
+        base_folders = [
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT parent_path FROM files WHERE scan_id = ?",
+                (base_scan_id,),
+            )
+        ]
+        for scan_id, root in trustworthy:
+            for folder in base_folders:
+                if folder in folder_to_scan:
+                    continue  # some scan found it; it is not gone
+                normalized = str(folder).strip("/")
+                if not (normalized == root or normalized.startswith(root + "/")):
+                    continue  # outside this scan's subtree — it never looked
+                folder_to_scan[folder] = scan_id
+
     def clear_composite_cache(self):
         """Clears the composite scan cache."""
         self._composite_cache.clear()
@@ -1992,10 +2164,18 @@ class Analyzer:
             missing_local.append((parent, name, size))
 
         missing_cloud = []
+        local_ignored = 0
         for (parent, name), size in local_files.items():
             if (parent, name) in cloud_files:
                 continue
             if name.startswith(".sync") or parent == ".sync" or parent.startswith(".sync/"):
+                # The daemon's own working directory: local by design, never
+                # in the cloud. It used to be dropped here without being
+                # counted, which left the local side of the report unable to
+                # add up — the cloud side has always declared its exclusions,
+                # and an undeclared hole is how the last three defects stayed
+                # invisible for months.
+                local_ignored += 1
                 continue
             missing_cloud.append((parent, name, size))
 
@@ -2008,6 +2188,7 @@ class Analyzer:
             "local_files_count": len(local_files),
             "matched_count": len(set(cloud_files) & set(local_files)),
             "excluded_from_sync_count": excluded,
+            "local_ignored_count": local_ignored,
             "missing_local_count": len(missing_local),
             "missing_cloud_count": len(missing_cloud),
             "missing_local_sample": [f"/{p}/{n}".replace("//", "/") for p, n, _ in missing_local[:20]],
@@ -2591,6 +2772,13 @@ class YDM_CLI:
         scan_parser = subparsers.add_parser("scan", help="Scan operations")
         scan_parser.add_argument("target", choices=["meta", "local", "cloud"], help="Scan target")
         scan_parser.add_argument("--path", default=None, help="Specific path to scan (cloud: /папка, local: /path/to/dir)")
+        scan_parser.add_argument(
+            "--depth", type=int, default=None,
+            help="Cloud only: how many levels below --path to walk. 1 lists the "
+                 "folder itself and descends no further. Use it to refresh the "
+                 "disk root without a full 1.5 TB walk. A depth-limited scan is "
+                 "a partial update and can never become the composite base."
+        )
         scan_parser.add_argument("--progress", action="store_true", help="Show progress JSON stream")
         scan_parser.add_argument("--resume", action="store_true", help="Resume interrupted cloud scan")
         scan_parser.add_argument("--scan-id", type=int, help="Specific scan ID to resume or add paths to")
@@ -2715,8 +2903,8 @@ class YDM_CLI:
 
             if self.args.target == "local":
                 start_time = time.time()
-                scan_id = storage.start_scan("local")
                 local_path = self.args.path if self.args.path else self.args.config.get("local_root", "/data/ya_disk")
+                scan_id = storage.start_scan("local", scan_root=local_path)
                 try:
                     if not os.path.exists(local_path):
                         raise Exception(f"Path not found: {local_path}")
@@ -2854,8 +3042,20 @@ class YDM_CLI:
                     # Восстановить данные сеанса из disk DB в tmpfs
                     storage.restore_from_disk(scan_id)
                 else:
-                    scan_id = storage.start_scan("cloud")
+                    scan_depth = getattr(self.args, "depth", None)
+                    scan_id = storage.start_scan(
+                        "cloud",
+                        scan_root=self.args.path or "/",
+                        scan_depth=scan_depth,
+                    )
                     print(f"Starting new cloud scan {scan_id}...", file=sys.stderr)
+                    if scan_depth is not None:
+                        print(
+                            f"Depth-limited to {scan_depth} level(s) below "
+                            f"{self.args.path or '/'}; this scan can never become "
+                            "the composite base.",
+                            file=sys.stderr,
+                        )
                     
                     # Check for data integrity issues with last scan
                     if os.path.exists(storage.final_db_path):
@@ -2894,7 +3094,12 @@ class YDM_CLI:
                 try:
                     scanner = CloudScanner(client, report_progress=self.args.progress, config=self.args.config)
                     start_path = self.args.path if (self.args.path and not self.args.resume) else None
-                    files_count = scanner.scan(scan_id, storage, resume=self.args.resume, start_path=start_path)
+                    files_count = scanner.scan(
+                        scan_id, storage,
+                        resume=self.args.resume,
+                        start_path=start_path,
+                        max_depth=getattr(self.args, "depth", None),
+                    )
                     
                     duration = time.time() - start_time
                     storage.finish_scan(scan_id, 'success', duration)

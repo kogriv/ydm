@@ -109,9 +109,18 @@ python3 ydm.py scan cloud --progress
 # Scan one folder
 python3 ydm.py scan cloud --path "/Archive" --progress
 
+# Refresh just the files sitting directly in the disk root (~1 second),
+# without the full walk that "--path /" would mean
+python3 ydm.py scan cloud --path / --depth 1
+
 # Resume an interrupted scan
 python3 ydm.py scan cloud --resume --progress
 ```
+
+`--depth N` walks N levels below `--path` and stops. It is always a partial
+update: a depth-limited scan never becomes the composite snapshot's base, so
+it can refresh a folder without the rest of the disk falling out of the
+snapshot.
 
 ### Scan the local filesystem
 ```bash
