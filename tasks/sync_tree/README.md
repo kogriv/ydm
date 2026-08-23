@@ -28,6 +28,9 @@
 
 ## Связанные документы
 
+- [`tasks/sync_bench/README.md`](../sync_bench/README.md) — проверка маркеров
+  дерева на синтетическом стенде: сейчас покрыты 4 значения `display_marker()`
+  из 9, сквозного теста рендера нет
 - [`tasks/sync_manager/README.md`](../sync_manager/README.md) — исходный sync manager
 - [`tasks/rclone_backend/POLICY_AWARE_BISYNC.md`](../rclone_backend/POLICY_AWARE_BISYNC.md) — policy layer (реализован)
 - [`tasks/rclone_backend/README.md`](../rclone_backend/README.md) — rclone backend

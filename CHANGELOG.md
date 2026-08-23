@@ -5,6 +5,41 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-23 — what is left unverified, written down before it rots
+
+No code in this entry. [`tasks/sync_bench/`](tasks/sync_bench/README.md)
+records the one place August's work did not reach: the layer the user
+actually looks at.
+
+- **The markers are covered less than halfway.** `display_marker()` returns
+  nine values; four are tested (`[B]`, `[X]`, `[L]`, `[D?]`). The five that
+  are not include `[.]`, the default every unmatched case falls into — a
+  wrong branch order above it would return `[.]` and no test would notice.
+  (Correcting an earlier note in `tasks/sync_tree/BACKLOG.md`: `[B]` and `[L]`
+  are the covered ones, not the gaps.)
+- **There is no end-to-end render test at all.** The four covered values are
+  checked by calling a pure function with arguments assembled by hand in the
+  test body. That the right arguments reach it is verified by nothing — which
+  is the exact shape of blindness that let the `parent_path` mismatch live
+  until 16.08. The only test that runs `sync_tree.py` as a program checks
+  `--help`.
+- **The manual checklists cannot be run as written**, and not merely because
+  they name a policy that no longer exists. Recreating `Books/Math/База` as
+  bidirectional on the live daemon means dropping `Books` from `exclude-dirs`,
+  adding sibling exclusions at every level (55 entries → 97), and starting a
+  real sync of `/Books` — the operation behind the 14.08 incident. Both
+  checklists are now marked accordingly instead of sitting there looking
+  actionable.
+- The design settles the one open question: a synthetic bench, not the live
+  configuration. `ydm_menu` already accepts `--db-path`, `--local-root`,
+  `--policy-path`, `--backend` and `--non-interactive`, so it addresses a
+  bench without a single change — which is what makes this cheap.
+
+Nothing here is a reported failure. `[B~]`, `[P]` and `[.]` render plausibly
+today. It is written down because "not observed to be broken" and "works" are
+different claims, and the four defects fixed this month lived in the gap
+between them.
+
 ## 2026-08-23 — the coverage gate loses its back door
 
 The rule the whole month was built on — a partial scan must never be the

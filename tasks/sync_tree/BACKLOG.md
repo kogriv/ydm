@@ -109,9 +109,16 @@ Run 2026-08-23:
 - [x] `--schema sync_tree:v1` still works (compat). Verified; note the flag
   takes the full schema name, not the bare `v1` this line used to show.
 
-Follow-up: rebuild a small bidirectional policy under `Books/Math` if these
-first four checks are still wanted — they exercise `[B]`/`[L]` rendering,
-which nothing else covers.
+Follow-up (уточнено 2026-08-23): пересобирать двунаправленную политику под
+`Books/Math` на боевом демоне **не следует** — это означает убрать `Books` из
+`exclude-dirs` и запустить реальную синхронизацию `/Books`, операцию из
+инцидента 14.08. Те же четыре проверки делаются на синтетическом стенде:
+[`tasks/sync_bench/BACKLOG.md`](../sync_bench/BACKLOG.md) Phase 2.
+
+Заодно уточнение к формулировке «`[B]`/`[L]` ничем не покрыты»: покрыты как
+раз они, а также `[X]` и `[D?]` — четыре значения `display_marker()` из
+девяти. Непокрыты `[B?]`, `[B~]`, `[D]`, `[P]`, `[.]`, и отсутствует сквозной
+тест рендера; разбор — [`tasks/sync_bench/GAP.md`](../sync_bench/GAP.md).
 
 ---
 

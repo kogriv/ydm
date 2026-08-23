@@ -130,6 +130,18 @@ Not a substitute for `sync_policy.py`; convenience wrapper only.
 
 ## Manual verification checklist
 
+> **Не выполнять как написано (2026-08-23).** Пункты опираются на
+> `Books/Math/База` как двунаправленную и `Books/Math/АнГем` как сироту —
+> ни того, ни другого в политике нет с 14.08, там сплошной `Books: disabled`.
+> Хуже того, воссоздать их на боевом демоне означает убрать `Books` из
+> `exclude-dirs` и **начать реальную синхронизацию** `/Books` — операцию из
+> инцидента 14.08.
+>
+> Заменяется автоматическими проверками на стенде:
+> [`tasks/sync_bench/BACKLOG.md`](../sync_bench/BACKLOG.md) Phase 3.
+> Список ниже сохранён как перечень того, *что* должно проверяться; где
+> проверять — сказано там.
+
 After Phase 4–6 on device:
 
 - [ ] `ydm` → status header correct vs `ydm-sync-state`
