@@ -91,12 +91,27 @@
 
 After Phases 1–2 minimum:
 
-- [ ] `ydm-tree-path /Books/Math 3` — non-empty tree
-- [ ] `Books/Math/База` marked `[B]` (bidirectional)
-- [ ] `Books/Math/АнГем` marked `[L]` (local orphan) if not in policy
-- [ ] `ydm-sync-state` bidirectional list matches tree `[B]` nodes
-- [ ] Stale snapshot → WARN in header, not silent empty tree
-- [ ] `python3 tools/sync_tree.py --schema v1 ...` still works (compat)
+Run 2026-08-23:
+
+- [–] `ydm-tree-path /Books/Math 3` — non-empty tree. **Superseded.** The tree
+  is correctly collapsed: the policy now holds a blanket `Books: disabled`
+  (written during the 2026-08-14 restore), so `/Books/Math` renders as `[X]`
+  with no children. The check as written assumed a policy state that no
+  longer exists.
+- [–] `Books/Math/База` marked `[B]` — **superseded**, same reason: no
+  `Books/Math/*` entries remain in `var/sync_policy.json`.
+- [–] `Books/Math/АнГем` marked `[L]` — **superseded**, same reason.
+- [–] `ydm-sync-state` bidirectional list matches tree `[B]` nodes —
+  **superseded**: there are no `[B]` nodes under a disabled `Books`.
+- [x] Stale snapshot → WARN in header, not silent empty tree. Verified: the
+  header prints `snapshot_age: base #72 is 171 day(s) old and serves 48.1% of
+  the files` followed by a `WARN:` line naming the remedy.
+- [x] `--schema sync_tree:v1` still works (compat). Verified; note the flag
+  takes the full schema name, not the bare `v1` this line used to show.
+
+Follow-up: rebuild a small bidirectional policy under `Books/Math` if these
+first four checks are still wanted — they exercise `[B]`/`[L]` rendering,
+which nothing else covers.
 
 ---
 
