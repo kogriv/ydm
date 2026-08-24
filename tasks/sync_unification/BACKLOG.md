@@ -180,8 +180,12 @@
 - [x] `ydm-menu` → 2 Add from cloud → список подпапок из monitor.db snapshot
 - [x] После stale snapshot menu предлагает cloud scan
 - [x] `ydm-menu` с `--backend rclone` на машине с daemon: warning + предложение остановить daemon
-- [ ] На Android `ydm-menu` работает через rclone как раньше — **не проверено**,
-      нужна вторая машина
+- [ ] На Android `ydm-menu` работает через rclone как раньше — **не проверено**.
+      Разобрано 24.08 в [`tasks/android_verify/`](../android_verify/README.md):
+      пункт смешивал три проверки с разной ценой. Бэкенд rclone проверяется
+      **здесь** через локальный remote (прогон сделан), ограничение имён на
+      `/sdcard` воспроизводится локально через `encoding`, и только терминал
+      Termux действительно требует устройства или эмулятора
 - [x] `python3 tools/sync_policy.py migrate --backend daemon --apply` создаёт policy из exclude-dirs —
       выполнено 16.08 на боевом конфиге (только чтение конфига, запись в
       `var/sync_policy.json`): 55 записей, dry-run `apply_policy` после этого —
