@@ -26,6 +26,14 @@ class MenuStatus:
     warnings: List[str] = field(default_factory=list)
     #: False on the daemon backend, which has no bisync run, lock or resync.
     bisync_fields_apply: bool = True
+    #: One line about the composite snapshot's age, or None when there is no
+    #: snapshot to describe. The menu had no freshness signal at all until
+    #: 2026-08-24 — see tasks/ydm_menu/AUDIT-2026-08-24.md D.
+    snapshot_line: Optional[str] = None
+    #: True only when the stale part of the snapshot is actually compared
+    #: against the local copy. Age alone is not a problem: on the machine this
+    #: was written for, every stale file sits in an excluded folder.
+    snapshot_stale: bool = False
 
 
 def _bisync_args(cfg: MenuConfig) -> argparse.Namespace:
@@ -87,9 +95,45 @@ def _daemon_status(cfg: MenuConfig) -> MenuStatus:
     return status
 
 
+def _apply_snapshot_freshness(cfg: MenuConfig, status: MenuStatus) -> None:
+    """How old the snapshot is, said where a person will see it.
+
+    `sync_tree` has printed this in its header for weeks; the menu did not,
+    so someone working only from the menu made every decision on top of a
+    snapshot whose age nobody had mentioned. Same rule as the tree: age is
+    reported always, warned about only when the stale part is compared.
+    """
+    # `load_exclude_dirs` from ydm, not from sync_common: the two share a name
+    # but not a return type, and snapshot_freshness() needs the plain set.
+    from tools.sync_common import create_storage
+    from ydm import Analyzer, load_exclude_dirs
+
+    try:
+        analyzer = Analyzer(create_storage(cfg.db_path))
+        exclude_dirs = (
+            load_exclude_dirs(cfg.exclude_config)
+            if cfg.backend_kind == "daemon" else None
+        )
+        fresh = analyzer.snapshot_freshness(exclude_dirs=exclude_dirs)
+    except Exception:
+        return
+    if not fresh or fresh.get("base_scan_id") is None:
+        return
+
+    status.snapshot_line = (
+        f"base #{fresh['base_scan_id']}, {fresh.get('base_age_days', '?')} day(s) old, "
+        f"serves {fresh.get('base_share_percent', 0)}% of files"
+    )
+    status.snapshot_stale = bool(fresh.get("warnings"))
+    for warning in fresh.get("warnings") or []:
+        status.warnings.append(warning)
+
+
 def load_status(cfg: MenuConfig) -> MenuStatus:
     if cfg.backend_kind == "daemon":
-        return _daemon_status(cfg)
+        status = _daemon_status(cfg)
+        _apply_snapshot_freshness(cfg, status)
+        return status
     status = MenuStatus()
     try:
         bisync = bisync_status_payload(_bisync_args(cfg))
@@ -125,4 +169,5 @@ def load_status(cfg: MenuConfig) -> MenuStatus:
 
     if bisync.get("error"):
         status.warnings.append(str(bisync["error"]))
+    _apply_snapshot_freshness(cfg, status)
     return status

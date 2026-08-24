@@ -52,6 +52,8 @@ def render_header(cfg: MenuConfig, status: MenuStatus) -> List[str]:
     bidir = format_path_summary(status.bidirectional, "[B]")
     if bidir:
         lines.append(f"Synced: {bidir}")
+    if status.snapshot_line:
+        lines.append(f"Snapshot: {_truncate(status.snapshot_line, cfg.width - 10)}")
     for warning in status.warnings[:2]:
         lines.append(f"WARN: {_truncate(warning, cfg.width - 6)}")
     return lines
@@ -71,8 +73,9 @@ def render_main_menu(cfg: MenuConfig, status: MenuStatus) -> List[str]:
         " 5  Restart daemon sync now" if is_daemon else " 5  Run bisync now",
         " 6  Resync baseline (rclone only)" if is_daemon
         else " 6  Resync baseline (after path changes)",
-        " 7  Cloud scan (update snapshot)",
+        " 7  Update snapshot (checks what changed first)",
         " 8  Detailed status",
+        " d  Cloud vs local diff",
         " 9  Help",
         " q  Quit",
         "",

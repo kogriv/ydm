@@ -18,12 +18,16 @@ from tools.ydm_menu_actions import (  # noqa: E402
     action_inspect,
     action_remove,
     action_resync,
+    check_cloud_changes,
     cloud_list_dirs,
     handle_blocked_add,
+    list_stale_folders,
     offer_resync_if_needed,
+    print_cloud_local_diff,
     print_detailed_status,
     run_cloud_scan,
     run_sync_tree,
+    snapshot_top_level,
 )
 from tools.sync_backends import BackendError  # noqa: E402
 from tools.ydm_menu_config import MenuConfig  # noqa: E402
@@ -51,23 +55,22 @@ Reader = Callable[[str], str]
 
 
 def screen_tree(cfg: MenuConfig, reader: Reader) -> None:
-    presets = [
-        ("/", 4),
-        ("/Books/Math", 3),
-    ]
+    # Built from the snapshot, not typed in: see snapshot_top_level().
+    presets = [("/", 4)] + [(p, 3) for p in snapshot_top_level(cfg, limit=4)]
     print("Tree presets:")
     for i, (path, depth) in enumerate(presets, start=1):
         print(f" {i}  {path} depth {depth}")
-    print(" 3  Custom")
+    custom = len(presets) + 1
+    print(f" {custom}  Custom")
     print("  0  Back")
     choice = prompt_int("Choose", reader=reader)
     if choice is None:
         return
-    if choice in {1, 2}:
-        path, depth = presets[choice - 1]
-    elif choice == 3:
+    if choice == custom:
         path = prompt_line("Cloud path [/]: ", reader=reader) or "/"
         depth = prompt_int("Depth", default=4, reader=reader) or 4
+    elif 1 <= choice <= len(presets):
+        path, depth = presets[choice - 1]
     else:
         return
     result = run_sync_tree(cfg, path, depth)
@@ -76,16 +79,19 @@ def screen_tree(cfg: MenuConfig, reader: Reader) -> None:
 
 
 def screen_add_cloud(cfg: MenuConfig, reader: Reader) -> None:
-    parents = ["/Books/Math", "/DAO", "/pro", "/video"]
+    parents = snapshot_top_level(cfg)
     print("Cloud parent:")
     for i, p in enumerate(parents, start=1):
         print(f" {i}  {p}")
-    print(" 5  Custom path")
+    custom = len(parents) + 1
+    print(f" {custom}  Custom path")
     print("  0  Back")
+    if not parents:
+        print("(no cloud snapshot yet — use Custom, or run a cloud scan first)")
     choice = prompt_int("Choose", reader=reader)
     if choice is None:
         return
-    if choice == 5:
+    if choice == custom:
         parent = prompt_line("Parent path: ", reader=reader)
         if not parent:
             return
@@ -228,23 +234,98 @@ def screen_resync(cfg: MenuConfig, reader: Reader) -> None:
         print(result.message)
 
 
-def screen_cloud_scan(cfg: MenuConfig, reader: Reader) -> None:
-    options = ["/Books/Math", "/DAO", "/pro/agents", "/"]
+def _scan_one_folder(cfg: MenuConfig, reader: Reader) -> None:
+    options = snapshot_top_level(cfg) + ["/"]
     for i, p in enumerate(options, start=1):
         print(f" {i}  {p if p != '/' else '/ (full disk, slow)'}")
-    print(" 5  Custom")
+    custom = len(options) + 1
+    print(f" {custom}  Custom")
     print("  0  Back")
     choice = prompt_int("Scan path", reader=reader)
     if choice is None:
         return
-    if choice == 5:
+    if choice == custom:
         path = prompt_line("Path: ", reader=reader) or "/"
     elif 1 <= choice <= len(options):
         path = options[choice - 1]
     else:
         return
-    result = run_cloud_scan(cfg, path)
-    print(result.message)
+    print(run_cloud_scan(cfg, path).message)
+
+
+def screen_cloud_scan(cfg: MenuConfig, reader: Reader) -> None:
+    """Ask what changed before offering to scan anything.
+
+    The old version of this screen could scan but had no way to learn what
+    needed scanning, so the smart part of the smart scan — cloud_delta, which
+    answers in one request what a full walk costs ~4 600 — was reachable only
+    by knowing it existed in tools/. See tasks/ydm_menu/AUDIT-2026-08-24.md B.
+    """
+    print("Checking what changed on the disk… (1 request)")
+    check = check_cloud_changes(cfg)
+
+    if not check.ok:
+        # No token or no network: the manual paths still work, so say what is
+        # missing and carry on rather than dropping the person out.
+        print(f"  {check.message}")
+        print("  (a token in .env or an rclone remote enables the check)")
+        _scan_one_folder(cfg, reader)
+        return
+
+    payload = check.details or {}
+    if payload.get("changed") is False:
+        seen = payload.get("previous_checked_at") or "the last check"
+        print(f"  Nothing has changed since {seen}. The snapshot is current.")
+        print("")
+        print(" 1  Scan one folder anyway…")
+        print("  0  Back")
+        if prompt_int("Choose", reader=reader) == 1:
+            _scan_one_folder(cfg, reader)
+        return
+
+    if payload.get("changed") is None:
+        print("  First check on this machine — nothing to compare against yet.")
+
+    print("  Something changed. Looking for which folders…")
+    stale = list_stale_folders(cfg)
+    if not stale.ok:
+        print(f"  {stale.message}")
+        _scan_one_folder(cfg, reader)
+        return
+
+    report = stale.details or {}
+    totals = report.get("totals") or {}
+    roots = report.get("rescan_roots") or []
+    for warning in report.get("warnings") or []:
+        # cloud_delta distinguishes "nothing found" from "list was truncated"
+        # and from "revision moved but the sweep saw nothing". Flattening
+        # those into silence is how a stale snapshot looks current.
+        print(f"  WARN: {warning}")
+
+    print(
+        f"  {totals.get('stale_folders', 0)} stale folder(s), "
+        f"{totals.get('changed_files', 0)} changed file(s), "
+        f"{totals.get('deleted_entries', 0)} deleted"
+    )
+    print("")
+    if roots:
+        print(f" 1  Refresh what went stale  ({len(roots)} scan(s))")
+    print(" 2  Show which folders")
+    print(" 3  Scan one folder…")
+    print("  0  Back")
+    choice = prompt_int("Choose", reader=reader)
+    if choice == 1 and roots:
+        for root in roots:
+            print(run_cloud_scan(cfg, root).message)
+    elif choice == 2:
+        for folder in (report.get("stale_folders") or [])[:20]:
+            print(
+                f"  {folder.get('path')}  "
+                f"changed: {folder.get('changed_files', 0)}  "
+                f"deleted: {folder.get('deleted_entries', 0)}"
+            )
+    elif choice == 3:
+        _scan_one_folder(cfg, reader)
 
 
 def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
@@ -258,6 +339,10 @@ def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
         "7": lambda: screen_cloud_scan(cfg, reader),
         "8": lambda: print_detailed_status(cfg),
         "9": lambda: print("\n".join(render_short_help())),
+        # Letters, not new numbers: `2` for "add from cloud" is in the owner's
+        # fingers and written into HOW_TO_USE. See tasks/ydm_menu/DESIGN-2026-08-24.md.
+        "d": lambda: print_cloud_local_diff(cfg),
+        "h": lambda: print("\n".join(render_short_help())),
     }
     while True:
         status = load_status(cfg)

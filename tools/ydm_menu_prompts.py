@@ -16,6 +16,31 @@ def default_reader(prompt: str) -> str:
         return "q"
 
 
+def scripted_reader(answers: Iterable[str]) -> Reader:
+    """A Reader that replays prepared answers — for tests of whole screens.
+
+    A screen that asks more questions than the script has answers for is a
+    failing test, not a hang: without this, a wrong script blocks the run on
+    `input()` forever. Lives here rather than in the tests so the screens and
+    their double share one definition of what a Reader is.
+    """
+    remaining = list(answers)
+    position = 0
+
+    def read(prompt: str) -> str:
+        nonlocal position
+        if position >= len(remaining):
+            raise AssertionError(
+                f"screen asked for more input than scripted: {prompt!r} "
+                f"(script had {len(remaining)} answer(s))"
+            )
+        answer = remaining[position]
+        position += 1
+        return answer
+
+    return read
+
+
 def prompt_line(prompt: str, *, reader: Reader = default_reader) -> str:
     return reader(prompt).strip()
 

@@ -294,6 +294,35 @@ def handle_blocked_add(
     return None
 
 
+def snapshot_top_level(cfg: MenuConfig, limit: int = 6) -> List[str]:
+    """Top-level cloud folders, as the snapshot in the database has them.
+
+    Three screens used to offer a list typed in by hand — `/Books/Math`,
+    `/DAO`, `/pro/agents`. They mean nothing on another machine, and on the
+    machine they came from `/Books` is disabled outright, so the list had gone
+    stale even for its author. See tasks/ydm_menu/AUDIT-2026-08-24.md C.
+
+    Read from the database rather than through the backend on purpose: it is
+    offline, deterministic, and identical under daemon and rclone. Asking the
+    backend would put an `rclone lsf` against the live remote behind the act
+    of opening a menu.
+    """
+    from tools.sync_common import create_storage
+    from tools.sync_tree_cloud import fetch_child_names, select_snapshot_for_tree
+    from ydm import Analyzer
+
+    try:
+        analyzer = Analyzer(create_storage(cfg.db_path))
+        snapshot = select_snapshot_for_tree(analyzer, "/").snapshot
+        scan_id = snapshot.base_scan_id
+        names = fetch_child_names(analyzer.storage, scan_id, "/")
+    except Exception:
+        # A missing or empty database is an ordinary state here — the menu
+        # says so elsewhere, and offering nothing is better than crashing.
+        return []
+    return [f"/{name}" for name in names[:limit]]
+
+
 def cloud_list_dirs(cfg: MenuConfig, parent: str) -> List[str]:
     backend = backend_from_args(_policy_ns(cfg))
     try:
@@ -301,6 +330,67 @@ def cloud_list_dirs(cfg: MenuConfig, parent: str) -> List[str]:
     except Exception as exc:
         print(f"cloud list failed: {exc}")
         return []
+
+
+def _delta_ns(cfg: MenuConfig, **overrides) -> argparse.Namespace:
+    """Arguments for tools/cloud_delta.py, which takes a Namespace like the
+    bisync helpers do. Defaults match its own CLI defaults."""
+    ns = argparse.Namespace(
+        format="json",
+        remote=cfg.remote,
+        token_source="auto",
+        revision_state=None,
+        db_path=cfg.db_path,
+        save=False,
+        limit=50,
+        max_pages=20,
+        trash_max_pages=5,
+        no_trash=False,
+        force=False,
+        no_save=True,
+    )
+    for key, value in overrides.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def check_cloud_changes(cfg: MenuConfig) -> ActionResult:
+    """One request: has anything changed on the disk at all.
+
+    This is the cheap half of the smart scan — one call against roughly 4 600
+    for a full walk. "Nothing changed" is a real and useful answer, so it is
+    reported as success rather than as an empty result.
+    """
+    from tools.cloud_delta import check_revision
+
+    try:
+        payload = check_revision(_delta_ns(cfg))
+    except (Exception, SystemExit) as exc:
+        # SystemExit is deliberate: resolve_token() raises it when there is no
+        # token, and it does not descend from Exception. Without this the menu
+        # exits instead of saying that credentials are missing.
+        return ActionResult(False, f"cannot check the cloud: {exc}")
+    if payload.get("error"):
+        return ActionResult(False, str(payload["error"]), payload)
+    return ActionResult(True, "checked", payload)
+
+
+def list_stale_folders(cfg: MenuConfig) -> ActionResult:
+    """Which folders of the snapshot went stale, and what would refresh them.
+
+    Read-only: it names the folders, it does not rescan them. Keeping one
+    writer for the snapshot was a deliberate decision — see
+    tasks/delta_scan/README.md, "Step 3 — decided against".
+    """
+    from tools.cloud_delta import report_changes
+
+    try:
+        payload = report_changes(_delta_ns(cfg, force=True))
+    except (Exception, SystemExit) as exc:  # see check_cloud_changes
+        return ActionResult(False, f"cannot inspect the cloud: {exc}")
+    if payload.get("error"):
+        return ActionResult(False, str(payload["error"]), payload)
+    return ActionResult(True, "inspected", payload)
 
 
 def run_cloud_scan(cfg: MenuConfig, path: str) -> ActionResult:
@@ -357,14 +447,60 @@ def shutil_which(name: str) -> bool:
     return which(name) is not None
 
 
+def print_cloud_local_diff(cfg: MenuConfig) -> None:
+    """The comparison the whole project exists for, finally reachable from the menu.
+
+    `report diff` was available only from the command line — the menu, built
+    for the person who does not want the command line, could not show it. See
+    tasks/ydm_menu/AUDIT-2026-08-24.md A.
+    """
+    from tools.sync_common import create_storage
+    from ydm import Analyzer
+
+    print("Comparing the cloud snapshot with the local copy…")
+    try:
+        analyzer = Analyzer(create_storage(cfg.db_path))
+        result = analyzer.get_diff()
+    except Exception as exc:
+        print(f"  diff failed: {exc}")
+        return
+    if result.get("error"):
+        print(f"  {result['error']}")
+        return
+
+    compare = result.get("compare_scans") or {}
+    print(f"  cloud: {compare.get('cloud')}   local scan: {compare.get('local')}")
+    rows = [
+        ("in the cloud", result.get("cloud_files_count")),
+        ("matched locally", result.get("matched_count")),
+        ("excluded from sync", result.get("excluded_from_sync_count")),
+        ("local, outside sync", result.get("local_ignored_count")),
+        ("missing locally", result.get("missing_local_count")),
+        ("missing in the cloud", result.get("missing_cloud_count")),
+    ]
+    for label, value in rows:
+        if value is not None:
+            print(f"  {label:<22} {value}")
+    for sample_key, label in (("missing_local_sample", "missing locally"),
+                              ("missing_cloud_sample", "missing in the cloud")):
+        for path in (result.get(sample_key) or [])[:5]:
+            print(f"    {label}: {path}")
+    for warning in result.get("warnings") or []:
+        print(f"  WARN: {warning}")
+
+
 def print_detailed_status(cfg: MenuConfig) -> None:
     from tools.sync_bisync import cmd_status
 
     status = load_status(cfg)
     print(f"Overall: {status.overall}")
-    print(f"Last run: {status.last_run_at} ({status.last_status})")
-    print(f"Lock: {status.lock_held} pid={status.lock_pid}")
-    print(f"Resync needed: {status.resync_needed}")
+    # The header already refuses to invent bisync fields on the daemon, which
+    # has no run, no lock and no resync baseline. This screen printed them
+    # anyway, so the same screen was honest above and made-up below.
+    if status.bisync_fields_apply:
+        print(f"Last run: {status.last_run_at} ({status.last_status})")
+        print(f"Lock: {status.lock_held} pid={status.lock_pid}")
+        print(f"Resync needed: {status.resync_needed}")
     print("Bidirectional:")
     for p in status.bidirectional:
         print(f"  [B] {p}")

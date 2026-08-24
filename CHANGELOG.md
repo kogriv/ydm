@@ -5,6 +5,44 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-24 — the menu catches up with the tools it sits on
+
+Asking "how do I run the smart cloud scan from the menu" turned out to have no
+answer, and that was one symptom of a wider drift. Audited in
+[`tasks/ydm_menu/AUDIT-2026-08-24.md`](tasks/ydm_menu/AUDIT-2026-08-24.md),
+designed before any screen was touched, then built. 248 tests → 260.
+
+- **Item 7 asks what changed before offering to scan.** One request answers
+  whether anything moved at all; if something did, `cloud_delta` names the
+  stale folders — about nine requests where a full walk takes ~4 600 — and the
+  menu offers to refresh exactly those. "Nothing has changed" is reported as
+  the useful answer it is. Without a token the manual chooser still works, and
+  a truncated sweep says so rather than passing for a clean one.
+- **`d` shows the cloud-vs-local diff**, which is what this project is for and
+  had been reachable only from the command line. New entries went on letters
+  rather than renumbering: `2` for "add from cloud" is in the owner's fingers
+  and written into `HOW_TO_USE.md`.
+- **The header says how old the snapshot is** — `base #72, 173 day(s) old,
+  serves 48.0% of files`. `sync_tree` had printed this for weeks; the menu
+  never did, so anyone working from it decided on a snapshot whose age nobody
+  had mentioned. Same rule as the tree: the age is always stated, the warning
+  only when the stale part is actually compared.
+- **Three screens stopped offering paths from one machine.** They listed
+  `/Books/Math`, `/DAO`, `/pro/agents` — meaningless elsewhere, and `/Books`
+  is disabled here outright, so the list had gone stale for its author too.
+  They now read the snapshot's top level from the database rather than through
+  the backend, which keeps opening a menu from firing an `rclone lsf`.
+- **Detailed status stopped inventing bisync fields on the daemon.** The
+  header already refused to; the same screen was honest above and made-up
+  below.
+- **The screens have tests at last** — and they came first, because 8.1–8.4
+  change four of the six. Nothing had blocked them: `Reader` was always
+  injectable. `scripted_reader()` raises when a screen asks for more input
+  than the script holds, so a wrong script fails instead of hanging.
+- **One of those tests reached the live API** on its first run: in-process, so
+  the bench's environment does not apply and `.env` does. The cloud calls are
+  stubbed now — a menu test must not be able to touch the network.
+
 ## 2026-08-24 — a failing command now exits non-zero
 
 **Behaviour change for every command.** `ydm.py` used to exit 0 whatever

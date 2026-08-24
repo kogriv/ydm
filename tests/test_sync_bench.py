@@ -618,6 +618,239 @@ class TestRcloneOnTheBench(BenchTestCase):
         self.assertEqual(read_back, original, "the encoding does not round-trip")
 
 
+class TestMenuScreens(BenchTestCase):
+    """The screens themselves, driven by a scripted reader.
+
+    Not one of the six screens had a test before 2026-08-24, which is where
+    every hardcoded path in the menu had been sitting undisturbed. Nothing
+    blocked this: `Reader` has always been injectable, and the prompt tests
+    inject it. See tasks/ydm_menu/AUDIT-2026-08-24.md G.
+
+    These check what the person is shown — the paths offered and the actions
+    taken — not merely that nothing raised.
+    """
+
+    def cfg(self, backend="rclone"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            backend=backend,
+            plain=True,
+        )
+
+    def run_screen(self, screen, answers, backend="rclone"):
+        """Drive one screen to completion and return everything it printed."""
+        import contextlib
+        import io
+
+        from tools.ydm_menu_prompts import scripted_reader
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            screen(self.cfg(backend), scripted_reader(answers))
+        return buffer.getvalue()
+
+    def test_a_screen_that_over_asks_fails_loudly(self):
+        """The guard that keeps a wrong script from hanging the whole run."""
+        from tools.ydm_menu import screen_tree
+
+        with self.assertRaises(AssertionError):
+            self.run_screen(screen_tree, [])
+
+    def test_back_leaves_every_screen_without_acting(self):
+        """`0` is the way out of each menu, and it must change nothing.
+
+        `screen_cloud_scan` is absent on purpose: it opens by asking the cloud
+        what changed, so driving it here would put a network call inside an
+        offline test. Its branches are covered in TestSmartCloudScan, where
+        that call is stubbed.
+        """
+        from tools import ydm_menu
+
+        before = self.bench.read_policy()
+        for name in ("screen_tree", "screen_add_cloud", "screen_remove",
+                     "_scan_one_folder"):
+            with self.subTest(screen=name):
+                self.run_screen(getattr(ydm_menu, name), ["0"])
+        self.assertEqual(before, self.bench.read_policy())
+
+    def test_the_paths_offered_are_not_from_someone_elses_machine(self):
+        """The finding this class exists for.
+
+        Three screens used to offer a list typed in by hand — `/Books/Math`,
+        `/DAO`, `/pro/agents` — which mean nothing on another machine, and on
+        the author's own `/Books` is disabled outright. Whatever a screen
+        offers now has to come from this bench.
+        """
+        from tools import ydm_menu
+
+        known = {entry.path for entry in SAMPLE_TREE} | {"/"}
+        screens = ("screen_tree", "screen_add_cloud", "_scan_one_folder")
+        for name in screens:
+            with self.subTest(screen=name):
+                text = self.run_screen(getattr(ydm_menu, name), ["0"])
+                offered = [
+                    token for line in text.splitlines()
+                    for token in line.split()
+                    if token.startswith("/")
+                ]
+                self.assertTrue(offered, f"{name} offered no paths at all:\n{text}")
+                for path in offered:
+                    normalized = path.rstrip("/") or "/"
+                    self.assertIn(normalized, known, f"{name}:\n{text}")
+
+    def test_the_diff_is_reachable_from_the_menu(self):
+        """The comparison the project exists for, previously CLI-only."""
+        import contextlib
+        import io
+
+        from tools.ydm_menu_actions import print_cloud_local_diff
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            print_cloud_local_diff(self.cfg())
+        text = buffer.getvalue()
+        self.assertIn("in the cloud", text)
+        self.assertIn("matched locally", text)
+        self.assertIn("missing locally", text)
+
+    def test_the_menu_lists_the_diff_entry(self):
+        from tools.ydm_menu_screens import render_main_menu
+        from tools.ydm_menu_status import load_status
+
+        cfg = self.cfg()
+        text = "\n".join(render_main_menu(cfg, load_status(cfg)))
+        self.assertIn(" d  ", text)
+        # Numbers stayed where they were: renumbering would break the muscle
+        # memory the design deliberately preserved.
+        self.assertIn(" 2  Add folder from cloud", text)
+        self.assertIn(" 8  Detailed status", text)
+
+    def test_removing_a_folder_needs_its_name_typed_back(self):
+        """Three barriers on remove, and the bench policy proves they held."""
+        from tools.ydm_menu import screen_remove
+
+        before = self.bench.read_policy()
+        # Pick entry 1, confirm, then fail the name check.
+        text = self.run_screen(screen_remove, ["1", "y", "not-the-name"])
+        self.assertIn("Cancelled", text)
+        self.assertEqual(before, self.bench.read_policy(), "policy changed anyway")
+
+class TestSmartCloudScan(BenchTestCase):
+    """Item 7, which now asks what changed before offering to scan.
+
+    Every check here stubs the two cloud calls. That is not only for speed:
+    written without stubs, the first version of these tests reached the live
+    Yandex Disk API — in-process, so the bench's environment does not reach
+    them, and the token in `.env` does. A menu test must not be able to touch
+    the network at all.
+    """
+
+    def cfg(self):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            backend="rclone",
+            plain=True,
+        )
+
+    def run_scan_screen(self, answers, *, check, stale=None):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from tools import ydm_menu
+        from tools.ydm_menu_prompts import scripted_reader
+
+        buffer = io.StringIO()
+        with patch.object(ydm_menu, "check_cloud_changes", return_value=check), \
+             patch.object(ydm_menu, "list_stale_folders", return_value=stale), \
+             patch.object(ydm_menu, "run_cloud_scan") as scan, \
+             contextlib.redirect_stdout(buffer):
+            ydm_menu.screen_cloud_scan(self.cfg(), scripted_reader(answers))
+        return buffer.getvalue(), scan
+
+    @staticmethod
+    def result(ok, message, details=None):
+        from tools.ydm_menu_actions import ActionResult
+
+        return ActionResult(ok, message, details)
+
+    def test_a_missing_token_is_reported_not_exited_on(self):
+        """`resolve_token()` raises SystemExit, which is not an Exception.
+
+        Caught the wrong way, a menu without credentials does not say so — it
+        quits. The screen tests stub this function out, so only a direct check
+        can hold the distinction: a mutation removing SystemExit from the
+        `except` passed everything until this existed.
+        """
+        from unittest.mock import patch
+
+        from tools import ydm_menu_actions
+
+        with patch.object(
+            ydm_menu_actions, "_delta_ns", side_effect=SystemExit("no token")
+        ):
+            result = ydm_menu_actions.check_cloud_changes(self.cfg())
+        self.assertFalse(result.ok)
+        self.assertIn("no token", result.message)
+
+        with patch.object(
+            ydm_menu_actions, "_delta_ns", side_effect=SystemExit("no token")
+        ):
+            result = ydm_menu_actions.list_stale_folders(self.cfg())
+        self.assertFalse(result.ok)
+
+    def test_nothing_changed_is_an_answer_not_an_empty_screen(self):
+        """One request, and the useful outcome is usually "no work to do"."""
+        check = self.result(True, "checked", {
+            "changed": False, "previous_checked_at": "2026-08-23 06:32:28",
+        })
+        text, scan = self.run_scan_screen(["0"], check=check)
+        self.assertIn("Nothing has changed since 2026-08-23 06:32:28", text)
+        self.assertIn("current", text)
+        scan.assert_not_called()
+
+    def test_stale_folders_are_offered_for_refresh(self):
+        check = self.result(True, "checked", {"changed": True})
+        stale = self.result(True, "inspected", {
+            "totals": {"stale_folders": 2, "changed_files": 31, "deleted_entries": 1},
+            "rescan_roots": ["/pro", "/video"],
+            "stale_folders": [{"path": "/pro", "changed_files": 30, "deleted_entries": 0}],
+            "warnings": [],
+        })
+        text, scan = self.run_scan_screen(["1"], check=check, stale=stale)
+        self.assertIn("2 stale folder(s), 31 changed file(s), 1 deleted", text)
+        self.assertEqual([c.args[1] for c in scan.call_args_list], ["/pro", "/video"])
+
+    def test_a_truncated_sweep_is_not_silently_a_clean_one(self):
+        """cloud_delta separates "nothing found" from "list incomplete"."""
+        check = self.result(True, "checked", {"changed": True})
+        stale = self.result(True, "inspected", {
+            "totals": {"stale_folders": 0, "changed_files": 0, "deleted_entries": 0},
+            "rescan_roots": [],
+            "stale_folders": [],
+            "warnings": ["modified sweep hit --max-pages; the list is incomplete"],
+        })
+        text, _scan = self.run_scan_screen(["0"], check=check, stale=stale)
+        self.assertIn("WARN:", text)
+        self.assertIn("incomplete", text)
+
+    def test_without_a_token_the_manual_path_still_works(self):
+        """No credentials is a normal state; it must not end the screen."""
+        check = self.result(False, "cannot check the cloud: no token")
+        text, _scan = self.run_scan_screen(["0"], check=check)
+        self.assertIn("cannot check the cloud", text)
+        self.assertIn("token", text)
+        # It fell through to the manual chooser, which lists bench paths.
+        self.assertIn("/Books", text)
+
 class TestMenuHeader(BenchTestCase):
     """The header is where anyone looks first, so it has to match the facts.
 
@@ -659,6 +892,27 @@ class TestMenuHeader(BenchTestCase):
         # Folders that exist only in the live policy must not show up anywhere.
         self.assertNotIn("latoken", text)
         self.assertNotIn("журналы", text)
+
+    def test_the_header_says_how_old_the_snapshot_is(self):
+        """The menu used to be the one view that never mentioned this.
+
+        `sync_tree` printed it in its header for weeks, so someone working
+        from the menu decided on top of a snapshot whose age nobody had
+        stated. See tasks/ydm_menu/AUDIT-2026-08-24.md D.
+        """
+        _cfg, text = self._render()
+        line = next(
+            (l for l in text.splitlines() if l.startswith("Snapshot:")), None
+        )
+        self.assertIsNotNone(line, text)
+        self.assertIn("day(s) old", line)
+        self.assertIn("% of files", line)
+
+    def test_a_fresh_snapshot_is_stated_without_alarm(self):
+        """Age is reported always; WARN belongs to the compared part only."""
+        _cfg, text = self._render()
+        self.assertIn("Snapshot:", text)
+        self.assertNotIn("WARN", text)
 
     def test_header_counts_match_the_policy_file(self):
         from tools.ydm_menu_config import MenuConfig
