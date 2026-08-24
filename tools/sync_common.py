@@ -551,6 +551,28 @@ def fetch_child_dirs(
 
 # --- rclone bisync (tasks/rclone_backend, bidirectional sync) ---------------
 
+def require_local_root(value: Optional[str], *, tool: str = "") -> str:
+    """The local mirror path, or a clear exit instead of a traceback.
+
+    No default can be right on someone else's machine, so this resolves the
+    flag first and `YDM_LOCAL_ROOT` second. Until 2026-08-24 the fallback was
+    the author's own `/data/ya_disk`; removing it turned "no path" from a wrong
+    answer into a `TypeError` deep inside path handling, which is not an
+    improvement. See tasks/opensource/BACKLOG.md 2.3.
+    """
+    resolved = value or os.environ.get("YDM_LOCAL_ROOT")
+    if resolved:
+        return resolved
+    where = f"{tool}: " if tool else ""
+    sys.stderr.write(
+        f"{where}no local mirror path.\n"
+        f"  Pass --local-root /path/to/your/mirror, or set it once:\n"
+        f"      export YDM_LOCAL_ROOT=\"$HOME/YandexDisk\"\n"
+        f"  tools/aliases.sh exports it for every ydm-* command.\n"
+    )
+    raise SystemExit(2)
+
+
 def var_path(*parts: str) -> str:
     """Resolves a path under the project's var/ dir, regardless of cwd.
 

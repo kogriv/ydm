@@ -183,10 +183,11 @@ DEFAULT_CONFIG = {
     "full_scan_fresh_window_days": 2,
     # Optional explicit reference full scan ID (can be overridden by user/config)
     "reference_full_scan_id": None,
-    # Local mirror path used by `scan local` when --path is omitted. There is
-    # no default that could be right on someone else's machine, so it is unset
-    # here and `scan local` says what to do rather than guessing.
-    "local_root": None,
+    # Local mirror path used when no path is given. There is no default that
+    # could be right on someone else's machine — it used to be the author's
+    # own /data/ya_disk — so it comes from YDM_LOCAL_ROOT (which tools/aliases.sh
+    # sets) and is otherwise unset, and the commands that need it say so.
+    "local_root": os.environ.get("YDM_LOCAL_ROOT") or None,
     # rclone remote name used by --backend rclone (see tasks/rclone_backend/README.md)
     "rclone_remote": "yandex",
     # yandex-disk daemon's exclude-dirs config; on --backend rclone this is

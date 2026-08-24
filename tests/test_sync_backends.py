@@ -302,3 +302,63 @@ class TestBackendKind(unittest.TestCase):
     def test_kinds_are_stable_ids(self):
         self.assertEqual(DaemonBackend.kind, "daemon")
         self.assertEqual(RcloneBackend.kind, "rclone")
+
+
+class TestNoLocalRoot(unittest.TestCase):
+    """Every entry point run with nothing configured, as a stranger would.
+
+    Dropping the hardcoded `/data/ya_disk` default (tasks/opensource 2.3) left
+    `None` where the code expects a path, and four tools started dying with
+    `TypeError: expected str … not NoneType` deep inside path handling. Nothing
+    caught it: the bench always passes `--local-root`, so no test ever ran
+    these without one. That is the gap this class closes — the tools are
+    exercised the way someone who has just cloned the repository runs them.
+    """
+
+    #: Each is a full command; none of them should reach real data, because
+    #: none of them should get past the missing path.
+    COMMANDS = [
+        ["tools/sync_tree.py", "--path", "/"],
+        ["tools/sync_filters.py", "list"],
+        ["tools/sync_policy.py", "status"],
+        ["tools/ydm_menu.py", "orphans"],
+    ]
+
+    def run_bare(self, argv):
+        import subprocess
+
+        env = {k: v for k, v in os.environ.items() if k != "YDM_LOCAL_ROOT"}
+        return subprocess.run(
+            [sys.executable, str(ROOT / argv[0]), *argv[1:]],
+            capture_output=True, text=True, check=False, env=env, cwd=str(ROOT),
+        )
+
+    def test_each_tool_explains_itself_instead_of_crashing(self):
+        for argv in self.COMMANDS:
+            with self.subTest(tool=argv[0]):
+                proc = self.run_bare(argv)
+                combined = proc.stdout + proc.stderr
+                self.assertNotIn("Traceback", combined, combined[-800:])
+                self.assertNotIn("NoneType", combined, combined[-800:])
+                self.assertIn("--local-root", combined, combined[-800:])
+                self.assertIn("YDM_LOCAL_ROOT", combined, combined[-800:])
+                self.assertNotEqual(proc.returncode, 0, combined[-400:])
+
+    def test_the_environment_variable_is_enough(self):
+        """The other direction: YDM_LOCAL_ROOT alone must satisfy them.
+
+        tools/aliases.sh sets only that, so if the tools demanded the flag as
+        well, every alias would break.
+        """
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "YDM_LOCAL_ROOT": tmp}
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "sync_policy.py"), "status",
+                 "--policy-path", os.path.join(tmp, "policy.json")],
+                capture_output=True, text=True, check=False, env=env, cwd=str(ROOT),
+            )
+            combined = proc.stdout + proc.stderr
+            self.assertNotIn("no local mirror path", combined, combined[-400:])
+            self.assertNotIn("Traceback", combined, combined[-800:])

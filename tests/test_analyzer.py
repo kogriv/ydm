@@ -1251,10 +1251,17 @@ class TestExitCodes(unittest.TestCase):
     def ydm(self, *args):
         import subprocess
 
+        # YDM_LOCAL_ROOT is stripped deliberately. It is exported by
+        # tools/aliases.sh, so on a developer machine it is simply present in
+        # the environment — and with it inherited, "scan local with no path"
+        # is not a failure at all: it scans the real mirror. Which is exactly
+        # what this test did until 2026-08-24, reading 14 138 real files to
+        # assert that nothing should have happened.
+        env = {k: v for k, v in os.environ.items() if k != "YDM_LOCAL_ROOT"}
+        env.update({"HOME": self.tmpdir, "YDM_VAR_DIR": self.tmpdir})
         return subprocess.run(
             [sys.executable, str(ROOT_DIR / "ydm.py"), "--db-path", self.db_path, *args],
-            capture_output=True, text=True, check=False,
-            env={**os.environ, "HOME": self.tmpdir, "YDM_VAR_DIR": self.tmpdir},
+            capture_output=True, text=True, check=False, env=env,
         )
 
     def test_success_is_zero(self):

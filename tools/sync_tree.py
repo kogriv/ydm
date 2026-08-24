@@ -24,6 +24,7 @@ from tools.sync_common import (  # noqa: E402
     load_exclude_dirs,
     load_sync_filters,
     normalize_path,
+    require_local_root,
     run_local_scan,
     select_scan_id_for_path,
     sleep_sec,
@@ -613,6 +614,7 @@ def _resolve_backend_name(args) -> str:
 
 def main() -> None:
     args = parse_args()
+    args.local_root = require_local_root(args.local_root, tool="sync_tree.py")
     root_path = normalize_path(args.path)
     schema = args.schema
     effective_backend = _resolve_backend_name(args)

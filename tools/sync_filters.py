@@ -36,6 +36,7 @@ from tools.sync_common import (  # noqa: E402
     path_exists_in_snapshot,
     rclone_check_entry,
     rclone_copy_materialize,
+    require_local_root,
     var_path,
     write_sync_filters,
 )
@@ -227,6 +228,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.local_root = require_local_root(args.local_root, tool="sync_filters.py")
     filter_path = args.filter_path or default_filter_path(args.local_root)
     filters_result = load_sync_filters(filter_path)
     include_dirs = filters_result.include_dirs

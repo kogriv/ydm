@@ -42,10 +42,12 @@ class MenuConfig:
         exclude_config: str | None = None,
         plain: bool = False,
     ) -> "MenuConfig":
+        from tools.sync_common import require_local_root
+
         resolved_local = os.path.expanduser(
-            local_root
-            or os.environ.get("YDM_LOCAL_ROOT")
-            or DEFAULT_CONFIG["local_root"]
+            require_local_root(
+                local_root or DEFAULT_CONFIG["local_root"], tool="ydm_menu.py"
+            )
         )
         resolved_db = os.path.expanduser(
             db_path

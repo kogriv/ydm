@@ -642,7 +642,7 @@ def backend_from_args(args) -> SyncBackend:
         env=env,
         config=config,
         db_path=getattr(args, "db_path", "monitor.db"),
-        local_root=getattr(args, "local_root", DEFAULT_CONFIG["local_root"]),
+        local_root=getattr(args, "local_root", None) or DEFAULT_CONFIG["local_root"] or "",
         policy_path=getattr(args, "policy_path", None),
         remote=getattr(args, "remote", DEFAULT_CONFIG["rclone_remote"]),
         bisync_filter_path=getattr(args, "bisync_filter_path", None),

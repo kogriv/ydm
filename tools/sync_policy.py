@@ -33,6 +33,7 @@ from tools.sync_common import (  # noqa: E402
     load_sync_filters,
     normalize_path,
     path_exists_in_snapshot,
+    require_local_root,
     select_scan_id_for_path,
     var_path,
 )
@@ -785,6 +786,7 @@ def _apply_backend_policy(args: argparse.Namespace, policy: dict) -> dict:
 
 def main() -> None:
     args = parse_args()
+    args.local_root = require_local_root(args.local_root, tool="sync_policy.py")
     try:
         if args.command == "status":
             payload = status_payload(args)

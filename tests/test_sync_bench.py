@@ -750,7 +750,7 @@ class TestStaleSnapshotSurfaces(unittest.TestCase):
                 *bench.cli_args("rclone"),
             ],
             capture_output=True, text=True, check=False,
-            env={**os.environ, "HOME": str(bench.root / "home")},
+            env=bench.env(),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
         return proc.stdout

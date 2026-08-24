@@ -231,13 +231,19 @@ class Bench:
         A home of its own, and an rclone.conf of its own: `rclone listremotes`
         reads `RCLONE_CONFIG` before anything else, so without this a check
         would silently address the live `yandex:` remote.
+
+        `YDM_LOCAL_ROOT` is removed rather than overridden: tools/aliases.sh
+        exports it, so on a developer machine it is simply there, and a tool
+        that fell back to it would read the real mirror while the test
+        believed it was reading the bench.
         """
-        return {
-            **os.environ,
+        env = {k: v for k, v in os.environ.items() if k != "YDM_LOCAL_ROOT"}
+        env.update({
             "HOME": str(self.root / "home"),
             "RCLONE_CONFIG": self.rclone_config,
             "YDM_VAR_DIR": self.var_dir,
-        }
+        })
+        return env
 
     def read_policy(self) -> dict:
         with open(self.policy_path, encoding="utf-8") as handle:
