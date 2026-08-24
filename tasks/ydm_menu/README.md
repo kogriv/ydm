@@ -1,6 +1,8 @@
 # YDM Menu — интерактивный UI для человека
 
-*Статус:* **Implemented** (Phases 1–4, 6; Phase 5/7 частично)
+*Статус:* **Implemented** (Phases 1–4, 6; Phase 5/7 частично).
+**Аудит 24.08 показал, что меню отстало от инструментов** —
+[`AUDIT-2026-08-24.md`](./AUDIT-2026-08-24.md), работа в Phase 8.
 *Контекст:* поверх policy-aware sync (`sync_policy`, `sync_tree v2`, `sync_bisync`)
 нужен **диалоговый режим** для Termux, не заменяющий CLI для агентов.
 
