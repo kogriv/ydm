@@ -5,6 +5,43 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-24 — a disabled folder stops counting as a synced one
+
+G6 was recorded yesterday as a wrong marker. It is one conflation with three
+consequences, and the marker is the least of them. `policy_paths_set()` put
+`bidirectional`, `download_only` and `disabled` into one set, and two of its
+three callers used that set to ask *"does anything below this path sync"* — a
+question a disabled entry answers backwards. Split into
+`synced_policy_paths_set()`, which holds only the entries that sync something.
+Details in [`tasks/sync_bench/GAP.md`](tasks/sync_bench/GAP.md#g6).
+
+- **A folder inside a disabled tree no longer claims a synced child.** It used
+  to render `[P]`, "parent of a synced path", with nothing synced beneath it.
+- **The collapsed tree stops expanding excluded subtrees.** Collapse exists to
+  show synced branches; under a disabled entry it was doing the opposite and
+  keeping the whole subtree. What stays visible now is only what the separate
+  "collapse keeps local orphans" rule keeps — folders that are on disk.
+- **The orphan list no longer skips a folder for having a descendant.** Two
+  folders in identical standing — on disk, inside a disabled tree, no entry of
+  their own — differed only in whether the snapshot held a child of theirs, and
+  that alone decided which one the menu offered. This is the worst of the three:
+  a missing row is indistinguishable from "not an orphan" by reading the output.
+- **`[L]` inside a disabled tree is deliberately kept.** Being on disk and
+  outside the policy is a local fact, not a claim about syncing, and wanting one
+  folder inside an unsynced tree is a real wish.
+- **The bench had no case for two of the three.** A folder on disk inside a
+  disabled tree *with a descendant* did not exist in the sample tree, and
+  without it neither consequence appears. Added as `/Books/Keep` and
+  `/Books/Keep/Old`; 15 paths → 17, 227 tests → 232. Putting `disabled` back
+  into the set fails five of them.
+- **Measured on the real snapshot before committing.** `var/sync_policy.json`
+  holds 52 disabled entries and not one that syncs, so the set of synced paths
+  is empty and *every* `[P]` in a whitelist render was false: 687 of 3810 nodes
+  change, 665 to `[.]` and 22 to `[L]`. The daily tree is unaffected — it runs
+  the daemon backend, which never used this set — but `ydm-menu orphans` always
+  renders as a whitelist, and it gains those 22. That configuration now has a
+  bench case of its own.
+
 ## 2026-08-23 — the tree and the menu get checked against a bench
 
 Implements what the previous entry recorded.

@@ -43,14 +43,14 @@ from tools.sync_tree_policy import (  # noqa: E402
     PolicyContext,
     display_marker,
     effective_policy_state,
-    is_under_policy_path,
+    is_under_synced_path,
     load_policy_context,
     local_state,
     path_in_policy,
     policy_entry_for_path,
     policy_mode_for_path,
-    policy_paths_set,
     policy_summary_line,
+    synced_policy_paths_set,
     rel_path_from_cloud,
 )
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
@@ -356,9 +356,15 @@ def compute_status_whitelist(
     node: TreeNode,
     include_dirs: Set[str],
     collapse: bool,
-    policy_paths: Optional[Set[str]] = None,
+    synced_paths: Optional[Set[str]] = None,
     local_root: Optional[str] = None,
 ) -> bool:
+    """Mark the subtree and report whether anything under `node` is synced.
+
+    `synced_paths` holds policy entries that sync something — never `disabled`
+    ones. The distinction is the whole of G6: a disabled entry used to answer
+    this question in the affirmative, which is the opposite of what it means.
+    """
     if is_path_included(node.path, include_dirs):
         _mark_full_subtree(node, collapse)
         return True
@@ -367,7 +373,7 @@ def compute_status_whitelist(
     visible_children: List[TreeNode] = []
     for child in node.children:
         child_has_synced = compute_status_whitelist(
-            child, include_dirs, collapse, policy_paths=policy_paths, local_root=local_root
+            child, include_dirs, collapse, synced_paths=synced_paths, local_root=local_root
         )
         if child_has_synced:
             visible_children.append(child)
@@ -386,12 +392,12 @@ def compute_status_whitelist(
                     continue
                 if local_dir_exists(local_root, child.path):
                     kept.append(child)
-        if policy_paths and is_under_policy_path(node.path, policy_paths):
+        if synced_paths and is_under_synced_path(node.path, synced_paths):
             kept = node.children
         node.children = sorted(kept, key=lambda n: n.name.lower())
     node.visible_children_count = len(node.children)
     return has_synced_descendants or (
-        policy_paths is not None and is_under_policy_path(node.path, policy_paths)
+        synced_paths is not None and is_under_synced_path(node.path, synced_paths)
     )
 
 
@@ -669,7 +675,7 @@ def main() -> None:
     snapshot = selection.snapshot
 
     collapse = False if args.show_all else args.collapse_synced
-    policy_path_set = policy_paths_set(policy_ctx) if use_policy else None
+    synced_path_set = synced_policy_paths_set(policy_ctx) if use_policy else None
 
     local_scan_started = None
     local_scan_error = None
@@ -687,7 +693,7 @@ def main() -> None:
         compute_status(node, membership_dirs, collapse=collapse)
     else:
         compute_status_whitelist(
-            node, membership_dirs, collapse=collapse, policy_paths=policy_path_set,
+            node, membership_dirs, collapse=collapse, synced_paths=synced_path_set,
             local_root=args.local_root,
         )
 

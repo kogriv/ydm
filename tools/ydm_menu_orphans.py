@@ -18,7 +18,7 @@ from tools.sync_tree_cloud import select_snapshot_for_tree
 from tools.sync_tree_policy import (
     load_policy_context,
     path_in_policy,
-    policy_paths_set,
+    synced_policy_paths_set,
 )
 from ydm import Analyzer
 
@@ -141,7 +141,7 @@ def list_orphan_paths(
         node,
         membership,
         collapse=False,
-        policy_paths=policy_paths_set(policy_ctx) if policy_ctx.policy else None,
+        synced_paths=synced_policy_paths_set(policy_ctx) if policy_ctx.policy else None,
         local_root=local_root,
     )
     local_scan_id = get_latest_successful_scan_id(storage, "local")

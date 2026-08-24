@@ -55,9 +55,11 @@ class BenchPath:
     cloud_files: int
     #: Files this folder holds directly in the local scan.
     local_files: int
-    #: Whether the folder exists on the local filesystem. Distinct from
-    #: local_files: a folder can exist and be empty, which is what separates
-    #: "partially materialized" from "missing".
+    #: Whether the folder is created on the local filesystem for its own sake.
+    #: Distinct from local_files: a folder can exist and be empty, which is what
+    #: separates "partially materialized" from "missing". Note that False does
+    #: not promise absence — a folder whose child is created exists too, and
+    #: `/Books/Math` is exactly that case.
     local_dir: bool
     #: What the tree should render under whitelist (rclone) semantics.
     expect_rclone: str
@@ -122,21 +124,38 @@ SAMPLE_TREE: List[BenchPath] = [
     ),
     BenchPath(
         "/Books/Math", None, cloud_files=1, local_files=0, local_dir=False,
-        expect_rclone="[P]", expect_daemon="[X]",
-        why="inside a disabled folder, no entry of its own, and holding a "
+        expect_rclone="[L]", expect_daemon="[X]",
+        why="inside a disabled folder, no entry of its own, holding a "
             "descendant. Daemon inherits the exclusion and says [X]. Whitelist "
-            "says [P] — 'parent of a synced path' — although nothing below it "
-            "is synced: `is_under_policy_path()` counts a *disabled* ancestor "
-            "as a policy path. Asserted as it behaves today, flagged in "
-            "tasks/sync_bench/GAP.md G6; see also /Books/Math/АнГем",
+            "says [L]: it is on disk — not because this row asked for it, but "
+            "because its child did, and a child cannot exist without its "
+            "parent. Until G6 was fixed this rendered [P], 'parent of a synced "
+            "path', although nothing below it syncs",
     ),
     BenchPath(
         "/Books/Math/АнГем", None, cloud_files=1, local_files=1, local_dir=True,
         expect_rclone="[L]", expect_daemon="[X]",
         why="on disk inside a disabled folder. The daemon excludes it. "
-            "Whitelist calls it an orphan, so the menu will offer to add it — "
-            "arguably right (one folder inside an unsynced tree is a real "
-            "wish) and arguably misleading. Same G6 note",
+            "Whitelist calls it an orphan and the menu offers to add it — kept "
+            "deliberately when G6 was fixed: being on disk and outside the "
+            "policy is a local fact, not a claim about syncing, and wanting one "
+            "folder inside an unsynced tree is a real wish",
+    ),
+    BenchPath(
+        "/Books/Keep", None, cloud_files=0, local_files=0, local_dir=True,
+        expect_rclone="[L]", expect_daemon="[X]",
+        why="the same standing as /Books/Math/АнГем — on disk, inside a "
+            "disabled tree, no entry of its own — differing only in having a "
+            "descendant in the snapshot. Under G6 that difference alone turned "
+            "it into [P] and dropped it from the orphan list, so the menu "
+            "offered one of the two identical folders and hid the other",
+    ),
+    BenchPath(
+        "/Books/Keep/Old", None, cloud_files=1, local_files=0, local_dir=False,
+        expect_rclone="[.]", expect_daemon="[X]",
+        why="the descendant that made the difference. It also gives the "
+            "collapsed tree something to expand: under G6 a disabled subtree "
+            "was kept whole, which is the opposite of what collapsing is for",
     ),
     BenchPath(
         "/mix", None, cloud_files=0, local_files=0, local_dir=False,

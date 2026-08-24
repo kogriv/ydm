@@ -210,16 +210,25 @@ def policy_summary_line(ctx: PolicyContext) -> str:
     return ", ".join(parts) if parts else "(no paths in policy)"
 
 
-def policy_paths_set(ctx: PolicyContext) -> Set[str]:
+def synced_policy_paths_set(ctx: PolicyContext) -> Set[str]:
+    """Entries under which something is actually synced.
+
+    `disabled` is deliberately absent. Its callers use this set to ask "does
+    anything below this path sync", and a disabled entry answers the opposite.
+    Counting it made a folder inside an excluded tree render as `[P]` (parent
+    of a synced path), kept excluded subtrees fully expanded in the collapsed
+    tree, and dropped folders from the orphan list. See
+    `tasks/sync_bench/GAP.md` G6.
+    """
     result: Set[str] = set()
-    for group in (ctx.bidirectional, ctx.download_only, ctx.disabled):
+    for group in (ctx.bidirectional, ctx.download_only):
         result.update(group)
     return result
 
 
-def is_under_policy_path(path: str, policy_paths: Set[str]) -> bool:
+def is_under_synced_path(path: str, synced_paths: Set[str]) -> bool:
     rel = rel_path_from_cloud(path)
-    for entry in policy_paths:
+    for entry in synced_paths:
         if rel == entry or rel.startswith(entry + "/"):
             return True
     return False

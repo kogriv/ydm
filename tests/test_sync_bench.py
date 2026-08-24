@@ -199,6 +199,101 @@ class TestTreeCli(BenchTestCase):
         self.assertEqual(payload["root"]["markers"]["display"], "[P]")
 
 
+class TestDisabledIsNotSynced(BenchTestCase):
+    """G6: a `disabled` entry used to answer "is anything synced below here?".
+
+    One conflation, three wrong answers — a false `[P]`, an excluded subtree
+    kept whole by the mode whose job is to hide unsynced branches, and an
+    orphan dropped from the menu. Each gets its own check, because each could
+    come back on its own.
+    """
+
+    def _collapsed_tree(self, backend="rclone"):
+        """The default view: collapse on, which is what a person actually sees."""
+        proc = self.run_tool(
+            "sync_tree.py", "--path", "/", "--depth", "4",
+            "--format", "json", "--schema", "sync_tree:v2",
+            "--no-local-scan", *self.bench.cli_args(backend),
+        )
+        return json.loads(proc.stdout)["root"]
+
+    @staticmethod
+    def _find(node, path):
+        if node["path"] == path:
+            return node
+        for child in node.get("children") or []:
+            found = TestDisabledIsNotSynced._find(child, path)
+            if found:
+                return found
+        return None
+
+    def test_nothing_inside_a_disabled_tree_claims_a_synced_child(self):
+        markers = render_markers(self.bench, "rclone", depth=4)
+        inside = {p: m for p, m in markers.items() if p.startswith("/Books/")}
+        self.assertTrue(inside, "the sample tree has stopped covering /Books")
+        self.assertNotIn("[P]", inside.values(), inside)
+
+    def test_the_collapsed_tree_stops_expanding_a_disabled_subtree(self):
+        """Collapse shows synced branches; a disabled one is the opposite.
+
+        What survives under `[X]` is only what a separate, deliberate rule
+        keeps — folders that exist on disk, so a local orphan is never hidden.
+        `/Books/Keep/Old` is in the cloud and nowhere else, and it is exactly
+        what the whole-subtree expansion used to drag into the view.
+        """
+        root = self._collapsed_tree()
+        books = self._find(root, "/Books")
+        self.assertIsNotNone(books)
+        self.assertEqual(books["markers"]["display"], "[X]")
+        self.assertIsNone(self._find(books, "/Books/Keep/Old"), "cloud-only child kept")
+        for child in books.get("children") or []:
+            self.assertTrue(
+                os.path.isdir(os.path.join(self.bench.local_root, child["path"].lstrip("/"))),
+                f"{child['path']} is under [X] and not on disk",
+            )
+
+    def test_collapsing_still_keeps_a_synced_subtree_whole(self):
+        """The other direction: the fix must not turn collapse into a blunt cut."""
+        root = self._collapsed_tree()
+        shared = self._find(root, "/shared")
+        self.assertIsNotNone(shared)
+        self.assertEqual(
+            [c["path"] for c in shared.get("children") or []], ["/shared/live"]
+        )
+
+    def test_a_policy_that_syncs_nothing_says_so(self):
+        """The live configuration, and the one this fix moves the most.
+
+        `var/sync_policy.json` on the working machine holds 52 disabled entries
+        and not one that syncs — so the set of synced paths is empty and every
+        `[P]` in that tree was false. Measured on the real snapshot on
+        2026-08-24: 687 of 3810 nodes changed, 665 to `[.]` and 22 to `[L]`.
+        Since the tree here is a whitelist render, this is worth its own case.
+        """
+        policy = self.bench.read_policy()
+        policy["paths"] = {
+            name: meta for name, meta in policy["paths"].items()
+            if meta["mode"] == "disabled"
+        }
+        self.assertTrue(policy["paths"], "the sample tree has stopped covering [X]")
+        with open(self.bench.policy_path, "w", encoding="utf-8") as handle:
+            json.dump(policy, handle, ensure_ascii=False)
+
+        markers = render_markers(self.bench, "rclone", depth=4)
+        self.assertNotIn("[P]", markers.values(), markers)
+        self.assertNotIn("[B]", markers.values(), markers)
+        # Nothing is synced, so the disk is exactly what is on it and what is
+        # only in the cloud.
+        self.assertEqual(set(markers.values()) - {"[X]"}, {"[L]", "[.]"}, markers)
+
+        proc = self.run_tool(
+            "ydm_menu.py", *self.bench.cli_args("rclone"), "orphans"
+        )
+        listed = {e["cloud_path"] for e in json.loads(proc.stdout)["orphans"]}
+        self.assertNotIn("/", listed, "the sync root offered as an orphan")
+        self.assertTrue(listed)
+
+
 class TestPathConventions(BenchTestCase):
     """The regression that would have caught the 2026-08-16 defect.
 
@@ -268,6 +363,19 @@ class TestMenuOnBench(BenchTestCase):
         self.assertEqual(payload["count"], len(expected), payload)
         for entry in payload["orphans"]:
             self.assertEqual(entry["display_marker"], "[L]")
+
+    def test_an_orphan_is_not_hidden_by_having_a_descendant(self):
+        """G6, third consequence, and the worst of the three.
+
+        `/Books/Math` and `/Books/Keep` stand identically: on disk, inside a
+        disabled tree, with no entry of their own. Only one has a child in the
+        snapshot, and that alone used to decide which of them the menu offered.
+        A missing row cannot be told apart from "not an orphan" by reading the
+        output, so this failed silently.
+        """
+        listed = {e["cloud_path"] for e in json.loads(self.menu("orphans").stdout)["orphans"]}
+        self.assertIn("/Books/Keep", listed)
+        self.assertIn("/Books/Math", listed)
 
     def test_the_orphan_list_agrees_with_the_tree(self):
         """Two ways of asking the same question must not diverge.
