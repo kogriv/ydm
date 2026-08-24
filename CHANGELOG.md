@@ -29,10 +29,13 @@ touches the index and not the history.
 - **The cost was smaller than the risk register claimed.** "Rewriting breaks
   hash references in the docs" turned out to be exactly one document: this
   task's own, written the same day.
-- **What a rewrite does not do:** old objects stay reachable by direct SHA on
-  GitHub's side until it garbage-collects. That is harmless while the
-  repository is private and is now a check to run before flipping visibility
-  ([`tasks/opensource/BACKLOG.md`](tasks/opensource/BACKLOG.md) 4.5).
+- **A rewrite is not enough, and this was checked rather than assumed.** After
+  the force-push both servers still hand over the old commit — and the file —
+  by direct SHA: `gh api "…/contents/junk_list.txt?ref=<old sha>"` returns its
+  24 888 bytes, and GitLab serves the same commit to `git fetch`. Force-pushing
+  moves a branch; the objects survive until garbage collection. Harmless while
+  the repository is private, and a blocker for publishing, so it is now
+  Phase 5 rather than a footnote. There are no forks, so nothing propagated.
 
 ## 2026-08-24 — the commands the README opens with now exist
 
