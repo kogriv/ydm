@@ -552,8 +552,16 @@ def fetch_child_dirs(
 # --- rclone bisync (tasks/rclone_backend, bidirectional sync) ---------------
 
 def var_path(*parts: str) -> str:
-    """Resolves a path under the project's var/ dir, regardless of cwd."""
-    return os.path.join(PROJECT_ROOT, "var", *parts)
+    """Resolves a path under the project's var/ dir, regardless of cwd.
+
+    `YDM_VAR_DIR` redirects that directory. It exists for the test bench: the
+    log and state paths here are *derived*, never passed in, so `rclone copy`
+    run against a temporary remote still appended to the live `var/copy.log`
+    and overwrote the live `var/copy_last.log`. No argument could have stopped
+    it — see `tasks/android_verify/GAP.md`.
+    """
+    base = os.environ.get("YDM_VAR_DIR") or os.path.join(PROJECT_ROOT, "var")
+    return os.path.join(base, *parts)
 
 
 def rclone_bisync_run(

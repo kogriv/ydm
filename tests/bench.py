@@ -199,6 +199,17 @@ class Bench:
     local_root: str
     policy_path: str
     exclude_config: str
+    #: A real directory holding the same files the cloud snapshot describes, so
+    #: an rclone remote can be pointed at it. Everything else about the bench
+    #: answers "what does the system say"; this is what lets a check ask what
+    #: it actually does with files.
+    cloud_root: str = ""
+    #: An rclone.conf of its own — never the live one. See _rclone_conf().
+    rclone_config: str = ""
+    #: Stands in for the project's var/. Some tools derive log and state paths
+    #: from PROJECT_ROOT rather than from arguments, so without this the bench
+    #: writes into the live var/ no matter what it is told.
+    var_dir: str = ""
     cloud_scan_id: int = 1
     local_scan_id: int = 2
     #: Paths deliberately left absent from every real location, so a test that
@@ -214,6 +225,20 @@ class Bench:
             "--backend", backend,
         ]
 
+    def env(self) -> Dict[str, str]:
+        """Environment that keeps a subprocess inside the bench.
+
+        A home of its own, and an rclone.conf of its own: `rclone listremotes`
+        reads `RCLONE_CONFIG` before anything else, so without this a check
+        would silently address the live `yandex:` remote.
+        """
+        return {
+            **os.environ,
+            "HOME": str(self.root / "home"),
+            "RCLONE_CONFIG": self.rclone_config,
+            "YDM_VAR_DIR": self.var_dir,
+        }
+
     def read_policy(self) -> dict:
         with open(self.policy_path, encoding="utf-8") as handle:
             return json.load(handle)
@@ -226,6 +251,31 @@ def _rel(path: str) -> str:
 def _cloud_parent(path: str) -> str:
     """Cloud rows store parent_path with a leading slash; root is ''."""
     return "" if path in ("", "/") else path
+
+
+#: Characters Android's shared storage refuses and rclone can encode around.
+#: See tasks/android_verify/GAP.md — the `android` remote below models that
+#: refusal on this machine, which is the only part of it that can be modelled.
+ANDROID_ENCODING = "Slash,Dot,Colon,Pipe"
+
+
+def _rclone_conf(cloud_root: str) -> str:
+    """Two remotes, both local, standing in for two different things.
+
+    `cloud:` is an alias so that `cloud:pro` resolves against the bench's fake
+    cloud rather than the current directory — the code under test builds
+    remote paths as `{remote}:{path}`, and a bare `type = local` remote would
+    quietly interpret those relative to wherever the test happened to run.
+    """
+    return (
+        "[cloud]\n"
+        "type = alias\n"
+        f"remote = {cloud_root}\n"
+        "\n"
+        "[android]\n"
+        "type = local\n"
+        f"encoding = {ANDROID_ENCODING}\n"
+    )
 
 
 def build_bench(tmpdir: str, *, base_age_days: int = 1) -> Bench:
@@ -264,6 +314,25 @@ def build_bench(tmpdir: str, *, base_age_days: int = 1) -> Bench:
     for entry in SAMPLE_TREE:
         if entry.local_dir:
             (local_root / _rel(entry.path)).mkdir(parents=True, exist_ok=True)
+
+    # 3a. The cloud as actual files, and an rclone.conf that reaches them.
+    #     The snapshot in the database says what is in the cloud; this says the
+    #     same thing in a form rclone can read, so the rclone-backed code paths
+    #     can run for real without a device and without the live remote.
+    cloud_root = root / "cloud"
+    cloud_root.mkdir(parents=True, exist_ok=True)
+    for entry in SAMPLE_TREE:
+        folder = cloud_root / _rel(entry.path) if _rel(entry.path) else cloud_root
+        folder.mkdir(parents=True, exist_ok=True)
+        for i in range(entry.cloud_files):
+            (folder / f"f{i}.txt").write_text("x" * 10, encoding="utf-8")
+
+    rclone_config = str(root / "rclone.conf")
+    with open(rclone_config, "w", encoding="utf-8") as handle:
+        handle.write(_rclone_conf(str(cloud_root)))
+
+    var_dir = root / "var"
+    var_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. The cloud snapshot and the local scan, in one database.
     storage = StorageManager(db_path, use_temp_storage=False, config=dict(DEFAULT_CONFIG))
@@ -315,6 +384,9 @@ def build_bench(tmpdir: str, *, base_age_days: int = 1) -> Bench:
         local_root=str(local_root),
         policy_path=policy_path,
         exclude_config=exclude_config,
+        cloud_root=str(cloud_root),
+        rclone_config=rclone_config,
+        var_dir=str(var_dir),
         guarded=(
             str(ROOT_DIR / "monitor.db"),
             str(ROOT_DIR / "var" / "sync_policy.json"),
@@ -339,7 +411,7 @@ def render_markers(bench: Bench, backend: str, *, depth: int = 3) -> Dict[str, s
             *bench.cli_args(backend),
         ],
         capture_output=True, text=True, check=False,
-        env={**os.environ, "HOME": str(bench.root / "home")},
+        env=bench.env(),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"sync_tree failed ({proc.returncode}): {proc.stderr[-2000:]}")

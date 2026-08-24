@@ -5,6 +5,43 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-24 — the rclone paths get exercised, without a device
+
+"On Android `ydm-menu` works through rclone" had been the last open checklist
+item since August 16, blocked on "needs a second machine". It was three checks
+in one line, and two of them were never about the device. Written up in
+[`tasks/android_verify/`](tasks/android_verify/README.md); 232 tests → 240.
+
+- **The bench grew a cloud.** A real directory of files matching the snapshot,
+  plus an `rclone.conf` of its own with `cloud:` as an *alias* remote — a bare
+  `type = local` would resolve `cloud:pro` against the current directory, so a
+  check could have quietly answered a different question.
+- **Eight rclone-backed checks now run for real**: the menu over `--backend
+  rclone`, `rclone lsf` (the mechanism behind `ydm-sync-pick`), `rclone copy`
+  through `sync_filters add --apply`, and `bisync` — `resync --apply`
+  establishes the baseline and a plain `run` stays a dry run. Whether bisync
+  could be covered at all was an open question in the backlog; it can.
+- **This is the first time the bench answers what the system *does* with
+  files**, not only what it says. The boundary recorded in
+  `tasks/sync_bench/` moved, and that claim was corrected rather than left
+  standing.
+- **`YDM_VAR_DIR`, because the bench could not isolate what writes logs.** The
+  first check that reached a real `rclone copy` wrote into the project's live
+  `var/` — `rclone_copy_materialize()` and `rclone_bisync_run()` derive their
+  log paths from `PROJECT_ROOT`, and no argument reaches them. A mutation run
+  later dropped a `bisync_state.json` there too: a sync baseline, on a machine
+  that does not use bisync. One override in `var_path()` redirects all 36 call
+  sites, and a guard compares the live logs' mtimes across a bench run.
+- **A skip is not a pass.** GitHub Actions has no rclone, so those eight are
+  skipped there — verified by running with rclone off `PATH` (`skipped=8`, no
+  failures). Keeping them green is the developer machine's job, and that is
+  worth remembering when reading "CI is green".
+- **Still open, and still needing a device:** whether adding `Colon,Pipe` to
+  the local backend's encoding clears `operation not permitted` on `/sdcard`.
+  What is now pinned locally is the mechanism — with the encoding set, `|` and
+  `:` never reach the disk and `lsf` gives the original name back, where the
+  repair script recovers nothing.
+
 ## 2026-08-24 — a disabled folder stops counting as a synced one
 
 G6 was recorded yesterday as a wrong marker. It is one conflation with three

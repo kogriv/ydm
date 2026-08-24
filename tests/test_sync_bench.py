@@ -49,7 +49,7 @@ class BenchTestCase(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(ROOT_DIR / "tools" / script), *args],
             capture_output=True, text=True, check=False,
-            env={**os.environ, "HOME": str(self.bench.root / "home")},
+            env=self.bench.env(),
         )
         if expect_ok:
             self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
@@ -405,6 +405,217 @@ class TestMenuOnBench(BenchTestCase):
         self.menu("orphans")
         render_markers(self.bench, "rclone")
         self.assertEqual(before, self.bench.read_policy())
+
+
+class TestRcloneOnTheBench(BenchTestCase):
+    """The rclone-backed paths, run for real against a local remote.
+
+    These close the cheap two thirds of "on Android `ydm-menu` works through
+    rclone", which sat blocked on "needs a second machine" since 2026-08-16.
+    Most of it was never about the device: it was about rclone, and rclone will
+    happily address a directory. See `tasks/android_verify/GAP.md`.
+
+    Unlike everything above, this reaches past "what does the system say" and
+    into what it does with files — `sync_filters add --apply` really copies
+    them.
+    """
+
+    def setUp(self):
+        if shutil.which("rclone") is None:
+            self.skipTest("rclone is not installed here (nor in CI)")
+        super().setUp()
+
+    def rclone(self, *args, expect_ok=True):
+        proc = subprocess.run(
+            ["rclone", *args], capture_output=True, text=True, check=False,
+            env=self.bench.env(),
+        )
+        if expect_ok:
+            self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        return proc
+
+    def test_the_bench_remote_is_the_only_one_in_reach(self):
+        """The isolation guard for this class.
+
+        `rclone listremotes` reads RCLONE_CONFIG first, so if the bench failed
+        to set it, the live `yandex:` remote would answer instead — and every
+        check below would pass while talking to the real cloud.
+        """
+        listed = sorted(self.rclone("listremotes").stdout.split())
+        self.assertEqual(listed, ["android:", "cloud:"], listed)
+
+    def test_the_fake_cloud_holds_what_the_snapshot_claims(self):
+        """Two descriptions of the same cloud must not drift apart."""
+        listed = {
+            line.rstrip("/") for line in
+            self.rclone("lsf", "cloud:", "--dirs-only").stdout.splitlines() if line.strip()
+        }
+        expected = {
+            entry.path.strip("/") for entry in SAMPLE_TREE
+            if entry.path != "/" and "/" not in entry.path.strip("/")
+        }
+        self.assertEqual(listed, expected)
+
+    def test_list_cloud_children_is_the_pick_mechanism(self):
+        """`ydm-sync-pick` exists so nobody types Cyrillic folder names by hand.
+
+        It lists the children of a folder through `rclone lsf`; this is that
+        call, through the backend object the menu actually uses.
+        """
+        from tools.sync_backends import RcloneBackend
+
+        backend = RcloneBackend(
+            remote="cloud", db_path=self.bench.db_path,
+            local_root=self.bench.local_root, policy_path=self.bench.policy_path,
+        )
+        os.environ["RCLONE_CONFIG"] = self.bench.rclone_config
+        try:
+            self.assertEqual(backend.list_cloud_children("/Books"), ["Keep", "Math"])
+            self.assertIn("АнГем", backend.list_cloud_children("/Books/Math"))
+        finally:
+            os.environ.pop("RCLONE_CONFIG", None)
+
+    def test_the_menu_answers_the_same_with_a_remote_configured(self):
+        """The checklist item as written: does the menu still work over rclone."""
+        proc = self.run_tool(
+            "ydm_menu.py", *self.bench.cli_args("rclone"), "--remote", "cloud", "orphans",
+        )
+        from_menu = {e["cloud_path"] for e in json.loads(proc.stdout)["orphans"]}
+        from_tree = {
+            path for path, marker in render_markers(self.bench, "rclone").items()
+            if marker == "[L]"
+        }
+        self.assertEqual(from_menu, from_tree)
+
+    def test_adding_a_path_actually_copies_the_files(self):
+        """Policy → filter file → rclone → files on disk, end to end.
+
+        `sync_filters add --apply` writes the filter and then materializes it
+        with `rclone copy`. Nothing above this line in the file checks that a
+        file ever moves.
+
+        Note the output shape: rclone streams its own progress to stdout ahead
+        of the JSON, deliberately — on a real folder the copy runs for minutes
+        and buffering it would look like a hang.
+        """
+        target = os.path.join(self.tmpdir, "materialized")
+        filter_path = os.path.join(self.tmpdir, "sync.filters")
+        proc = self.run_tool(
+            "sync_filters.py", "add", "--path", "/pro",
+            "--db-path", self.bench.db_path, "--local-root", target,
+            "--filter-path", filter_path, "--remote", "cloud",
+            "--format", "json", "--apply",
+        )
+        payload = json.loads(proc.stdout[proc.stdout.index("{"):])["data"]
+        self.assertIsNone(payload.get("error"), payload)
+        self.assertEqual(payload["materialize"]["returncode"], 0, payload["materialize"])
+
+        copied = sorted(os.listdir(os.path.join(target, "pro")))
+        expected = sorted(
+            f"f{i}.txt" for i in range(
+                next(e.cloud_files for e in SAMPLE_TREE if e.path == "/pro")
+            )
+        )
+        self.assertEqual(copied, expected)
+        with open(filter_path, encoding="utf-8") as handle:
+            self.assertIn("pro", handle.read())
+
+    def test_the_copy_logs_land_in_the_bench_and_not_in_the_project(self):
+        """The isolation hole this phase found, pinned so it cannot come back.
+
+        `rclone_copy_materialize()` derives its log paths from PROJECT_ROOT, so
+        before `YDM_VAR_DIR` existed a bench run appended to the live
+        `var/copy.log` and overwrote the live `var/copy_last.log` — the
+        operational logs, on a machine that syncs 1.5 TB. No argument could
+        redirect it, because no argument reaches it.
+        """
+        live_var = ROOT_DIR / "var"
+        before = {
+            name: (live_var / name).stat().st_mtime
+            for name in ("copy.log", "copy_last.log")
+            if (live_var / name).exists()
+        }
+
+        target = os.path.join(self.tmpdir, "materialized2")
+        self.run_tool(
+            "sync_filters.py", "add", "--path", "/pro",
+            "--db-path", self.bench.db_path, "--local-root", target,
+            "--filter-path", os.path.join(self.tmpdir, "s2.filters"),
+            "--remote", "cloud", "--format", "json", "--apply",
+        )
+
+        self.assertIn("copy_last.log", os.listdir(self.bench.var_dir))
+        for name, mtime in before.items():
+            self.assertEqual(
+                (live_var / name).stat().st_mtime, mtime,
+                f"the bench wrote to the live var/{name}",
+            )
+
+    def test_bisync_establishes_a_baseline_and_then_runs_dry(self):
+        """The one that moves files in both directions, so the one worth pinning.
+
+        It was an open question whether bisync could be covered here at all;
+        it can. `resync --apply` establishes the baseline and materializes the
+        folder, and a plain `run` stays a dry run — which is the default the
+        scheduled job depends on.
+        """
+        target = os.path.join(self.tmpdir, "bisync_local")
+        os.makedirs(target)
+        filter_path = os.path.join(self.tmpdir, "bisync.filters")
+        with open(filter_path, "w", encoding="utf-8") as handle:
+            handle.write("+ /pro/**\n- *\n")
+
+        def bisync(*args):
+            proc = self.run_tool(
+                "sync_bisync.py", *args,
+                "--db-path", self.bench.db_path, "--local-root", target,
+                "--filter-path", filter_path, "--remote", "cloud",
+                "--policy-path", self.bench.policy_path,
+                "--format", "json", "--no-check-access",
+            )
+            body = proc.stdout[proc.stdout.index("{"):]
+            payload = json.loads(body)
+            return payload.get("data", payload)
+
+        baseline = bisync("resync", "--apply")
+        self.assertIsNone(baseline.get("error"), baseline)
+        self.assertFalse(baseline["dry_run"])
+        self.assertEqual(sorted(os.listdir(os.path.join(target, "pro"))), ["f0.txt", "f1.txt"])
+
+        following = bisync("run")
+        self.assertIsNone(following.get("error"), following)
+        self.assertTrue(following["dry_run"], "a plain `run` must not write")
+
+    def test_a_restricted_name_survives_an_encoded_remote(self):
+        """The mechanism behind the Android filename failure, modelled locally.
+
+        Android's shared storage refuses `|` and `:`, and today the answer is
+        to repair the names afterwards — by which point the original is gone.
+        rclone's `encoding` option substitutes full-width characters on write
+        and gives the original name back on read, so nothing is lost.
+
+        What this does *not* show is that the same setting clears
+        `operation not permitted` on a device: the refusal comes from the
+        filesystem, and encoding acts before it. That check needs Android and
+        is `tasks/android_verify/BACKLOG.md` 2.2.
+        """
+        src = os.path.join(self.tmpdir, "restricted_src")
+        dst = os.path.join(self.tmpdir, "restricted_dst")
+        os.makedirs(src)
+        original = "Agents Week 2026 | notes:draft.pdf"
+        with open(os.path.join(src, original), "w", encoding="utf-8") as handle:
+            handle.write("x")
+
+        self.rclone("copy", src, f"android:{dst}")
+
+        on_disk = os.listdir(dst)
+        self.assertEqual(len(on_disk), 1, on_disk)
+        self.assertNotEqual(on_disk[0], original, "nothing was encoded")
+        self.assertNotIn("|", on_disk[0])
+        self.assertNotIn(":", on_disk[0])
+
+        read_back = self.rclone("lsf", f"android:{dst}").stdout.strip()
+        self.assertEqual(read_back, original, "the encoding does not round-trip")
 
 
 class TestMenuHeader(BenchTestCase):
