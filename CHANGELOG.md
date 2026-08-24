@@ -5,6 +5,35 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-24 — the history no longer carries someone's file listing
+
+**Every commit hash before this entry has changed.** The repository's history
+was rewritten with `git filter-repo` to drop about 84 KB of the owner's
+personal file listing — `junk_list.txt`, `junk_list.txt.old`,
+`deleted.log.old`, `junk_analysis.json`, `cleanup_paths.txt` — which had been
+committed in the initial commit and only ever removed from the working tree.
+A January readiness report ticked this off with `git rm --cached`, which
+touches the index and not the history.
+
+- **Nothing leaked.** The repository has been private throughout, and all 405
+  blobs in the new history scan clean for token patterns, as the old ones did.
+- **A third party's name went with it**, replaced by `Sample` in the same pass.
+  That decision belonged with the rewrite, not after it: publishing makes
+  anything in history public permanently, so cleaning the working tree
+  afterwards would have been theatre. The owner's own folder names stay —
+  the repository carries their name anyway.
+- **Rehearsed before it was run**: a full `git bundle` first, then the whole
+  rewrite on a throwaway clone — five files gone, tracked file list unchanged,
+  240 tests green, rescan clean, `.git` down from 4.1 MB to 1.8 MB — and only
+  then the real thing.
+- **The cost was smaller than the risk register claimed.** "Rewriting breaks
+  hash references in the docs" turned out to be exactly one document: this
+  task's own, written the same day.
+- **What a rewrite does not do:** old objects stay reachable by direct SHA on
+  GitHub's side until it garbage-collects. That is harmless while the
+  repository is private and is now a check to run before flipping visibility
+  ([`tasks/opensource/BACKLOG.md`](tasks/opensource/BACKLOG.md) 4.5).
+
 ## 2026-08-24 — the commands the README opens with now exist
 
 Preparing the repository for publication
