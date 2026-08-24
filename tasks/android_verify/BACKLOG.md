@@ -13,7 +13,7 @@
 |----|------|--------|
 | 0.1 | Разбор: что в пункте действительно про Android | ✅ [`GAP.md`](./GAP.md) |
 | 0.2 | Бэклог | ✅ this file |
-| 0.3 | Ссылка из `sync_unification` вместо глухого «нужна вторая машина» | ⬜ `tasks/sync_unification/BACKLOG.md:183` |
+| 0.3 | Ссылка из `sync_unification` вместо глухого «нужна вторая машина» | ✅ `tasks/sync_unification/BACKLOG.md:183` |
 
 ---
 
