@@ -5,6 +5,53 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-24 — a failing command now exits non-zero
+
+**Behaviour change for every command.** `ydm.py` used to exit 0 whatever
+happened — "token not found", "scan failed", "another scan is already
+running" all printed an error and returned success. `ydm.py … && next-step`
+ran the next step regardless, and the two callers in `tools/sync_backends.py`
+that build `"error": None if returncode == 0 else …` could never see a
+failure they were written to catch.
+
+- **Three lines, not twenty-one.** The gap analysis expected a change at every
+  site that prints an error. It wasn't needed: they all go through `render()`,
+  so `render()` now remembers that it printed a failure, `run()` returns the
+  "was this command handled" answer it used to discard, and `__main__` turns
+  the two into an exit code. No handler was touched — which is also why the
+  defect survived so long: their `return True` means "I handled this", and
+  reads like "this went well".
+- **`run()` returned nothing at all**, so the first cut of the fix failed
+  every command including `init`. Caught by the tests, not by reading.
+- **One of the new tests passed for the wrong reason** and was rewritten: the
+  report type is a positional argument, so `report --type scan-info` made
+  argparse reject an unknown flag and exit 2. Non-zero, unrelated, and green
+  against the old code too. The docstring now says so.
+- Six tests, 240 → 246. Removing the `sys.exit(...)` fails three of them.
+
+## 2026-08-24 — publication decisions, and the January report comes in from the cold
+
+Answers to the four open questions in
+[`tasks/opensource/`](tasks/opensource/BACKLOG.md) Phase 4.
+
+- **The incident write-up gets published as it stands.** Honest accounts of an
+  AI agent deleting live data are rare enough to be worth more than the
+  awkwardness.
+- **`tasks/` stays in Russian, and the README says so** rather than leaving a
+  reader to work it out: Yandex Disk is a Russian service and so are most of
+  the people auditing one. The English side is meant to stand alone, and a
+  place where it doesn't is a bug worth reporting.
+- **The repository has a description and topics** — `yandex-disk`, `rclone`,
+  `sync`, `bisync`, `backup`, `cli`, `python`.
+- **January's readiness report is now a tracked document**
+  ([`tasks/opensource/2026-01-30-readiness-report.md`](tasks/opensource/2026-01-30-readiness-report.md))
+  with a preface saying where it was right and where it was wrong. It had been
+  gitignored, so the choice was never "publish it or not" — it was "keep it or
+  lose it". Deleting an untracked file is permanent; leaving it alone was
+  worse, since it claims "ready, 9/10" and someone would believe that again.
+  Keeping it with the correction also repairs a dangling reference: the audit
+  cites it, and no reader could find it.
+
 ## 2026-08-24 — the history no longer carries someone's file listing
 
 **Every commit hash before this entry has changed.** The repository's history

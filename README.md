@@ -393,6 +393,14 @@ ydm-sync-add /Projects/2024
 ```
 ## Documentation
 
+> **A note on language.** This README, `docs/` and the code are in English.
+> The `tasks/` tree — gap analyses, design docs and backlogs, about two thirds
+> of the writing here — is in Russian, and stays that way by choice rather than
+> by neglect: Yandex Disk is a Russian service and so are most of the people
+> who audit one. The English side is meant to stand on its own; if something on
+> it is unclear because the reasoning lives only in `tasks/`, that is a bug
+> worth reporting.
+
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Full project documentation, architecture, implementation details
 - **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Quick start for AI assistants and automation
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples

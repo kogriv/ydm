@@ -1231,5 +1231,74 @@ class TestLongPaths(AnalyzerTestCase):
         self.assertEqual(result["long_paths"][1]["path"], f"A/{long_name}")
 
 
+class TestExitCodes(unittest.TestCase):
+    """`ydm.py` as a program: does a failure look like one to the shell?
+
+    Until 2026-08-24 every command exited 0, including "token not found" and
+    "scan failed" — handlers return True for "I handled this", not for "it
+    went well", and `__main__` discarded the result. So `ydm.py … && next`
+    ran `next` after any error, and the two callers in tools/sync_backends.py
+    that already test the return code could never see a failure.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="ydm_exit_")
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def ydm(self, *args):
+        import subprocess
+
+        return subprocess.run(
+            [sys.executable, str(ROOT_DIR / "ydm.py"), "--db-path", self.db_path, *args],
+            capture_output=True, text=True, check=False,
+            env={**os.environ, "HOME": self.tmpdir, "YDM_VAR_DIR": self.tmpdir},
+        )
+
+    def test_success_is_zero(self):
+        proc = self.ydm("init")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_a_rendered_failure_is_not_zero(self):
+        """`scan local` with no path anywhere: a real failure, plainly stated."""
+        proc = self.ydm("scan", "local")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("No local path", proc.stdout)
+
+    def test_the_json_payload_and_the_exit_code_agree(self):
+        """Two ways of reporting the same outcome must not contradict."""
+        import json as _json
+
+        proc = self.ydm("--format", "json", "scan", "local")
+        payload = _json.loads(proc.stdout)
+        self.assertFalse(payload["success"], payload)
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_a_missing_scan_id_fails(self):
+        """A second failure path, so the check is not pinned to one message.
+
+        Note the syntax: the report type is positional. Written as
+        `report --type scan-info` this test passed against the old code too —
+        argparse rejected the unknown flag and exited 2, which is non-zero for
+        an entirely unrelated reason.
+        """
+        self.ydm("init")
+        proc = self.ydm("report", "scan-info")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("--scan-id required", proc.stdout)
+
+    def test_a_working_report_is_zero(self):
+        """The other direction: an ordinary report must not start failing."""
+        self.ydm("init")
+        proc = self.ydm("report", "scan-list")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_help_is_still_zero(self):
+        """argparse exits on its own; --help must not be dragged into failing."""
+        self.assertEqual(self.ydm("--help").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

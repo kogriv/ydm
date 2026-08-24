@@ -29,7 +29,7 @@ def cleanup_tmpfs_on_exit():
         try:
             os.remove(tmpfs_path)
         except:
-            pass
+            sys.exit(0 if handled and not cli.failed else 1)
 
 # Signal handler for graceful shutdown
 def handle_signal(signum, frame):
@@ -2801,6 +2801,11 @@ class YDM_CLI:
     """Command Line Interface for Yandex Disk Monitor."""
     
     def __init__(self):
+        #: Set by render() whenever it prints a failure. Command handlers
+        #: return True for "I handled this", not for "it went well", so the
+        #: exit code is derived here rather than threaded through ~21 call
+        #: sites — see tasks/opensource/GAP.md G4a.
+        self.failed = False
         self.parser = argparse.ArgumentParser(
             description="YDM - Yandex Disk Monitor & Auditor",
             formatter_class=argparse.RawDescriptionHelpFormatter
@@ -2864,7 +2869,9 @@ class YDM_CLI:
         report_parser.add_argument("--keep-root-scans", type=int, default=2, help="prune: how many recent root-covering cloud scans to keep")
 
     def render(self, data, success=True):
-        """Renders output in chosen format."""
+        """Renders output in chosen format, and remembers a failure."""
+        if not success:
+            self.failed = True
         if self.args.format == "json":
             print(json.dumps({"success": success, "data": data}, ensure_ascii=False, indent=2))
         else:
@@ -2885,10 +2892,13 @@ class YDM_CLI:
         if storage.temp_mode and not os.path.exists(storage.db_path):
             storage.init_db()
         
-        if self.command_handler(storage):
-            pass
-        else:
+        handled = self.command_handler(storage)
+        if not handled:
+            # No handler claimed the command — argparse usually catches this
+            # first, so reaching here means the help text is the answer, and
+            # that is not a success.
             self.parser.print_help()
+        return handled
 
     def command_handler(self, storage):
         if self.args.command == "init":
@@ -3305,4 +3315,10 @@ class YDM_CLI:
 
 if __name__ == "__main__":
     cli = YDM_CLI()
-    cli.run()
+    handled = cli.run()
+    # Until 2026-08-24 this line was `cli.run()` with the result discarded, so
+    # every command exited 0 — including "token not found" and "scan failed".
+    # `ydm.py … && next-step` ran next-step regardless, and callers that
+    # already checked the return code (tools/sync_backends.py) could never see
+    # a failure.
+    sys.exit(0 if handled and not cli.failed else 1)
