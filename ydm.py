@@ -183,8 +183,10 @@ DEFAULT_CONFIG = {
     "full_scan_fresh_window_days": 2,
     # Optional explicit reference full scan ID (can be overridden by user/config)
     "reference_full_scan_id": None,
-    # Default local mirror path used by `scan local` when --path is omitted
-    "local_root": "/data/ya_disk",
+    # Local mirror path used by `scan local` when --path is omitted. There is
+    # no default that could be right on someone else's machine, so it is unset
+    # here and `scan local` says what to do rather than guessing.
+    "local_root": None,
     # rclone remote name used by --backend rclone (see tasks/rclone_backend/README.md)
     "rclone_remote": "yandex",
     # yandex-disk daemon's exclude-dirs config; on --backend rclone this is
@@ -2951,7 +2953,14 @@ class YDM_CLI:
 
             if self.args.target == "local":
                 start_time = time.time()
-                local_path = self.args.path if self.args.path else self.args.config.get("local_root", "/data/ya_disk")
+                local_path = self.args.path or self.args.config.get("local_root")
+                if not local_path:
+                    self.render(
+                        "No local path. Pass --path /your/mirror, or set "
+                        "\"local_root\" in ydm_config.json for the active profile.",
+                        success=False,
+                    )
+                    return True
                 scan_id = storage.start_scan("local", scan_root=local_path)
                 try:
                     if not os.path.exists(local_path):

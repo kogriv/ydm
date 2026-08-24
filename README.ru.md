@@ -4,23 +4,52 @@
 
 Инструмент для глубокого анализа состояния Яндекс.Диска, сверки локальной копии с облаком и отслеживания динамики изменений.
 
-## Быстрая памятка (алиасы)
+## Быстрая памятка
+
+Сразу после клонирования, без какой-либо настройки:
 
 ```bash
-ydm
+python3 ydm.py --help
+python3 tools/sync_tree.py --help
+```
+
+Когда есть токен или remote в rclone (см. [Installation](#installation))
+и база:
+
+```bash
+python3 ydm.py init
+python3 ydm.py scan cloud --progress
+python3 ydm.py scan local --path /путь/к/вашей/копии
+python3 ydm.py report diff
+```
+
+Алиасы ниже — это те же команды с уже подставленными путями. Они лежат в
+[`tools/aliases.sh`](tools/aliases.sh), подключаются один раз:
+
+```bash
+export YDM_LOCAL_ROOT="$HOME/YandexDisk"   # где у вас локальная копия
+echo "source $(pwd)/tools/aliases.sh" >> ~/.bashrc
+```
+
+```bash
 ydm-menu
 ydm-scan-cloud
-ydm-scan-cloud /Books/Math
 ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
-ydm-sync-pick /Books/Math
-ydm-sync-state
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
+
+> `ydm-sync-add` и `ydm-sync-rm` **применяют изменение немедленно** — на
+> демоне `yandex-disk` это переписывает `exclude-dirs` и перезапускает его,
+> то есть начинается настоящая синхронизация или настоящее удаление
+> локальных копий. Сухого прогона в алиасе нет; для него вызывайте
+> `python3 tools/sync_policy.py add …` без `--apply`. Чем это бывает, когда
+> идёт не так —
+> [`docs/incidents/yandex-books-delete-2026-08-14.md`](docs/incidents/yandex-books-delete-2026-08-14.md).
 
 Для rclone/bisync на Android есть policy-aware слой, который отделяет
 download-only зеркала от bidirectional путей:
@@ -273,49 +302,52 @@ JSON‑контракт (версии):
 - По умолчанию `sync_exclude --apply` перезапускает демон и запускает локальный скан.
 - `sync_filters --apply` ничего не перезапускает (демона нет) — сразу гоняет `rclone copy`.
 
-## Алиасы (system ~/.bashrc)
+## Алиасы (`tools/aliases.sh`)
 
-### Что добавлено
-Алиасы и функции добавлены в `~/.bashrc` для частых сценариев:
+### Как подключить
+
+```bash
+export YDM_LOCAL_ROOT="$HOME/YandexDisk"   # ваша локальная копия
+echo "source /путь/к/ydm/tools/aliases.sh" >> ~/.bashrc
+source ~/.bashrc
+```
+
+Всё управляется тремя переменными; любую можно задать до подключения:
+
+| Переменная | По умолчанию | Что это |
+|---|---|---|
+| `YDM_ROOT` | каталог, в котором лежит сам скрипт | корень проекта |
+| `YDM_DB` | `$YDM_ROOT/monitor.db` | база |
+| `YDM_LOCAL_ROOT` | **нет** | локальная копия |
+
+У `YDM_LOCAL_ROOT` намеренно нет значения по умолчанию: копия лежит там, куда
+её положили, и угадывание означало бы скан или синхронизацию не того каталога.
+Команды, которым она нужна, останавливаются и говорят об этом.
+
+### Что появляется
+- `ydm` — базовая команда с уже подставленным `--db-path`
 - `ydm-scan-cloud` — полный cloud scan
-- `ydm-scan-cloud <path>` — cloud scan одной папки
-- `ydm-scan-cloud-path <path>` — cloud scan папки
-- `ydm-scan-local` — local scan для `/data/ya_disk`
+- `ydm-scan-cloud-path <path>` — cloud scan одной папки
+- `ydm-scan-local` — local scan каталога `$YDM_LOCAL_ROOT`
+- `ydm-menu` — интерактивное меню (демон или rclone)
 - `ydm-tree` — дерево синка (text + ветки)
 - `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
-- `ydm-sync-add <path>` — добавить папку как `bidirectional`, если risk analyzer
-  считает путь безопасным; после изменения фильтра команда сама покажет
-  короткий статус и спросит, запускать ли `ydm-bisync-resync --apply`
-- `ydm-sync-add --mode <mode> <path>` — явный режим:
-  `bidirectional`, `download_only` или `disabled`
-- `ydm-sync-pick <parent>` — интерактивно выбрать подпапку по номеру из
-  `rclone lsf`, чтобы не вводить кириллицу вручную; после выбора запускает
-  обычный `ydm-sync-add <path>`
-- `ydm-sync-state` — короткий пользовательский статус sync и следующий шаг
+- `ydm-sync-add <path> [mode]` — включить папку; режим `bidirectional`
+  (по умолчанию), `download_only` или `disabled`
 - `ydm-sync-rm <path>` — убрать папку из sync
+- `ydm-help` — подсказка, включая действующие сейчас пути
 
 Если `ydm-sync-add` пишет `BLOCKED` с `Risk: path_not_found`, это значит, что
 путь есть в облаке, но его ещё нет в актуальном cloud snapshot `ydm`. Сначала
-обновите снимок:
-
-```bash
-ydm-scan-cloud /Books/Math/База
-```
-
-Потом повторите `ydm-sync-add` или `ydm-sync-pick`.
-- `ydm-help` — краткая подсказка с постраничным выводом через `less`, если
-  доступен интерактивный терминал
-- `ydm-help --plain` или `ydm-help --no-pager` — напечатать подсказку без pager
-- Текст `ydm-help` намеренно ASCII-only и с короткими строками для узкого
-  экрана Termux/proot.
+обновите снимок через `ydm-scan-cloud-path <path>`, потом повторите.
 
 ### Termux/proot scroll
 
 Если в Termux при попытке протянуть экран пальцем листается история команд в
-строке ввода, а не scrollback, для длинной справки используйте pager:
+строке ввода, а не scrollback, направьте длинный вывод в pager сами:
 
 ```bash
-ydm-help
+ydm-help | less
 ```
 
 Внутри `less`:
@@ -326,30 +358,21 @@ ydm-help
 - `/text` — поиск
 
 Если scroll залип после TUI/pager и свайп продолжает работать как стрелки
-вверх/вниз, сбросьте режим терминала:
-
-```bash
-termux-scroll-fix
-```
-
-`ydm-help --plain` оставлен для случаев, когда вывод надо передать в pipe или
-скопировать целиком.
+вверх/вниз, сбросьте режим терминала командой `termux-scroll-fix` — это
+удобство самого Termux, а не часть этого проекта.
 
 ### Важно
-- `ydm-sync-add` и `ydm-sync-rm` **выполняют `--apply` напрямую**.  
+- `ydm-sync-add` и `ydm-sync-rm` **выполняют `--apply` напрямую**.
   Это значит, что изменение `exclude-dirs` применяется сразу, а затем
   запускается рестарт демона и локальный скан (по умолчанию в `sync_exclude`).
+  Для сухого прогона вызывайте
+  `python3 tools/sync_policy.py add --path <path> --mode <mode>` без `--apply`.
 
 ### Примеры
 ```bash
 ydm-tree-path /video 3
 ydm-scan-cloud-path /Projects
 ydm-sync-add /Projects/2024
-```
-
-### Как применить
-```bash
-source ~/.bashrc
 ```
 ## Documentation
 

@@ -570,7 +570,9 @@ def detect_backend(
     env: Optional[str] = None,
     config: Optional[Dict] = None,
     db_path: str = "monitor.db",
-    local_root: str = "/data/ya_disk",
+    #: No default: the mirror lives wherever the person put it, and a path
+    #: from the author's machine is not a better guess than an empty string.
+    local_root: str = "",
     policy_path: Optional[str] = None,
     remote: str = "yandex",
     bisync_filter_path: Optional[str] = None,

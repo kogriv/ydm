@@ -5,6 +5,38 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-24 — the commands the README opens with now exist
+
+Preparing the repository for publication
+([`tasks/opensource/`](tasks/opensource/README.md), Phase 2). The README used
+to begin with fifteen shell aliases that did not exist after a clone — they
+lived in one person's `~/.bashrc`, and the section documenting them ended with
+`source ~/.bashrc` without ever saying what to add.
+
+- **[`tools/aliases.sh`](tools/aliases.sh)** ships the definitions. `YDM_ROOT`
+  comes from where the file itself sits, so it works from any checkout.
+  Writing it turned up that the README also described `ydm-sync-pick`,
+  `ydm-sync-state`, `ydm-help --plain` and `ydm-bisync-resync` — none of which
+  exist on the author's machine either. Only what works went in.
+- **`/data/ya_disk` is no longer a default** anywhere. `scan local` with no
+  path says what to do instead of scanning a directory from someone else's
+  machine, and `YDM_LOCAL_ROOT` has no default for the same reason: guessing
+  means syncing the wrong folder.
+- **Both READMEs open with something that works after `git clone`**, and the
+  fact that `ydm-sync-add`/`ydm-sync-rm` apply immediately — rewriting
+  `exclude-dirs` and restarting the daemon — is now stated where the commands
+  are introduced, with a link to the incident that shows what that looks like
+  when it goes wrong.
+- **Verified as a stranger would see it**: a clone of tracked files only,
+  `env -i` with an empty `HOME`, no configuration — `--help`, the full test
+  suite, sourcing the aliases, and the guard firing when `YDM_LOCAL_ROOT` is
+  unset.
+- **Found and not fixed:** every `ydm.py` command exits 0, including the
+  failures. It is one convention across some fifteen call sites, not a typo,
+  and changing it changes the contract of every command — recorded as
+  [`tasks/opensource/GAP.md`](tasks/opensource/GAP.md) G4a rather than bolted
+  onto a documentation pass.
+
 ## 2026-08-24 — the rclone paths get exercised, without a device
 
 "On Android `ydm-menu` works through rclone" had been the last open checklist

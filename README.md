@@ -5,23 +5,52 @@
 A tool for deep auditing of a Yandex Disk account: comparing the cloud
 against a local mirror and tracking changes over time.
 
-## Quick reference (shell aliases)
+## Quick reference
+
+Straight after a clone, with nothing configured:
 
 ```bash
-ydm
+python3 ydm.py --help
+python3 tools/sync_tree.py --help
+```
+
+Once you have a token or an rclone remote (see
+[Installation](#installation)) and a database:
+
+```bash
+python3 ydm.py init
+python3 ydm.py scan cloud --progress
+python3 ydm.py scan local --path /path/to/your/mirror
+python3 ydm.py report diff
+```
+
+The shell aliases below wrap those with your paths already filled in.
+They live in [`tools/aliases.sh`](tools/aliases.sh) — source it once:
+
+```bash
+export YDM_LOCAL_ROOT="$HOME/YandexDisk"   # wherever your mirror is
+echo "source $(pwd)/tools/aliases.sh" >> ~/.bashrc
+```
+
+```bash
 ydm-menu
 ydm-scan-cloud
-ydm-scan-cloud /Books/Math
 ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
-ydm-sync-pick /Books/Math
-ydm-sync-state
 ydm-sync-rm /Projects/2024
 ydm-help
 ```
+
+> `ydm-sync-add` and `ydm-sync-rm` **apply immediately** — on the
+> `yandex-disk` daemon they rewrite `exclude-dirs` and restart it, which
+> starts real syncing or real removal of local copies. There is no dry run
+> in the alias; use `python3 tools/sync_policy.py add …` without `--apply`
+> for that. See
+> [`docs/incidents/yandex-books-delete-2026-08-14.md`](docs/incidents/yandex-books-delete-2026-08-14.md)
+> for what this looks like when it goes wrong.
 
 For rclone/bisync on Android, use the policy-aware layer to separate
 download-only mirrors from bidirectional paths:
@@ -290,49 +319,52 @@ Notes:
 - By default `sync_exclude --apply` restarts the daemon and runs a local scan.
 - `sync_filters --apply` never restarts anything (no daemon) — it runs `rclone copy` directly.
 
-## Shell aliases (`~/.bashrc`)
+## Shell aliases (`tools/aliases.sh`)
 
-### What's added
-Aliases and functions for common workflows, added to `~/.bashrc`:
+### Installing them
+
+```bash
+export YDM_LOCAL_ROOT="$HOME/YandexDisk"   # your local mirror
+echo "source /path/to/ydm/tools/aliases.sh" >> ~/.bashrc
+source ~/.bashrc
+```
+
+Three variables control everything; set any of them before sourcing:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `YDM_ROOT` | the checkout the script sits in | project directory |
+| `YDM_DB` | `$YDM_ROOT/monitor.db` | database |
+| `YDM_LOCAL_ROOT` | **none** | your local mirror |
+
+`YDM_LOCAL_ROOT` has no default on purpose: the mirror is wherever you put
+it, and guessing would mean scanning or syncing the wrong directory.
+Commands that need it stop and say so.
+
+### What you get
+- `ydm` — the base command with `--db-path` already set
 - `ydm-scan-cloud` — full cloud scan
-- `ydm-scan-cloud <path>` — cloud scan of one folder
 - `ydm-scan-cloud-path <path>` — cloud scan of one folder
-- `ydm-scan-local` — local scan of `/data/ya_disk`
+- `ydm-scan-local` — local scan of `$YDM_LOCAL_ROOT`
+- `ydm-menu` — interactive sync UI (daemon or rclone)
 - `ydm-tree` — sync tree (text + branches)
 - `ydm-tree-path <path> [depth]` — sync tree for one folder, with depth
-- `ydm-sync-add <path>` — add a folder as `bidirectional` when the risk
-  analyzer says the path is safe; after a filter change the command shows a
-  short status and asks whether to run `ydm-bisync-resync --apply`
-- `ydm-sync-add --mode <mode> <path>` — explicit mode: `bidirectional`,
-  `download_only`, or `disabled`
-- `ydm-sync-pick <parent>` — choose a child folder by number from `rclone lsf`,
-  avoiding manual Cyrillic input; after selection it runs the regular
-  `ydm-sync-add <path>` flow
-- `ydm-sync-state` — short human sync status and next action
-- `ydm-sync-rm <path>` — remove a folder from sync
+- `ydm-sync-add <path> [mode]` — include a folder; mode is `bidirectional`
+  (default), `download_only` or `disabled`
+- `ydm-sync-rm <path>` — exclude a folder
+- `ydm-help` — the cheat sheet, including the paths currently in effect
 
 If `ydm-sync-add` prints `BLOCKED` with `Risk: path_not_found`, the path exists
 in the cloud but is missing from the current YDM cloud snapshot. Refresh that
-snapshot first:
-
-```bash
-ydm-scan-cloud /Books/Math/База
-```
-
-Then retry `ydm-sync-add` or `ydm-sync-pick`.
-- `ydm-help` — short cheat sheet, paged through `less` when an interactive
-  terminal is available
-- `ydm-help --plain` or `ydm-help --no-pager` — print without a pager
-- The `ydm-help` text is intentionally ASCII-only and short-line optimized for
-  narrow Termux/proot screens.
+snapshot first with `ydm-scan-cloud-path <path>`, then retry.
 
 ### Termux/proot scroll
 
 If Termux finger scroll moves through shell command history at the prompt
-instead of scrolling the screen, use the pager for long help output:
+instead of scrolling the screen, pipe long output through a pager yourself:
 
 ```bash
-ydm-help
+ydm-help | less
 ```
 
 Inside `less`:
@@ -343,29 +375,21 @@ Inside `less`:
 - `/text` — search
 
 If scrolling is stuck after a TUI/pager and swipes keep acting like up/down
-arrows, reset the terminal mode:
-
-```bash
-termux-scroll-fix
-```
-
-`ydm-help --plain` remains available for pipes and full-text copy.
+arrows, reset the terminal mode with `termux-scroll-fix` — a Termux
+convenience, not something this project ships.
 
 ### Important
 - `ydm-sync-add` and `ydm-sync-rm` **run with `--apply` directly**.
   The `exclude-dirs` change is applied immediately, followed by a daemon
-  restart and a local scan (the `sync_exclude` defaults).
+  restart and a local scan (the `sync_exclude` defaults). For a dry run,
+  call `python3 tools/sync_policy.py add --path <path> --mode <mode>`
+  without `--apply`.
 
 ### Examples
 ```bash
 ydm-tree-path /video 3
 ydm-scan-cloud-path /Projects
 ydm-sync-add /Projects/2024
-```
-
-### Applying changes
-```bash
-source ~/.bashrc
 ```
 ## Documentation
 
