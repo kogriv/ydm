@@ -377,6 +377,98 @@ class SyncTreeCloudTests(unittest.TestCase):
         self.assertIn("АнГем", names)
         self.assertIn("База", names)
 
+    def _make_indexed_db(self):
+        """A snapshot carrying the production index, and a prefix sibling.
+
+        `/Books/Math-old` is here to pin the range boundaries. The obvious
+        range ['/Books/Math', '/Books/Math0') would swallow it, because '-'
+        sorts below '0'; the correct one starts at '/Books/Math/'.
+        """
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(path)
+        conn.execute(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                scan_id INTEGER,
+                parent_path TEXT,
+                name TEXT,
+                type TEXT,
+                size INTEGER,
+                md5 TEXT,
+                created TEXT,
+                modified TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_files_unique ON files(scan_id, parent_path, name)"
+        )
+        rows = [
+            (1, 1, "/Books/Math/АнГем", "book.pdf", "file"),
+            (2, 1, "/Books/Math/База/poya", "deep.pdf", "file"),
+            (3, 1, "/Books/Math", "loose.pdf", "file"),
+            (4, 1, "/Books/Math-old", "archived.pdf", "file"),
+        ]
+        for row in rows:
+            conn.execute(
+                "INSERT INTO files VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, NULL)", row
+            )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_a_prefix_sibling_is_not_taken_for_a_child(self):
+        db_path = self._make_indexed_db()
+
+        class Storage:
+            def __init__(self, p):
+                self._p = p
+
+            def get_connection(self):
+                return sqlite3.connect(self._p)
+
+        names = infer_dirs_from_files(Storage(db_path), 1, "/Books/Math")
+        self.assertEqual(sorted(names), ["АнГем", "База"])
+        os.unlink(db_path)
+
+    def test_child_inference_seeks_the_index_instead_of_scanning(self):
+        """The subtree lookup must be a range, not a LIKE.
+
+        SQLite folds LIKE into an index range only when LIKE is
+        case-sensitive, and by default it is not — so `parent_path LIKE
+        '/x/%'` read every row of the scan, once per folder the walk visits.
+        That is what made a depth-5 `ydm_menu orphans` take minutes on an
+        80k-row snapshot: the cost was per folder, and no index applied.
+        """
+        db_path = self._make_indexed_db()
+        statements = []
+
+        class Storage:
+            def __init__(self, p):
+                self._p = p
+
+            def get_connection(self):
+                conn = sqlite3.connect(self._p)
+                conn.set_trace_callback(statements.append)
+                return conn
+
+        infer_dirs_from_files(Storage(db_path), 1, "/Books/Math")
+        ranged = [s for s in statements if "parent_path >=" in s]
+        self.assertTrue(ranged, f"no range query was issued: {statements}")
+
+        conn = sqlite3.connect(db_path)
+        try:
+            plan = conn.execute("EXPLAIN QUERY PLAN " + ranged[0]).fetchall()
+        finally:
+            conn.close()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertIn(
+            "parent_path>", detail, f"the index range is not being used: {detail}"
+        )
+        os.unlink(db_path)
+
     def test_fetch_child_names_prefers_dir_rows(self):
         db_path = self._make_db()
 

@@ -85,41 +85,35 @@ def infer_dirs_from_files(storage, scan_id: int, parent_path: str) -> List[str]:
                 continue
 
             like_prefix = prefix if prefix.startswith("/") else f"/{prefix}"
+            # A range, not `parent_path LIKE '<prefix>/%'`: SQLite turns LIKE
+            # into an index range only when LIKE is case-sensitive, and it is
+            # not by default. The LIKE form therefore read every row of the
+            # scan for every folder the tree visits — 80 295 rows per call on
+            # the author's snapshot, and the walk makes one call per folder
+            # without `type='dir'` rows. `idx_files_unique` covers
+            # (scan_id, parent_path), so the range below seeks instead.
+            #
+            # '0' is the character after '/', so ['<prefix>/', '<prefix>0')
+            # holds exactly the paths under <prefix> — the wider
+            # ['<prefix>', '<prefix>0') would also swallow siblings like
+            # '<prefix>-old'. The equality case `parent_path = <prefix>` is
+            # deliberately not restored: the old query excluded it anyway via
+            # `length(parent_path) > length(?)`, and it yields no child name.
             rows = conn.execute(
                 """
-                SELECT DISTINCT
-                    substr(
-                        parent_path,
-                        length(?) + 2,
-                        CASE
-                            WHEN instr(substr(parent_path, length(?) + 2), '/') > 0
-                            THEN instr(substr(parent_path, length(?) + 2), '/') - 1
-                            ELSE length(substr(parent_path, length(?) + 2))
-                        END
-                    ) AS child
+                SELECT DISTINCT parent_path
                 FROM files
                 WHERE scan_id = ?
+                  AND parent_path >= ?
+                  AND parent_path < ?
                   AND type = 'file'
-                  AND (
-                    parent_path = ?
-                    OR parent_path LIKE ?
-                  )
-                  AND length(parent_path) > length(?)
                 """,
-                (
-                    like_prefix,
-                    like_prefix,
-                    like_prefix,
-                    like_prefix,
-                    scan_id,
-                    like_prefix,
-                    f"{like_prefix}/%",
-                    like_prefix,
-                ),
+                (scan_id, f"{like_prefix}/", f"{like_prefix}0"),
             ).fetchall()
             for row in rows:
-                name = (row[0] or "").strip("/")
-                if name and "/" not in name:
+                rest = (row[0] or "")[len(like_prefix):].lstrip("/")
+                name = rest.split("/", 1)[0]
+                if name:
                     children.add(name)
     finally:
         conn.close()
