@@ -5,6 +5,43 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-25 — the Android side stops being one person's phone
+
+The device answered the three questions `tasks/android_verify/` was blocked
+on, and answering them showed the documentation described an environment the
+project would not run in. New: [`docs/ANDROID_SETUP.md`](docs/ANDROID_SETUP.md)
+and `tools/termux/`.
+
+- **It was never Termux.** YDM runs in a proot-Debian container inside Termux;
+  the scheduler runs in Termux and reaches into the container. Both halves are
+  now written down, with the bind-mount trap (`/root/notes` is a bind mount, so
+  a bare `proot-distro login` has no repository at all) and the reason the job
+  script cannot live in the repository — `termux-job-scheduler` resolves paths
+  in Termux's filesystem, and shared storage silently ignores `chmod +x`.
+- **The scheduled job ships.** `tools/termux/job_run.sh` is the container half
+  and can be run by hand — without `--apply` the bisync stays a dry run;
+  `ydm_bisync_job.sh` is the thin Termux half; `install_job.sh` registers it.
+  Splitting them is what makes the part with the opinions testable.
+- **A failing rename preflight now says so.** It still lets bisync proceed —
+  a broken guard must not stop syncing — but it writes
+  `rename preflight FAILED` to `var/bisync.log`, because the alternative is
+  what actually happened: the guard absent for hours behind a green log.
+- **Prune runs daily from the job.** One local scan per run had reached 3865
+  scans and 2.14 M rows — 610 MB, 95.3% of it droppable.
+- **The filename restriction is measured, not inferred.** On Android 15 a name
+  with `|` and `:` is refused by shared storage and the full-width substitutes
+  are accepted, while *both* succeed on the container's own filesystem. So the
+  `encoding` option is the preventive fix, `repair_android_names.py` keeps the
+  corrective one, and `KNOWN_ISSUES.md` now says which situation each answers —
+  and that applying the encoding to an existing mirror re-downloads it.
+- **The scroll advice was wrong in both halves.** The symptom is touch
+  printing junk characters into the command line (mouse reporting left on),
+  not swipes acting like arrow keys; and `termux-scroll-fix` is not a Termux
+  command, it was a function in one `~/.bashrc`. Both READMEs now carry the
+  three lines that actually clear it.
+- **261 tests, zero skips, on the phone.** The eight rclone-backed checks that
+  CI skips for lack of rclone run here.
+
 ## 2026-08-24 — the menu catches up with the tools it sits on
 
 Asking "how do I run the smart cloud scan from the menu" turned out to have no

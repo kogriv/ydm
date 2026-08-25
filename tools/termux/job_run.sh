@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# The container half of the scheduled Android sync job.
+#
+# This runs *inside* proot-Debian, where the repository and rclone live. The
+# Termux half (tools/termux/ydm_bisync_job.sh) only takes a wake lock and
+# enters the container; everything with an opinion is here, so it can be run
+# and tested by hand:
+#
+#     bash tools/termux/job_run.sh --local-root /sdcard/Download/ya_disk
+#     bash tools/termux/job_run.sh --local-root /sdcard/Download/ya_disk --apply
+#
+# Without --apply nothing is written: the preflight still runs (it is
+# read-only apart from its own local scan) and the bisync stays a dry run.
+#
+# Order matters. The rename preflight runs first because a cloud-side rename
+# that cannot be represented on /sdcard must be settled before bisync sees a
+# missing file and a new one, and decides that means delete-and-upload.
+set -u
+
+PROJECT_DIR="${YDM_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+LOCAL_ROOT="${YDM_LOCAL_ROOT:-}"
+FILTER_PATH="${YDM_BISYNC_FILTER:-}"
+DB_PATH="${YDM_DB:-}"
+PRUNE_INTERVAL_SEC="${YDM_PRUNE_INTERVAL_SEC:-86400}"
+APPLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --local-root) LOCAL_ROOT="$2"; shift 2 ;;
+        --filter-path) FILTER_PATH="$2"; shift 2 ;;
+        --db-path) DB_PATH="$2"; shift 2 ;;
+        --project-dir) PROJECT_DIR="$2"; shift 2 ;;
+        --prune-interval) PRUNE_INTERVAL_SEC="$2"; shift 2 ;;
+        --apply) APPLY=1; shift ;;
+        --no-apply) APPLY=0; shift ;;
+        -h|--help)
+            sed -n '2,20p' "${BASH_SOURCE[0]}"
+            exit 0 ;;
+        *) echo "job_run.sh: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$LOCAL_ROOT" ]; then
+    echo "job_run.sh: --local-root is required (or set YDM_LOCAL_ROOT)." >&2
+    echo "  There is no default: guessing means syncing the wrong folder." >&2
+    exit 2
+fi
+
+cd "$PROJECT_DIR" || exit 2
+
+# The bidirectional filter, not the download one. Some paths are worth
+# mirroring locally and unsafe to sync back — see
+# tasks/rclone_backend/POLICY_AWARE_BISYNC.md.
+[ -n "$FILTER_PATH" ] || FILTER_PATH="${LOCAL_ROOT%/}.bisync.filters"
+[ -n "$DB_PATH" ] || DB_PATH="$PROJECT_DIR/monitor.db"
+
+notify() {
+    local binary=/data/data/com.termux/files/usr/bin/termux-notification
+    [ -x "$binary" ] || return 0
+    "$binary" --title "$1" --content "$2" >/dev/null 2>&1 || true
+}
+
+# --- 1. rename preflight ----------------------------------------------------
+
+preflight_json=$(python3 tools/sync_rename.py preflight \
+    --db-path "$DB_PATH" \
+    --local-root "$LOCAL_ROOT" \
+    --bisync-filter-path "$FILTER_PATH" \
+    --format json 2>/dev/null)
+preflight_rc=$?
+
+decision=$(printf "%s" "$preflight_json" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("data", {}).get("decision", "allow_bisync"))
+except Exception:
+    print("allow_bisync")
+')
+
+# A preflight that cannot answer must not stop syncing — but say so, because
+# this is the guard being absent, not the guard passing. On 2026-08-24 a
+# schema change made the preflight crash on every run for hours, and the only
+# visible sign was `run OK` in var/bisync.log. See issue #5.
+if [ "$preflight_rc" -ne 0 ]; then
+    decision="allow_bisync"
+    echo "job_run.sh: rename preflight failed (rc=$preflight_rc); running without the guard." >&2
+    printf '%s rename preflight FAILED rc=%s\n' "$(date -Is)" "$preflight_rc" \
+        >> var/bisync.log 2>/dev/null || true
+fi
+
+# --- 2. bisync --------------------------------------------------------------
+
+case "$decision" in
+    skip_bisync)
+        ;;
+    block_bisync)
+        notify "ydm rename preflight" "bisync blocked; run sync_rename.py status"
+        ;;
+    *)
+        if [ "$APPLY" -eq 1 ]; then
+            python3 tools/sync_bisync.py run --apply \
+                --db-path "$DB_PATH" \
+                --local-root "$LOCAL_ROOT" \
+                --filter-path "$FILTER_PATH" >/dev/null 2>&1
+        else
+            python3 tools/sync_bisync.py run \
+                --db-path "$DB_PATH" \
+                --local-root "$LOCAL_ROOT" \
+                --filter-path "$FILTER_PATH"
+        fi
+        ;;
+esac
+
+# --- 3. housekeeping, once a day -------------------------------------------
+#
+# Every run of this job adds a local scan to the database (the preflight makes
+# one), and nothing used to remove them: 3865 scans and 2.14 million rows had
+# accumulated by 2026-08-24 — 610 MB, of which `report prune` found 95.3%
+# droppable. The stamp is written only on success, so a failed prune retries
+# on the next run instead of being skipped for a day, and a failure here never
+# stops syncing.
+
+[ "$APPLY" -eq 1 ] || exit 0
+
+stamp=var/prune_last
+now=$(date +%s)
+last=0
+if [ -f "$stamp" ]; then
+    last=$(cat "$stamp" 2>/dev/null)
+fi
+case "$last" in
+    ""|*[!0-9]*) last=0 ;;
+esac
+
+if [ $(( now - last )) -ge "$PRUNE_INTERVAL_SEC" ]; then
+    {
+        printf "=== %s ===\n" "$(date -Is)"
+        python3 ydm.py --db-path "$DB_PATH" report prune --apply --vacuum
+    } >> var/prune.log 2>&1 && printf "%s" "$now" > "$stamp"
+fi
+
+exit 0

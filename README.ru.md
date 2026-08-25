@@ -84,8 +84,10 @@ python3 tools/sync_rename.py apply --local-root /sdcard/Download/ya_disk --old /
     окружений, где официальный `yandex-disk` не работает (например, arm64 —
     подробности и весь набор инструментов в
     [`tasks/rclone_backend/README.md`](tasks/rclone_backend/README.md);
-    учтите, что это конкретный рецепт под одно Android/Termux-устройство,
-    см. дисклеймер в начале того файла).
+    учтите, что это конкретный рецепт под одно Android-устройство, причём
+    под контейнер proot-Debian *внутри* Termux, а не под сам Termux —
+    всё устройство работы, включая плановый job, расписано в
+    [`docs/ANDROID_SETUP.md`](docs/ANDROID_SETUP.md)).
 
 ## Installation
 
@@ -343,8 +345,10 @@ source ~/.bashrc
 
 ### Termux/proot scroll
 
-Если в Termux при попытке протянуть экран пальцем листается история команд в
-строке ввода, а не scrollback, направьте длинный вывод в pager сами:
+Проверено на устройстве (Android 15, 25.08.2026): свайп пальцем листает
+scrollback, `ydm-help` помещается в ширину экрана без разрывов посреди слов,
+а выход из `less` scroll не ломает. Для длинного вывода pager всё равно
+удобнее:
 
 ```bash
 ydm-help | less
@@ -357,9 +361,19 @@ ydm-help | less
 - `j` / `k` — строка вниз / вверх
 - `/text` — поиск
 
-Если scroll залип после TUI/pager и свайп продолжает работать как стрелки
-вверх/вниз, сбросьте режим терминала командой `termux-scroll-fix` — это
-удобство самого Termux, а не часть этого проекта.
+Если scroll всё-таки сломан, симптом выглядит так: **касание экрана печатает
+мусорные символы в строку ввода**. Это включённый репортинг мыши — терминал
+кодирует тап escape-последовательностью, читать её некому, и она попадает в
+строку. Сброс:
+
+```bash
+printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l'
+tput rmcup; stty sane
+```
+
+(Раньше здесь было сказано, что свайп начинает работать как стрелки, а лечится
+это командой `termux-scroll-fix` — «удобством самого Termux». Неверно и то, и
+другое: такой команды в Termux нет, а весь фикс — три строки выше.)
 
 ### Важно
 - `ydm-sync-add` и `ydm-sync-rm` **выполняют `--apply` напрямую**.
@@ -386,6 +400,7 @@ ydm-sync-add /Projects/2024
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Полная документация проекта, архитектура, детали реализации
 - **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Быстрый старт для AI-ассистентов и автоматизации
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Дополнительные примеры использования
+- **[ANDROID_SETUP.md](docs/ANDROID_SETUP.md)** - Всё устройство работы на Android: proot-Debian внутри Termux, bind-mount'ы, плановый bisync-job и то, что общее хранилище отказывается хранить
 - **[Sync Manager](tasks/sync_manager/README.md)** - Переходные инструменты sync_tree/sync_exclude и планы Sync Manager
 - **[Единый интерфейс синхронизации](tasks/sync_unification/README.md)** - Один CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) и для демона `yandex-disk`, и для бэкенда `rclone`, с автоопределением бэкенда
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Альтернатива демону `yandex-disk` для окружений без него (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup через rclone
@@ -410,6 +425,7 @@ ydm-sync-add /Projects/2024
   - `PROJECT_YD_MONITOR.md` — архитектура и детали реализации
   - `QUICKSTART_AI.md` — быстрый старт для AI/скриптов
   - `USAGE_EXAMPLES.md` — примеры использования
+  - `ANDROID_SETUP.md` — запуск проекта на Android, от установки до планового job
   - `KNOWN_ISSUES.md` — текущие неисправленные ограничения
 - `tasks/` — задачи/подпроекты поверх ядра
   - `tasks/junk/` — задача очистки мусора:
@@ -428,6 +444,10 @@ ydm-sync-add /Projects/2024
   - `sync_exclude.py` — add/remove/list для `exclude-dirs` (демон, dry-run по умолчанию)
   - `sync_filters.py` — add/remove/list для rclone filter-file (без демона, dry-run по умолчанию)
   - `sync_common.py` — общий код для sync‑утилит
+  - `termux/` — автоматизация под Android: `job_run.sh` (половина планового
+    прогона, живущая в контейнере, — запускается и руками), `ydm_bisync_job.sh`
+    (половина на стороне Termux), `install_job.sh` (регистрация job) — см.
+    [`docs/ANDROID_SETUP.md`](docs/ANDROID_SETUP.md)
 - `tests/` — тестовые скрипты:
   - `test_scan.sh` — интеграционный тест сканирования с tmpfs
   - `test_ydm_fixes.sh` — набор регрессионных тестов для `ydm.py`

@@ -91,9 +91,10 @@ one CLI across both environments.
     environments where the official `yandex-disk` daemon doesn't work
     (e.g. arm64) — details and the full toolset in
     [`tasks/rclone_backend/README.md`](tasks/rclone_backend/README.md).
-    Note: that workstream was built for one specific Android/Termux
-    device — see the disclaimer at the top of that file before assuming
-    it works unmodified on yours.
+    Note: that workstream was built for one specific Android device, and
+    for a proot-Debian container *inside* Termux rather than for Termux
+    itself — the full arrangement, including the scheduled job, is written
+    out in [`docs/ANDROID_SETUP.md`](docs/ANDROID_SETUP.md).
 
 ## Installation
 
@@ -360,8 +361,9 @@ snapshot first with `ydm-scan-cloud-path <path>`, then retry.
 
 ### Termux/proot scroll
 
-If Termux finger scroll moves through shell command history at the prompt
-instead of scrolling the screen, pipe long output through a pager yourself:
+Checked on the device (Android 15, 2026-08-25): finger swipe scrolls the
+output, `ydm-help` fits the screen without breaking words, and leaving `less`
+does not break scrolling. For long output a pager is still often nicer:
 
 ```bash
 ydm-help | less
@@ -374,9 +376,19 @@ Inside `less`:
 - `j` / `k` — line down / line up
 - `/text` — search
 
-If scrolling is stuck after a TUI/pager and swipes keep acting like up/down
-arrows, reset the terminal mode with `termux-scroll-fix` — a Termux
-convenience, not something this project ships.
+If scrolling *is* broken, the symptom is **touching the screen printing junk
+characters into the command line** — the terminal has mouse reporting enabled
+and encodes each tap as an escape sequence. Clear it with:
+
+```bash
+printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l'
+tput rmcup; stty sane
+```
+
+(Earlier versions of this section described the symptom as swipes acting like
+up/down arrows, and called the fix `termux-scroll-fix` as though Termux
+shipped it. Neither was right: the three lines above are the whole fix, and
+this project does not ship a wrapper for them.)
 
 ### Important
 - `ydm-sync-add` and `ydm-sync-rm` **run with `--apply` directly**.
@@ -403,6 +415,7 @@ ydm-sync-add /Projects/2024
 
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Full project documentation, architecture, implementation details
 - **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Quick start for AI assistants and automation
+- **[ANDROID_SETUP.md](docs/ANDROID_SETUP.md)** - The whole Android arrangement: proot-Debian inside Termux, bind mounts, the scheduled bisync job, and what shared storage refuses to store
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples
 - **[Sync Tree v2](tasks/sync_tree/README.md)** - Policy-aware `ydm-tree` (`[B]`/`[D]`/`[L]` markers, orphan paths)
 - **[YDM Menu](tasks/ydm_menu/README.md)** - Interactive sync UI for humans (`ydm`; agents keep `ydm-sync-*` CLI)
@@ -429,6 +442,7 @@ Top-level folders:
 - `docs/` — general project documentation
   - `PROJECT_YD_MONITOR.md` — architecture and implementation details
   - `QUICKSTART_AI.md` — quick start for AI/automation
+  - `ANDROID_SETUP.md` — running this on Android, end to end
   - `USAGE_EXAMPLES.md` — usage examples
   - `KNOWN_ISSUES.md` — current, unfixed limitations
 - `tasks/` — tasks/subprojects built on the core
@@ -448,6 +462,10 @@ Top-level folders:
   - `sync_exclude.py` — add/remove/list for `exclude-dirs` (daemon, dry-run by default)
   - `sync_filters.py` — add/remove/list for the rclone filter-file (no daemon, dry-run by default)
   - `sync_common.py` — shared code for the sync utilities
+  - `termux/` — the Android automation: `job_run.sh` (the container half of the
+    scheduled sync, runnable by hand), `ydm_bisync_job.sh` (the Termux half),
+    `install_job.sh` (register it) — see
+    [`docs/ANDROID_SETUP.md`](docs/ANDROID_SETUP.md)
 - `tests/` — test scripts:
   - `test_scan.sh` — integration test of scanning on tmpfs
   - `test_ydm_fixes.sh` — regression suite for `ydm.py`
