@@ -273,16 +273,16 @@ class StorageManager:
     def reuse_connection(self):
         """Serve get_connection() from a single connection for the duration.
 
-        Opt-in, and read-only by intent. Opening a connection here is not the
-        cheap operation it looks like: `get_connection()` also issues
-        `PRAGMA synchronous=NORMAL` and `PRAGMA journal_mode=WAL`, and on the
-        author's snapshot that setup measured 0.92 ms against 0.10 ms for the
-        query it was opened for. A depth-4 tree walk opened 8 504 of them —
-        78% of the wall clock spent connecting, not reading.
+        Opt-in, and read-only by intent. A connection is cheap to make and
+        expensive to use for the first time: `sqlite3.connect` is lazy, so the
+        file is opened and its schema read on the first statement. Measured on
+        the author's 138 MB database — connect and close without touching it,
+        0.068 ms; connect plus one child query, 0.522 ms; the same with both
+        pragmas, 0.511 ms. So the cost is the first touch, not the pragmas,
+        and a depth-4 tree walk paid it 8 504 times.
 
-        (The `journal_mode` half is pure waste in any case: WAL is a property
-        of the database file, persisted in its header, so re-declaring it on
-        every connection cannot change anything.)
+        (An earlier note here blamed the pragmas, having measured them on a
+        method that turned out never to run. They are free.)
 
         Callers are not asked to change: every DB helper in this project ends
         with `conn.close()` in a `finally`, so the handle returned inside the
@@ -305,14 +305,28 @@ class StorageManager:
             conn.close()
 
     def get_connection(self):
-        # NOTE (2026-08-25): this method is shadowed — StorageManager defines
-        # `get_connection` a second time further down, and that one wins. So
-        # none of the pragmas below are ever applied, and neither is the
-        # tmpfs schema-recovery block. Left in place rather than deleted
-        # because restoring it changes runtime behaviour (WAL and
-        # `synchronous` on every connection, recovery during scans) and that
-        # deserves its own change with its own tests. See
-        # tasks/ydm_menu/BACKLOG.md 9.5.
+        """A connection to this manager's database, configured for its mode.
+
+        Until 2026-08-25 this method never ran: `get_connection` was defined
+        a second time further down, and Python keeps the last one. So the
+        pragmas below were never applied and the "Level 2" recovery could not
+        fire on the one setup it was written for — a scan into /dev/shm whose
+        file has gone. The duplicate is gone and a test now reads the source
+        to make sure no method of this class is written twice again.
+
+        The pragmas cost nothing measurable: on a 138 MB database
+        connect+query is 0.522 ms and connect+both pragmas+query is 0.511 ms.
+        The ~0.6 ms once blamed on them is the price of first touching the
+        file, which any first statement pays — see reuse_connection(), which
+        is what actually removes it.
+
+        `journal_mode=WAL` is redundant strictly speaking, since WAL is
+        recorded in the database header and survives. It is issued anyway:
+        it is free, it says plainly what this database expects, and it puts a
+        file that somehow is not in WAL back into it.
+        """
+        if self._shared_connection is not None:
+            return self._shared_connection
         conn = sqlite3.connect(self.db_path)
         # Оптимизация для скорости при работе в памяти
         if self.temp_mode:
@@ -595,12 +609,6 @@ class StorageManager:
         except Exception as e:
             print(f"Warning: Failed to restore from disk: {e}", file=sys.stderr)
 
-    def get_connection(self):
-        # The live one: the definition above is shadowed by this. See its note.
-        if self._shared_connection is not None:
-            return self._shared_connection
-        return sqlite3.connect(self.db_path)
-
     def init_db(self):
         """Creates the database schema if it doesn't exist."""
         schema = [
@@ -659,12 +667,21 @@ class StorageManager:
         ]
         
         try:
-            with self.get_connection() as conn:
+            # `with sqlite3.connect(...)` commits or rolls back; it does NOT
+            # close. The connection then lived until the next garbage
+            # collection, holding the file — which is enough to make the very
+            # next `PRAGMA journal_mode` fail with "database is locked". The
+            # tmpfs recovery path calls init_db() and immediately reopens, so
+            # this was in the way of the case it exists for.
+            conn = self.get_connection()
+            try:
                 cursor = conn.cursor()
                 for statement in schema:
                     cursor.execute(statement)
                 self._ensure_scan_scope_columns(conn)
                 conn.commit()
+            finally:
+                conn.close()
             return True, f"Database initialized successfully at {self.db_path}"
         except Exception as e:
             return False, f"Database initialization failed: {str(e)}"

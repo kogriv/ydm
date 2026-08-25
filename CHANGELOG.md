@@ -5,6 +5,39 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-25 — a method that had never run, and the leak hiding behind it
+
+Phase 9.5. `StorageManager` defined `get_connection` twice; Python keeps the
+last, so the first had been dead code. It carried `PRAGMA synchronous`,
+`PRAGMA journal_mode` and the whole "Level 2" tmpfs schema recovery — the
+one written for a scan into `/dev/shm` whose file disappears. On every
+machine that scans through tmpfs, which includes this one, that recovery
+could not fire.
+
+- **The two are now one.** The pragmas apply and the recovery is reachable.
+  A structural test parses `ydm.py` and fails if any method of the class is
+  defined twice, because nothing else can catch this: no warning, no error,
+  and the edit simply lands in the copy that never runs. That is how it was
+  found — a change made to the wrong `get_connection` had no effect at all.
+- **Restoring the pragmas costs nothing.** Measured on the 138 MB database:
+  connect and close without touching the file, 0.068 ms; connect plus one
+  query, 0.522 ms; the same with both pragmas, 0.511 ms. `sqlite3.connect`
+  is lazy, so the price is the first statement opening the file — which any
+  first statement pays. **This corrects yesterday's note**, which put ~0.6 ms
+  on the pragmas: that figure was read off the method that never ran. The
+  `reuse_connection()` win stands — it removes the first touch, 8 504 times
+  in a depth-4 walk — but the attribution inside it was wrong.
+- **`init_db()` leaked its connection.** `with sqlite3.connect(...)` commits
+  or rolls back; it does not close. The connection then survived until the
+  next garbage collection, holding the file — enough for the very next
+  `PRAGMA journal_mode` to fail with `database is locked`. That is not
+  hypothetical here: the recovery calls `init_db()` and immediately reopens
+  the file, so the leak stood directly in the way of the case being restored.
+  Found because a test written for the recovery failed for this instead.
+
+303 tests → 310, green under a CI simulation with no rclone and no
+environment.
+
 ## 2026-08-25 — the tree stops being slow, and it was never where we looked
 
 Phase 9 ([`tasks/ydm_menu/BACKLOG.md`](tasks/ydm_menu/BACKLOG.md)). Issue #3
@@ -53,10 +86,7 @@ the device's. JSON output is byte-identical in all four cases once
 - **A method that has never run.** `StorageManager` defines `get_connection`
   twice and the second wins, so the pragmas in the first — `synchronous`,
   `journal_mode` — are never applied, and neither is the tmpfs schema-recovery
-  block. That is why the "connection setup costs 0.92 ms" reading taken from
-  it was wrong: the live path is a bare `sqlite3.connect` at 0.08 ms. Marked
-  in place and filed as 9.5; un-shadowing it changes runtime behaviour and
-  deserves its own change.
+  block. Filed as 9.5 and fixed the same day; see the entry above.
 
 ## 2026-08-25 — the barrier goes where the damage came from
 

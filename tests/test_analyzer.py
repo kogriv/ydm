@@ -1368,5 +1368,192 @@ class TestExitCodes(unittest.TestCase):
         self.assertEqual(self.ydm("--help").returncode, 0)
 
 
+class TestGetConnectionIsDefinedOnce(unittest.TestCase):
+    """`StorageManager.get_connection` was written twice, and the second won.
+
+    Found 2026-08-25 while trying to add a shared-connection scope: the edit
+    landed in a method that had never run. The dead one carried
+    `PRAGMA synchronous`, `PRAGMA journal_mode` and the whole "Level 2"
+    tmpfs schema recovery — so on every machine using /dev/shm for scans, the
+    recovery written for exactly that case could not fire.
+
+    Python keeps only the last definition, so nothing warns and nothing
+    fails. The guard has to read the source.
+    """
+
+    def _class_body(self):
+        import ast
+
+        source = (ROOT_DIR / "ydm.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "StorageManager":
+                return node
+        self.fail("StorageManager not found in ydm.py")
+
+    def test_no_method_of_storage_manager_is_defined_twice(self):
+        import ast
+        from collections import Counter
+
+        names = Counter(
+            item.name for item in self._class_body().body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        duplicates = {name: count for name, count in names.items() if count > 1}
+        self.assertEqual({}, duplicates,
+                         "a later definition silently replaces an earlier one")
+
+
+class TestConnectionPragmas(unittest.TestCase):
+    """The pragmas the shadowed method meant to set, now actually set.
+
+    Restoring them costs nothing measurable: on a 138 MB database,
+    connect+query is 0.522 ms and connect+both pragmas+query is 0.511 ms.
+    The ~0.6 ms once attributed to the pragmas is the price of first touching
+    the file, which any first statement pays.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+        StorageManager(self.db_path, use_temp_storage=False,
+                       config=DEFAULT_CONFIG).init_db()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_a_disk_connection_asks_for_normal_synchronous(self):
+        storage = StorageManager(self.db_path, use_temp_storage=False,
+                                 config=DEFAULT_CONFIG)
+        conn = storage.get_connection()
+        try:
+            # 1 == NORMAL. FULL (2) is the sqlite default and is slower than
+            # this project needs for a cache it can rebuild by rescanning.
+            self.assertEqual(1, conn.execute("PRAGMA synchronous").fetchone()[0])
+            self.assertEqual("wal", conn.execute("PRAGMA journal_mode").fetchone()[0])
+        finally:
+            conn.close()
+
+    def test_a_temp_connection_keeps_its_journal_in_memory(self):
+        """Scanning into tmpfs wants speed, not durability — it is a scratch copy."""
+        storage = StorageManager(self.db_path, use_temp_storage=False,
+                                 config=DEFAULT_CONFIG)
+        storage.temp_mode = True  # without needing /dev/shm to exist here
+        conn = storage.get_connection()
+        try:
+            self.assertEqual(0, conn.execute("PRAGMA synchronous").fetchone()[0])
+            self.assertEqual("memory",
+                             conn.execute("PRAGMA journal_mode").fetchone()[0])
+        finally:
+            conn.close()
+
+
+class TestInitDbClosesWhatItOpens(unittest.TestCase):
+    """`with sqlite3.connect(...)` commits; it does not close.
+
+    init_db() used the `with` form, so its connection outlived the call and
+    was released only by the next garbage collection. Enough to make the very
+    next `PRAGMA journal_mode` fail with "database is locked" — which is how
+    this was found: the tmpfs recovery calls init_db() and then reopens the
+    file, so the leak stood in the way of the case the recovery exists for.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_nothing_holds_the_file_after_init(self):
+        import sqlite3
+
+        StorageManager(self.db_path, use_temp_storage=False,
+                       config=DEFAULT_CONFIG).init_db()
+        # No gc.collect() on purpose: needing one is the defect.
+        conn = sqlite3.connect(self.db_path)
+        try:
+            mode = conn.execute("PRAGMA journal_mode=MEMORY").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual("memory", mode,
+                         "a connection from init_db is still holding the file")
+
+
+class TestTmpfsSchemaRecovery(unittest.TestCase):
+    """"Level 2": the scratch database vanished mid-scan, so rebuild it.
+
+    tmpfs is memory — a reboot, an OOM kill or a stray cleanup takes the file
+    with it, and the scan then writes into a database with no tables. The
+    recovery for that has been unreachable code since it was written.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "scratch.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _storage(self):
+        storage = StorageManager(self.db_path, use_temp_storage=False,
+                                 config=DEFAULT_CONFIG)
+        storage.temp_mode = True
+        storage.db_path = self.db_path
+        return storage
+
+    def test_a_missing_schema_is_rebuilt(self):
+        import io
+        import contextlib
+        import sqlite3
+
+        sqlite3.connect(self.db_path).close()  # an empty file, no tables
+        storage = self._storage()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            conn = storage.get_connection()
+        try:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        self.assertIn("scan_progress", tables, "the schema was not rebuilt")
+        self.assertIn("CRITICAL", stderr.getvalue(),
+                      "recovery happened silently, which is how it stayed unnoticed")
+
+    def test_a_healthy_scratch_database_is_left_alone(self):
+        import io
+        import contextlib
+
+        StorageManager(self.db_path, use_temp_storage=False,
+                       config=DEFAULT_CONFIG).init_db()
+        storage = self._storage()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            conn = storage.get_connection()
+        conn.close()
+        self.assertNotIn("CRITICAL", stderr.getvalue())
+
+    def test_recovery_does_not_run_for_a_disk_database(self):
+        """A missing schema on disk is not a lost scratch copy — do not rebuild."""
+        import io
+        import contextlib
+        import sqlite3
+
+        sqlite3.connect(self.db_path).close()
+        storage = StorageManager(self.db_path, use_temp_storage=False,
+                                 config=DEFAULT_CONFIG)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            conn = storage.get_connection()
+        try:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        self.assertNotIn("scan_progress", tables)
+        self.assertNotIn("CRITICAL", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
