@@ -29,7 +29,7 @@ if str(ROOT_DIR) not in sys.path:
 from tools.sync_common import (  # noqa: E402
     build_composite_snapshot,
     create_storage,
-    default_filter_path,
+    legacy_filter_path,
     delete_local_entry_contents,
     load_sync_filters,
     normalize_path,
@@ -204,7 +204,10 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--text-header", action=argparse.BooleanOptionalAction, default=True)
         sub.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
         sub.add_argument("--filter-path", default=None,
-                          help="Defaults to <local-root>.filters")
+                          help="Defaults to <local-root>.filters — the pre-policy "
+                               "filter, which says what to materialize locally. "
+                               "What may be synced back lives in "
+                               "<local-root>.bisync.filters, written by sync_policy.py")
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
 
     add_parser = subparsers.add_parser("add", help="Include folder in sync (rclone filter-file)")
@@ -229,7 +232,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.local_root = require_local_root(args.local_root, tool="sync_filters.py")
-    filter_path = args.filter_path or default_filter_path(args.local_root)
+    filter_path = args.filter_path or legacy_filter_path(args.local_root)
     filters_result = load_sync_filters(filter_path)
     include_dirs = filters_result.include_dirs
     warnings = list(filters_result.warnings)

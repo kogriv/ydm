@@ -40,7 +40,6 @@ if str(ROOT_DIR) not in sys.path:
 from tools.sync_common import (  # noqa: E402
     acquire_lock,
     append_text_log,
-    default_filter_path,
     filter_file_hash,
     load_bisync_state,
     load_sync_filters,
@@ -66,6 +65,33 @@ def default_policy_path() -> str:
 
 def default_bisync_filter_path(local_root: str) -> str:
     return f"{os.path.expanduser(local_root).rstrip('/')}.bisync.filters"
+
+
+def download_set_filter_paths(local_root: str) -> tuple:
+    """The filters that describe what to *download*, not what to sync back.
+
+    `sync_policy.py render-filters` writes `<root>.download.filters`, and
+    `<root>.filters` is what everything used before the policy layer split the
+    two. Neither may become a bisync baseline: both can hold paths that are
+    materialized locally on purpose and unsafe to send back, which is the
+    whole point of the `download_only` mode.
+    """
+    base = os.path.expanduser(local_root).rstrip("/")
+    return (f"{base}.download.filters", f"{base}.filters")
+
+
+def refuse_download_filter(filter_path: str, local_root: str, action: str) -> str | None:
+    """Error text when `filter_path` is a download set, else None."""
+    resolved = os.path.expanduser(filter_path)
+    if resolved not in download_set_filter_paths(local_root):
+        return None
+    return (
+        f"{filter_path} is a download filter, not the bidirectional one. "
+        f"Using it for `{action}` would make a bisync baseline out of paths "
+        "that are mirrored locally on purpose and unsafe to send back — see "
+        "tasks/rclone_backend/POLICY_AWARE_BISYNC.md. Pass "
+        "--filter-path <root>.bisync.filters, or --force-filter if you mean it."
+    )
 
 
 def load_sync_policy(policy_path: str) -> dict | None:
@@ -146,7 +172,7 @@ def write_last_log(result) -> None:
 
 
 def cmd_resync(args: argparse.Namespace) -> dict:
-    filter_path = args.filter_path or default_filter_path(args.local_root)
+    filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
     payload = {
         "schema": "sync_bisync:v1",
         "action": "resync",
@@ -165,6 +191,17 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         "warnings": [],
         "error": None,
     }
+
+    # Before anything reads the file, let alone runs rclone. `run` is already
+    # protected — it compares the filter's hash against the recorded baseline
+    # and refuses a mismatch — but `resync` is the command that *writes* the
+    # baseline, so it has nothing to compare against. This is the one place a
+    # wrong filter turns into a real one.
+    if not args.force_filter:
+        refusal = refuse_download_filter(filter_path, args.local_root, "resync")
+        if refusal:
+            payload["error"] = refusal
+            return payload
 
     filters_result = load_sync_filters(filter_path)
     payload["warnings"].extend(filters_result.warnings)
@@ -236,7 +273,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
 
 
 def cmd_run(args: argparse.Namespace) -> dict:
-    filter_path = args.filter_path or default_filter_path(args.local_root)
+    filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
     state = load_bisync_state()
     payload = {
         "schema": "sync_bisync:v1",
@@ -339,7 +376,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
 
 def cmd_status(args: argparse.Namespace) -> dict:
-    filter_path = args.filter_path or default_filter_path(args.local_root)
+    filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
     policy_path = getattr(args, "policy_path", None) or default_policy_path()
     policy = load_sync_policy(policy_path)
     policy_bisync_filter_path = default_bisync_filter_path(args.local_root) if policy else None
@@ -466,7 +503,11 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--format", choices=["json", "text"], default="json")
         sub.add_argument("--text-header", action=argparse.BooleanOptionalAction, default=True)
         sub.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
-        sub.add_argument("--filter-path", default=None, help="Defaults to <local-root>.filters")
+        sub.add_argument(
+            "--filter-path", default=None,
+            help="Defaults to <local-root>.bisync.filters — the policy-generated "
+                 "bidirectional set, not <local-root>.download.filters",
+        )
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
         sub.add_argument("--policy-path", default=default_policy_path())
 
@@ -477,6 +518,11 @@ def parse_args() -> argparse.Namespace:
     resync_parser.add_argument("--apply", action="store_true")
     resync_parser.add_argument("--max-delete", type=int, default=20)
     resync_parser.add_argument("--check-access", action=argparse.BooleanOptionalAction, default=True)
+    resync_parser.add_argument(
+        "--force-filter", action="store_true",
+        help="Establish the baseline even from a download filter. You are "
+             "saying the download-only paths are safe to send back.",
+    )
 
     run_parser = subparsers.add_parser(
         "run", help="Run a normal (non-resync) bisync pass — this is what the scheduled job calls"

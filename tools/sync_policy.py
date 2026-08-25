@@ -26,7 +26,7 @@ if str(ROOT_DIR) not in sys.path:
 from tools.sync_common import (  # noqa: E402
     build_composite_snapshot,
     create_storage,
-    default_filter_path,
+    legacy_filter_path,
     fetch_child_dirs,
     filter_file_hash,
     load_bisync_state,
@@ -427,7 +427,7 @@ def migrate_policy(args: argparse.Namespace) -> dict:
     if resolved == "daemon":
         return _migrate_from_daemon(args)
 
-    filter_path = args.legacy_filter_path or default_filter_path(args.local_root)
+    filter_path = args.legacy_filter_path or legacy_filter_path(args.local_root)
     filters = load_sync_filters(filter_path)
     policy = empty_policy(args.local_root, args.remote)
     inspections = []
@@ -512,7 +512,7 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
 
 def status_payload(args: argparse.Namespace) -> dict:
     policy = load_policy(args.policy_path)
-    legacy_filter_path = args.legacy_filter_path or default_filter_path(args.local_root)
+    resolved_legacy_filter = args.legacy_filter_path or legacy_filter_path(args.local_root)
     download_path = args.download_filter_path or download_filter_path(args.local_root)
     bisync_path = args.bisync_filter_path or bisync_filter_path(args.local_root)
     state = load_bisync_state()
@@ -527,12 +527,12 @@ def status_payload(args: argparse.Namespace) -> dict:
         "policy_exists": policy is not None,
         "local_root": args.local_root,
         "remote": args.remote,
-        "legacy_filter_path": legacy_filter_path,
+        "legacy_filter_path": resolved_legacy_filter,
         "download_filter_path": download_path,
         "bisync_filter_path": bisync_path,
         "download_filter_hash": filter_file_hash(download_path),
         "bisync_filter_hash": current_bisync_hash,
-        "legacy_filter_hash": filter_file_hash(legacy_filter_path),
+        "legacy_filter_hash": filter_file_hash(resolved_legacy_filter),
         "bidirectional_paths": effective_bisync_paths(policy) if policy else [],
         "download_only_paths": policy_paths_by_mode(policy, "download_only") if policy else [],
         "disabled_paths": policy_paths_by_mode(policy, "disabled") if policy else [],

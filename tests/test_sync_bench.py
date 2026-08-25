@@ -618,6 +618,83 @@ class TestRcloneOnTheBench(BenchTestCase):
         self.assertEqual(read_back, original, "the encoding does not round-trip")
 
 
+class TestBisyncFilterSelection(BenchTestCase):
+    """Which filter `sync_bisync` reaches for when nobody says.
+
+    Two filters describe different things: `<root>.download.filters` says what
+    to materialize locally, `<root>.bisync.filters` says what may be sent back.
+    The split arrived with the policy layer; `sync_bisync`'s defaults did not
+    move with it and kept naming the pre-split `<root>.filters`, so `status`
+    hashed a file the baseline was never taken from, and `resync` — the one
+    command with no hash guard, because it is the one that writes the baseline
+    — would happily make a bisync baseline out of a download set.
+
+    No rclone needed: the selection and the refusal both happen before it.
+    """
+
+    def _filters(self):
+        base = self.bench.local_root.rstrip("/")
+        paths = {
+            "legacy": f"{base}.filters",
+            "download": f"{base}.download.filters",
+            "bisync": f"{base}.bisync.filters",
+        }
+        # Distinguishable content, so a wrong pick is visible rather than
+        # merely undetected: only the bidirectional one includes anything.
+        with open(paths["legacy"], "w", encoding="utf-8") as handle:
+            handle.write("+ /pro/**\n+ /Books/**\n- **\n")
+        with open(paths["download"], "w", encoding="utf-8") as handle:
+            handle.write("- **\n")
+        with open(paths["bisync"], "w", encoding="utf-8") as handle:
+            handle.write("+ /pro/**\n- **\n")
+        return paths
+
+    def _bisync(self, *args):
+        proc = self.run_tool(
+            "sync_bisync.py", *args,
+            "--db-path", self.bench.db_path,
+            "--local-root", self.bench.local_root,
+            "--policy-path", self.bench.policy_path,
+            "--remote", "cloud", "--format", "json",
+        )
+        body = proc.stdout[proc.stdout.index("{"):]
+        payload = json.loads(body)
+        return payload.get("data", payload)
+
+    def test_status_reads_the_bidirectional_filter_by_default(self):
+        paths = self._filters()
+        data = self._bisync("status")
+        self.assertEqual(data["filter_path"], paths["bisync"])
+
+    def test_resync_refuses_a_download_filter(self):
+        paths = self._filters()
+        data = self._bisync("resync", "--apply", "--filter-path", paths["download"])
+        self.assertIsNotNone(data["error"])
+        self.assertIn("download filter", data["error"])
+
+    def test_resync_refuses_the_pre_policy_filter_too(self):
+        """`<root>.filters` is a download set as well — an older one."""
+        paths = self._filters()
+        data = self._bisync("resync", "--apply", "--filter-path", paths["legacy"])
+        self.assertIsNotNone(data["error"])
+        self.assertIn("download filter", data["error"])
+
+    def test_force_filter_gets_past_the_refusal(self):
+        """The override is an override, not a second opinion.
+
+        The download filter here includes nothing, so once the guard is out of
+        the way the run stops at the next check — which is how we can tell it
+        was reached without letting rclone anywhere near this test.
+        """
+        paths = self._filters()
+        data = self._bisync(
+            "resync", "--apply", "--force-filter", "--filter-path", paths["download"],
+        )
+        self.assertIsNotNone(data["error"])
+        self.assertNotIn("download filter", data["error"])
+        self.assertIn("No folders included", data["error"])
+
+
 class TestMenuScreens(BenchTestCase):
     """The screens themselves, driven by a scripted reader.
 

@@ -19,7 +19,7 @@ from tools.sync_backends import (  # noqa: E402
 )
 from tools.sync_common import (  # noqa: E402
     create_storage,
-    default_filter_path,
+    legacy_filter_path,
     get_latest_successful_scan_id,
     load_exclude_dirs,
     load_sync_filters,
@@ -649,7 +649,7 @@ def main() -> None:
             if policy_ctx.filter_mismatch:
                 source_warnings.append("bisync filter out of sync with policy")
         else:
-            filter_path = args.filter_path or default_filter_path(args.local_root)
+            filter_path = args.filter_path or legacy_filter_path(args.local_root)
             filters_result = load_sync_filters(filter_path)
             membership_dirs = set(filters_result.include_dirs)
             source_path = filters_result.filter_path

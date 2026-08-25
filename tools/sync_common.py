@@ -129,9 +129,23 @@ def load_exclude_dirs(config_path: Optional[str] = None) -> ExcludeDirsResult:
     )
 
 
-def default_filter_path(local_root: str) -> str:
-    """rclone filter-file lives next to the local mirror by convention: <local_root>.filters"""
+def legacy_filter_path(local_root: str) -> str:
+    """The single filter-file everything used before the policy layer.
+
+    `<local_root>.filters` predates the split into `<local_root>.download.filters`
+    and `<local_root>.bisync.filters` that `sync_policy.py render-filters`
+    writes today. It is still the file `sync_filters.py` manages and the
+    fallback `sync_tree.py` reads when there is no policy, so it is not dead —
+    but it describes what to materialize locally, never what may be sent back,
+    and the name now says so. `sync_policy.py` has called its own argument
+    `--legacy-filter-path` since the split.
+    """
     return f"{local_root.rstrip('/')}.filters"
+
+
+#: Pre-split name, kept so out-of-tree callers do not break. New code should
+#: say which filter it means.
+default_filter_path = legacy_filter_path
 
 
 def load_sync_filters(filter_path: str) -> SyncFiltersResult:

@@ -25,7 +25,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from tools.sync_common import (  # noqa: E402
     CommandResult,
-    default_filter_path,
+    legacy_filter_path,
     load_sync_filters,
     run_command,
     stop_start_daemon,
