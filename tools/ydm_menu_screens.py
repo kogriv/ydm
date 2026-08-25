@@ -76,6 +76,7 @@ def render_main_menu(cfg: MenuConfig, status: MenuStatus) -> List[str]:
         " 7  Update snapshot (checks what changed first)",
         " 8  Detailed status",
         " d  Cloud vs local diff",
+        " t  Disk trash (what was deleted, how to restore)",
         " 9  Help",
         " q  Quit",
         "",

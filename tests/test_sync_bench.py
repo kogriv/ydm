@@ -1099,5 +1099,309 @@ class TestStaleSnapshotSurfaces(unittest.TestCase):
         self.assertIn("WARN:", self._header(self._bench(400)))
 
 
+# --- Phase 8.7 -------------------------------------------------------------
+
+class TestAddPreview(BenchTestCase):
+    """Adding shows what it will change before it changes it.
+
+    Removal has three barriers; adding had none, although adding is what
+    caused the 2026-08-14 incident. The first design answer was "confirm when
+    `action_inspect()` sees a risk", and it was withdrawn: on 14.08 there was
+    no risk to see — the path existed and was fully materialized — so a
+    risk-gated prompt would have stayed silent exactly when it was needed.
+
+    What would have spoken is the delta. `/Books` was `disabled`, and adding
+    a folder beneath it makes the daemon stop excluding `Books` altogether.
+    That fact is in `apply_policy(dry_run=True)` and was simply never shown.
+
+    See tasks/ydm_menu/DESIGN-2026-08-24.md, "Решения 8.7 и 8.8".
+    """
+
+    #: The orphan inside the disabled tree — the shape of the incident.
+    TARGET = "/Books/Math/АнГем"
+
+    def setUp(self):
+        super().setUp()
+        self._drop_download_only()
+
+    def _drop_download_only(self):
+        """The bench policy is rclone-shaped; the daemon cannot express it.
+
+        `download_only` has no blacklist equivalent, so `apply_policy` refuses
+        the whole policy before any delta can be computed — the check would
+        fail for a reason that has nothing to do with previews. A machine
+        running the daemon has no such entries in the first place.
+        """
+        policy = self.bench.read_policy()
+        policy["paths"] = {
+            path: meta for path, meta in policy["paths"].items()
+            if meta.get("mode") != "download_only"
+        }
+        with open(self.bench.policy_path, "w", encoding="utf-8") as handle:
+            json.dump(policy, handle, ensure_ascii=False, indent=2)
+
+    def cfg(self, backend="rclone"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend=backend,
+            plain=True,
+        )
+
+    def preview(self, backend="daemon", path=None, mode="bidirectional"):
+        from tools.ydm_menu_actions import preview_add
+
+        return preview_add(self.cfg(backend), path or self.TARGET, mode)
+
+    def test_the_preview_names_what_stops_being_excluded(self):
+        """The line that would have stopped 14.08.
+
+        Not "are you sure" — the specific fact that `Books`, excluded until
+        now, is about to leave the exclude list and start syncing.
+        """
+        result = self.preview()
+        self.assertTrue(result.ok, result.message)
+        self.assertIn("Books", result.details["delta"]["removed"])
+        self.assertIn("no longer excluded", result.message)
+        self.assertRegex(result.message, r"Books(?!/)")
+
+    def test_the_preview_counts_both_sides(self):
+        """The count is shown, and on its own it is not enough.
+
+        On this bench it goes 1 -> 1: `Books` leaves the exclude list and
+        `Books/Keep` enters it, so the number is unchanged while the meaning
+        is inverted. That is precisely why the named lines carry the warning
+        and the count only frames it — a preview that showed the count alone
+        would have been silent here too.
+        """
+        result = self.preview()
+        delta = result.details["delta"]
+        self.assertNotEqual(set(delta["before"]), set(delta["after"]))
+        self.assertIn(f"{len(delta['before'])} -> {len(delta['after'])}",
+                      result.message)
+
+    def test_the_preview_touches_nothing(self):
+        """It runs the production path, so it has to run it on a copy.
+
+        The policy is copied to a temp file and `add_policy_path(apply=True)`
+        is applied there — that is the only way to see the daemon coercion
+        without reimplementing it. Both real files must come out byte-identical.
+        """
+        with open(self.bench.exclude_config, "rb") as handle:
+            config_before = handle.read()
+        policy_before = self.bench.read_policy()
+
+        self.preview()
+
+        with open(self.bench.exclude_config, "rb") as handle:
+            self.assertEqual(config_before, handle.read(), "daemon config changed")
+        self.assertEqual(policy_before, self.bench.read_policy(), "policy changed")
+
+    def test_the_preview_shows_the_filter_delta_on_rclone(self):
+        """The other backend has no exclude list; it has two filter files."""
+        result = self.preview(backend="rclone", path="/orphans")
+        self.assertTrue(result.ok, result.message)
+        self.assertIn("orphans", result.details["delta"]["added"])
+        self.assertIn("Download filter", result.message)
+        self.assertIn("Bisync filter", result.message)
+
+    def test_the_preview_reports_a_refusal_before_it_happens(self):
+        """`deletion_risk_paths` is filled in on a dry run and raised on a real one.
+
+        `/agents` is bidirectional in the bench policy and absent on disk, so
+        restarting the daemon would read that absence as a deletion. The
+        preview must say so rather than let the person find out by being
+        refused after they confirm.
+        """
+        result = self.preview()
+        self.assertIn("agents", result.details["delta"]["deletion_risk_paths"])
+        self.assertIn("would be refused", result.message)
+
+    def test_a_preview_that_cannot_be_built_says_why(self):
+        """A path with no snapshot beneath it cannot have its siblings resolved."""
+        result = self.preview(path="/nowhere/at/all")
+        self.assertFalse(result.ok)
+        self.assertTrue(result.message.strip())
+
+
+class TestAddScreensConfirm(BenchTestCase):
+    """The screens put the preview in front of the person, then ask once."""
+
+    def cfg(self, backend="rclone"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend=backend,
+            plain=True,
+        )
+
+    def run_screen(self, screen, answers, backend="rclone"):
+        import contextlib
+        import io
+
+        from tools.ydm_menu_prompts import scripted_reader
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            screen(self.cfg(backend), scripted_reader(answers))
+        return buffer.getvalue()
+
+    def _orphan_index(self, path):
+        from tools.ydm_menu_orphans import list_orphan_paths
+
+        orphans = list_orphan_paths(
+            self.bench.db_path, self.bench.local_root, self.bench.policy_path,
+            root="/", max_depth=5,
+        )
+        for index, entry in enumerate(orphans, start=1):
+            if entry.cloud_path == path:
+                return str(index)
+        self.fail(f"{path} is not in the orphan list: "
+                  f"{[e.cloud_path for e in orphans]}")
+
+    def test_declining_the_preview_leaves_the_policy_alone(self):
+        """The barrier only counts if answering no actually stops it."""
+        before = self.bench.read_policy()
+        pick = self._orphan_index("/orphans")
+        text = self.run_screen(
+            __import__("tools.ydm_menu", fromlist=["x"]).screen_add_orphans,
+            [pick, "2", "n"],
+        )
+        self.assertIn("Download filter", text)
+        self.assertEqual(before, self.bench.read_policy())
+
+    def test_confirming_it_applies(self):
+        """And the same screen, answered yes, still does the work."""
+        pick = self._orphan_index("/orphans")
+        self.run_screen(
+            __import__("tools.ydm_menu", fromlist=["x"]).screen_add_orphans,
+            [pick, "2", "y"],
+        )
+        policy = self.bench.read_policy()
+        self.assertIn("orphans", policy["paths"])
+        self.assertEqual("download_only", policy["paths"]["orphans"]["mode"])
+
+
+# --- Phase 8.8 -------------------------------------------------------------
+
+class TestTrashAndDatabaseSurfaces(BenchTestCase):
+    """`trash_scan` gets a screen; `prune` gets a line.
+
+    Both are needed rarely and at a bad moment. The difference is who needs
+    them: the trash is a person's emergency, prune is housekeeping. So the
+    trash gets the menu entry and prune gets a fact in the status screen.
+    """
+
+    def cfg(self, backend="rclone"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend=backend,
+            plain=True,
+        )
+
+    def capture(self, fn, *args, **kwargs):
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            fn(*args, **kwargs)
+        return buffer.getvalue()
+
+    def test_the_menu_offers_the_trash(self):
+        from tools.ydm_menu_screens import render_main_menu
+        from tools.ydm_menu_status import load_status
+
+        cfg = self.cfg()
+        text = "\n".join(render_main_menu(cfg, load_status(cfg)))
+        self.assertIn(" t  ", text)
+        # Still on letters: the digits keep meaning what they meant.
+        self.assertIn(" 8  Detailed status", text)
+
+    def test_the_trash_screen_lists_what_is_there_and_how_to_restore_it(self):
+        """The hashed name is the thing nobody can guess, so it is the payload."""
+        import unittest.mock as mock
+
+        from tools import ydm_menu_actions
+
+        items = [{
+            "name": "Books_20260814T093000",
+            "path": "trash:/Books_20260814T093000",
+            "type": "dir",
+            "deleted": "2026-08-14T09:30:00+00:00",
+            "origin_path": "disk:/Books",
+        }]
+        with mock.patch.object(ydm_menu_actions, "_trash_top_level",
+                               return_value=items):
+            text = self.capture(ydm_menu_actions.print_trash_overview, self.cfg())
+
+        self.assertIn("Books_20260814T093000", text)
+        self.assertIn("/Books", text)
+        self.assertIn("trash_scan.py scan", text)
+        self.assertIn("--trash-root trash:/Books_20260814T093000", text)
+        self.assertIn("--restore-root /Books", text)
+
+    def test_the_trash_screen_survives_a_missing_token(self):
+        """`resolve_token()` raises SystemExit, which is not an Exception.
+
+        The same trap as the smart cloud scan: `except Exception` does not
+        catch it, and the menu would exit out from under the person.
+        """
+        import unittest.mock as mock
+
+        from tools import ydm_menu_actions
+
+        with mock.patch.object(ydm_menu_actions, "_trash_top_level",
+                               side_effect=SystemExit(2)):
+            text = self.capture(ydm_menu_actions.print_trash_overview, self.cfg())
+        self.assertTrue(text.strip())
+        self.assertIn("trash", text.lower())
+
+    def test_an_empty_trash_is_an_answer(self):
+        import unittest.mock as mock
+
+        from tools import ydm_menu_actions
+
+        with mock.patch.object(ydm_menu_actions, "_trash_top_level",
+                               return_value=[]):
+            text = self.capture(ydm_menu_actions.print_trash_overview, self.cfg())
+        self.assertIn("empty", text.lower())
+
+    def test_the_status_says_how_big_the_database_is_and_what_is_droppable(self):
+        """Prune stays out of the menu; the fact that invites it does not."""
+        from tools.ydm_menu_actions import print_detailed_status
+
+        text = self.capture(print_detailed_status, self.cfg())
+        self.assertIn("Database:", text)
+        self.assertRegex(text, r"Database:.*\d+ scan")
+        self.assertIn("prunable", text)
+        self.assertIn("report prune", text)
+
+    def test_the_database_line_does_not_take_the_screen_down(self):
+        """An unreadable database is a missing line, not a traceback."""
+        import unittest.mock as mock
+
+        from tools import ydm_menu_actions
+
+        with mock.patch.object(ydm_menu_actions, "_database_facts",
+                               side_effect=RuntimeError("boom")):
+            text = self.capture(ydm_menu_actions.print_detailed_status, self.cfg())
+        self.assertTrue(text.strip())
+        self.assertNotIn("Traceback", text)
+
+
 if __name__ == "__main__":
     unittest.main()

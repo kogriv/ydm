@@ -20,11 +20,13 @@ from tools.ydm_menu_actions import (  # noqa: E402
     action_resync,
     check_cloud_changes,
     cloud_list_dirs,
+    confirm_and_add,
     handle_blocked_add,
     list_stale_folders,
     offer_resync_if_needed,
     print_cloud_local_diff,
     print_detailed_status,
+    print_trash_overview,
     run_cloud_scan,
     run_sync_tree,
     snapshot_top_level,
@@ -130,7 +132,9 @@ def screen_add_cloud(cfg: MenuConfig, reader: Reader) -> None:
                 if result and result.ok:
                     print(result.message)
                 continue
-        result = action_add(cfg, full, mode)
+        result = confirm_and_add(cfg, full, mode, reader=reader)
+        if result is None:
+            continue
         print(result.message)
         if result.ok and mode == "bidirectional":
             offer_resync_if_needed(cfg, mode=mode, reader=reader)
@@ -172,7 +176,9 @@ def screen_add_orphans(cfg: MenuConfig, reader: Reader) -> None:
                     print(result.message)
                     added_any = True
                 continue
-        result = action_add(cfg, path, mode)
+        result = confirm_and_add(cfg, path, mode, reader=reader)
+        if result is None:
+            continue
         print(result.message)
         if result.ok:
             added_any = True
@@ -342,6 +348,7 @@ def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
         # Letters, not new numbers: `2` for "add from cloud" is in the owner's
         # fingers and written into HOW_TO_USE. See tasks/ydm_menu/DESIGN-2026-08-24.md.
         "d": lambda: print_cloud_local_diff(cfg),
+        "t": lambda: print_trash_overview(cfg),
         "h": lambda: print("\n".join(render_short_help())),
     }
     while True:

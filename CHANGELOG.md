@@ -5,6 +5,102 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-25 — the barrier goes where the damage came from
+
+Phase 8's two open decisions, settled and built
+([`tasks/ydm_menu/DESIGN-2026-08-24.md`](tasks/ydm_menu/DESIGN-2026-08-24.md),
+"Решения 8.7 и 8.8"). 261 tests → 275.
+
+- **Adding shows what it will change, then asks once.** Removal had three
+  barriers and adding had none, although adding is what caused 2026-08-14.
+  The design's first answer — confirm when the risk inspector sees a risk —
+  is withdrawn: on 14.08 there was no risk to see, the path existed and was
+  fully materialized, so a risk-gated prompt would have been silent exactly
+  when it was needed. What speaks instead is the delta: `no longer excluded
+  (starts syncing): Books`. The bench makes the sharper point — the count can
+  go `1 -> 1` while the content inverts, so the names carry the warning and
+  the number only frames it.
+- **The preview runs the production path on a copy.** The policy is copied to
+  a temp file, `add_policy_path(apply=True)` is applied there, and the result
+  goes through `apply_policy(dry_run=True)`. That is deliberate: the daemon
+  coercion that drops a disabled ancestor is the 14.08 logic itself, and
+  computing the delta "by hand" would put a second copy of it beside the
+  first. Neither the policy nor the daemon config is touched.
+- **A refusal is reported before it happens.** `deletion_risk_paths` and
+  `clears_exclude_dirs` are filled in on a dry run and *raised* on a real one,
+  so the preview now warns rather than letting the refusal arrive after the
+  person has already committed.
+- **`t` shows the trash.** The one screen meant to be read under stress: what
+  is missing when files have vanished is not courage but the hashed name —
+  `trash_scan.py` wants `--trash-root trash:/Books_<hash>` and nobody knows
+  theirs. The menu lists the entries with their origins and prints the two
+  commands. Restoring stays in the CLI: it changes data and should say so.
+- **`prune` deliberately gets no entry, and a line instead.** It is
+  housekeeping wanted twice a year; an entry would only lengthen the list. But
+  the database grows with every scan and nothing said so, so detailed status
+  now reports size, scan count and what is droppable. Measured at 0.19 s on a
+  138 MB, 53-scan database.
+- **The bench now runs in CI.** `tests/test_sync_bench.py` — 74 checks, and
+  the only coverage the menu screens have — ran nowhere but a developer's
+  machine. That is how a menu offering paths from someone else's setup passed
+  every green run. Its rclone-backed checks skip themselves where rclone is
+  absent, so a runner without it still gets the other 66.
+
+## 2026-08-25 — what running on the real device turned up
+
+Four findings from the machine that actually runs this every 30 minutes, each
+filed with measurements and fixed with a test. Three are defects that had been
+in place for weeks; the fourth is the operator surface that never shipped.
+
+> **Upgrading an existing database: run `python3 ydm.py init` once.**
+> It is an `ALTER TABLE`, metadata only, seconds. Without it every scan started
+> by a *tool* — `sync_rename.py`, `sync_tree.py`, `ydm_menu.py`,
+> `sync_bisync.py` — dies with `table scans has no column named scan_root`,
+> while `ydm.py` itself keeps working. That asymmetry is what hid it.
+
+- **The schema migration ran on the one path that did not need it.**
+  `_ensure_scan_scope_columns()` was reachable from `init_db()`,
+  `_init_final_db()` and the tmpfs branch of `start_scan()` — every path
+  `ydm.py` takes and none of the paths a tool takes, because
+  `tools/sync_common.py` builds its StorageManager with
+  `use_temp_storage=False` and such an object never calls an initializer.
+  Worse than a crash: the scheduled job treats a failing rename preflight as
+  `allow_bisync` on purpose, so **every scheduled bisync ran without the
+  rename guard** while `var/bisync.log` kept printing `run OK`. Reads were
+  never affected — `_recorded_scope()` already fell back to inference.
+- **`sync_bisync` defaulted `--filter-path` to the download filter.** An
+  incomplete migration, not a choice that aged badly: `752c182` split one
+  filter into two and added `default_bisync_filter_path()`, but the three
+  `args.filter_path or default_filter_path(...)` lines predate the split. So
+  `status` hashed the download filter and compared it against a baseline
+  recorded from the bidirectional one — `resync_needed: True` had been a false
+  alarm for weeks. `resync` also gained the guard it lacked: `run` refuses a
+  filter whose hash does not match the baseline, but `resync` is the command
+  that *writes* the baseline, so it had nothing to compare against. It now
+  refuses the two download sets by name, before reading the file and long
+  before rclone, unless `--force-filter` says otherwise.
+- **Tree child inference read every row of the snapshot, once per folder.**
+  `parent_path LIKE '<prefix>/%'` cannot be folded into an index range while
+  `LIKE` is case-insensitive, so `idx_files_unique` served only `scan_id=?`.
+  A range over the same index — `['<prefix>/', '<prefix>0')`, and the leading
+  slash matters, or `/Books/Math-old` gets swallowed — turned a walk that did
+  not finish into one that does: depth 4 was killed at 460 s and takes 154 s,
+  `ydm_menu orphans` was killed at 13 minutes and takes 420 s. Seven minutes
+  is finished rather than fast; the remainder is measured and filed as
+  [`tasks/ydm_menu/BACKLOG.md`](tasks/ydm_menu/BACKLOG.md) Phase 9.
+- **`tools/aliases.sh` shipped a quarter of itself.** 126 lines against the
+  463 in use: scanning and the tree had wrappers, bisync, the rename guard and
+  the policy layer had none — everything except the part that changes data.
+  Fourteen commands ported, plus `ydm-help --plain` and its pager. Two repairs
+  on the way: `ydm-scan-cloud` was an `alias`, which a non-interactive shell
+  does not expand at all, so for any script it simply did not exist; and the
+  bisync filter is now derived when a command runs, not when the file is
+  sourced, because `YDM_LOCAL_ROOT` is commonly exported after the source line.
+- **`ydm` is the menu again, and `ydm-cli` is the CLI.** Three shipped
+  documents said `ydm` meant the menu and the alias file rebound it to the
+  CLI, so sourcing it took the menu away from whoever had been using it. The
+  CLI keeps a wrapper it never had before.
+
 ## 2026-08-25 — the Android side stops being one person's phone
 
 The device answered the three questions `tasks/android_verify/` was blocked

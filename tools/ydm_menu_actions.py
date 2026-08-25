@@ -155,6 +155,176 @@ def action_add(
     return ActionResult(True, msg, payload)
 
 
+def _preview_lines_daemon(path: str, mode: str, delta: dict) -> List[str]:
+    before, after = delta["before"], delta["after"]
+    lines = [
+        f"\nAdding {path} as {mode} will change the daemon config:",
+        f"  exclude-dirs: {len(before)} -> {len(after)}",
+    ]
+    removed = delta.get("removed") or []
+    if removed:
+        # The line that would have shown /Books on 2026-08-14: a folder that
+        # was excluded and is about to start syncing for real.
+        lines.append("  no longer excluded (starts syncing):  "
+                     + _joined(removed))
+    added = delta.get("added") or []
+    if added:
+        lines.append("  newly excluded:                       "
+                     + _joined(added))
+    if not removed and not added:
+        lines.append("  (no change to the exclude list)")
+    return lines
+
+
+def _preview_lines_rclone(path: str, mode: str, delta: dict) -> List[str]:
+    lines = [f"\nAdding {path} as {mode} will change the rclone filters:"]
+    for label, key in (("Download filter", "download"), ("Bisync filter", "bisync")):
+        before = delta[f"{key}_before"]
+        after = delta[f"{key}_after"]
+        lines.append(f"  {label}: {len(before)} -> {len(after)} folders")
+        for entry in sorted(set(after) - set(before)):
+            lines.append(f"    + {entry}")
+        for entry in sorted(set(before) - set(after)):
+            lines.append(f"    - {entry}")
+    return lines
+
+
+def _joined(entries: List[str], limit: int = 4) -> str:
+    head = ", ".join(entries[:limit])
+    rest = len(entries) - limit
+    return f"{head} (+{rest})" if rest > 0 else head
+
+
+def preview_add(
+    cfg: MenuConfig,
+    path: str,
+    mode: str,
+    *,
+    force_risk: bool = False,
+) -> ActionResult:
+    """What adding `path` would change — computed without changing anything.
+
+    Removal has three barriers and adding had none, although adding is what
+    caused the 2026-08-14 incident. The barrier this adds is not another
+    "are you sure": it is the delta itself. On 14.08 `action_inspect()` saw no
+    risk — the path existed and was materialized — so a risk-gated prompt would
+    have stayed silent. What would have spoken is `no longer excluded: Books`.
+
+    The prospective policy is built by copying the real one to a temporary
+    file and running the production `add_policy_path(apply=True)` against the
+    copy. That is deliberate: the daemon coercion that drops a disabled
+    ancestor lives in there, and reimplementing it here to "just compute" the
+    result would put a second copy of the 14.08 logic next to the first.
+
+    Neither the policy file nor the daemon config is touched: the write lands
+    on the copy, and `apply_policy(dry_run=True)` reports without applying.
+    """
+    import shutil
+    import tempfile
+
+    tmpdir = tempfile.mkdtemp(prefix="ydm_preview_")
+    try:
+        tmp_policy = os.path.join(tmpdir, "policy.json")
+        real_policy = os.path.expanduser(cfg.policy_path)
+        if os.path.exists(real_policy):
+            shutil.copyfile(real_policy, tmp_policy)
+
+        ns = _policy_ns(cfg, path=path, mode=mode, apply=True,
+                        force_risk=force_risk, policy_path=tmp_policy)
+        added = add_policy_path(ns)
+        if added.get("error"):
+            return ActionResult(False, added["error"], {"policy_add": added})
+        prospective = load_policy(tmp_policy)
+        if not prospective:
+            return ActionResult(
+                False,
+                f"Could not work out what adding {path} would do.",
+                {"policy_add": added},
+            )
+        try:
+            backend = backend_from_args(ns)
+            after = backend.apply_policy(prospective, dry_run=True)
+            current = load_policy(real_policy)
+            before = (
+                backend.apply_policy(current, dry_run=True) if current else None
+            )
+        except Exception as exc:
+            return ActionResult(False, f"Could not preview the change: {exc}",
+                                {"policy_add": added})
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if cfg.backend_kind == "daemon":
+        delta = {
+            "kind": "daemon",
+            "before": after.get("before") or [],
+            "after": after.get("after") or [],
+            "added": after.get("added") or [],
+            "removed": after.get("removed") or [],
+            "deletion_risk_paths": after.get("deletion_risk_paths") or [],
+            "clears_exclude_dirs": bool(after.get("clears_exclude_dirs")),
+        }
+        lines = _preview_lines_daemon(path, mode, delta)
+    else:
+        download_after = after.get("download_paths") or []
+        bisync_after = after.get("bisync_paths") or []
+        download_before = (before or {}).get("download_paths") or []
+        bisync_before = (before or {}).get("bisync_paths") or []
+        union_before = set(download_before) | set(bisync_before)
+        union_after = set(download_after) | set(bisync_after)
+        delta = {
+            "kind": "rclone",
+            "download_before": download_before,
+            "download_after": download_after,
+            "bisync_before": bisync_before,
+            "bisync_after": bisync_after,
+            "added": sorted(union_after - union_before),
+            "removed": sorted(union_before - union_after),
+            "deletion_risk_paths": [],
+            "clears_exclude_dirs": False,
+        }
+        lines = _preview_lines_rclone(path, mode, delta)
+
+    # These two are filled in on a dry run and *raised* on a real one, so
+    # saying it here is the difference between a warning and a rejection after
+    # the person has already committed.
+    if delta["clears_exclude_dirs"]:
+        lines.append("  WARN: this would empty the exclude list, and the real "
+                     "apply would be refused — import the current exclusions "
+                     "first (sync_policy.py migrate --backend daemon --apply).")
+    if delta["deletion_risk_paths"]:
+        lines.append("  WARN: applying would be refused — these stay in sync "
+                     "but are missing locally, so the daemon would delete them "
+                     "in the cloud: "
+                     + _joined(delta["deletion_risk_paths"]))
+
+    return ActionResult(
+        True,
+        "\n".join(lines),
+        {"policy_add": added, "delta": delta, "backend": cfg.backend_name},
+    )
+
+
+def confirm_and_add(
+    cfg: MenuConfig,
+    path: str,
+    mode: str,
+    *,
+    reader,
+) -> Optional[ActionResult]:
+    """Show the delta, ask once, then add. Returns None when declined."""
+    from tools.ydm_menu_prompts import prompt_yes_no
+
+    preview = preview_add(cfg, path, mode)
+    print(preview.message)
+    if not preview.ok:
+        return preview
+    if not prompt_yes_no("Apply?", default=False, reader=reader):
+        print("Cancelled.")
+        return None
+    return action_add(cfg, path, mode)
+
+
 def action_remove(
     cfg: MenuConfig,
     path: str,
@@ -489,6 +659,139 @@ def print_cloud_local_diff(cfg: MenuConfig) -> None:
         print(f"  WARN: {warning}")
 
 
+def _trash_top_level(cfg: MenuConfig, limit: int = 30) -> List[dict]:
+    """What is sitting at the top of the Disk trash, newest deletion first."""
+    from tools.trash_scan import YandexTrashClient, resolve_token
+
+    token = resolve_token("auto", cfg.remote)
+    embedded = YandexTrashClient(token).get_resources("/", limit=limit)
+    items = list(embedded.get("items") or [])
+    items.sort(key=lambda item: str(item.get("deleted") or ""), reverse=True)
+    return items
+
+
+def _origin_of(item: dict) -> str:
+    """`disk:/Books` -> `/Books`, which is what --restore-root wants."""
+    origin = str(item.get("origin_path") or "")
+    for prefix in ("disk:", "trash:"):
+        if origin.startswith(prefix):
+            origin = origin[len(prefix):]
+    return origin or "/"
+
+
+def print_trash_overview(cfg: MenuConfig) -> None:
+    """The trash, and the exact commands to act on it.
+
+    This is the one screen meant to be read under stress: the files are
+    already gone. What is missing at that moment is not courage, it is the
+    hashed name — `trash_scan.py scan` wants `--trash-root trash:/Books_<hash>`
+    and nobody knows theirs. So the menu supplies the names and prints the
+    commands; restoring stays in the CLI, because it changes data and should
+    say so out loud. See tasks/ydm_menu/DESIGN-2026-08-24.md, 8.8.
+    """
+    print("\nYandex Disk trash")
+    try:
+        items = _trash_top_level(cfg)
+    except (Exception, SystemExit) as exc:
+        # resolve_token() raises SystemExit, which `except Exception` misses —
+        # the same trap the smart cloud scan hit. Exiting the menu out from
+        # under someone hunting for deleted files is the worst possible moment.
+        print(f"  Could not read the trash: {exc}")
+        print("  Needs a token: put it in .env, or use "
+              "--token-source rclone with tools/trash_scan.py.")
+        return
+    if not items:
+        print("  The trash is empty.")
+        return
+
+    print(f"  {len(items)} entr{'y' if len(items) == 1 else 'ies'}, "
+          "most recently deleted first:\n")
+    for index, item in enumerate(items, start=1):
+        name = item.get("name") or "?"
+        kind = "/" if item.get("type") == "dir" else " "
+        deleted = str(item.get("deleted") or "")[:16].replace("T", " ")
+        print(f" {index:2d}  {name}{kind}")
+        print(f"     deleted {deleted}   from {_origin_of(item)}")
+
+    print("\n  To inspect, then restore (the second one writes):")
+    for item in items[:3]:
+        trash_root = item.get("path") or f"trash:/{item.get('name')}"
+        restore_root = _origin_of(item)
+        print(f"\n    # {item.get('name')}")
+        print(f"    python3 tools/trash_scan.py scan "
+              f"--trash-root {trash_root} --restore-root {restore_root}")
+        print(f"    python3 tools/trash_scan.py restore-root "
+              f"--trash-root {trash_root} --restore-root {restore_root} --apply")
+    if len(items) > 3:
+        print(f"\n  ({len(items) - 3} more — same two commands, "
+              "with that entry's own paths.)")
+
+
+def _human_size(num_bytes: int) -> str:
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _database_facts(cfg: MenuConfig) -> dict:
+    """Size, scan count, and how much of it prune would drop.
+
+    `prune` deliberately gets no menu entry — it is housekeeping, wanted twice
+    a year, and an entry for it would only lengthen the list. But the database
+    grows with every scan and nothing was telling anyone, so the fact goes
+    where people already look. Measured at 0.19 s on a 138 MB, 53-scan
+    database, which a detailed-status screen can afford.
+    """
+    import sqlite3
+
+    db_path = os.path.expanduser(cfg.db_path)
+    facts = {
+        "path": db_path,
+        "size_bytes": os.path.getsize(db_path),
+        "scans": 0,
+        "prunable_scans": None,
+        "prunable_share_percent": None,
+    }
+    conn = sqlite3.connect(db_path)
+    try:
+        facts["scans"] = conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+    finally:
+        conn.close()
+    try:
+        if str(ROOT_DIR) not in sys.path:
+            sys.path.insert(0, str(ROOT_DIR))
+        import ydm
+
+        plan = ydm.Analyzer(
+            ydm.StorageManager(db_path, use_temp_storage=False)
+        ).prune_plan()
+        facts["prunable_scans"] = plan["prunable_scans"]
+        facts["prunable_share_percent"] = plan["prunable_share_percent"]
+    except Exception:
+        # An unreadable plan costs one number, not the screen.
+        pass
+    return facts
+
+
+def print_database_line(cfg: MenuConfig) -> None:
+    try:
+        facts = _database_facts(cfg)
+    except Exception as exc:
+        print(f"Database: unreadable ({exc}) -> python3 ydm.py report prune")
+        return
+    size = _human_size(facts["size_bytes"])
+    if facts["prunable_scans"] is None:
+        droppable = "prunable: unknown"
+    else:
+        droppable = (f"{facts['prunable_scans']} prunable "
+                     f"({facts['prunable_share_percent']}% of rows)")
+    print(f"Database: {size}, {facts['scans']} scans, {droppable}"
+          f" -> python3 ydm.py report prune")
+
+
 def print_detailed_status(cfg: MenuConfig) -> None:
     from tools.sync_bisync import cmd_status
 
@@ -511,6 +814,7 @@ def print_detailed_status(cfg: MenuConfig) -> None:
         print("Disabled:")
         for p in status.disabled:
             print(f"  [X] {p}")
+    print_database_line(cfg)
     bisync = cmd_status(_bisync_ns(cfg))
     for line in (bisync.get("log_tail") or [])[-5:]:
         print(f"  log: {line}")

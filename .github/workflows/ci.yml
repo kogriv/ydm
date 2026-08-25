@@ -63,6 +63,15 @@ jobs:
       - name: Unit tests (shell aliases — names, ydm=menu, mirror guard)
         run: python tests/test_aliases.py -v
 
+      # The synthetic bench: a policy file, folders on disk and a database,
+      # driven end to end. It is the only coverage the menu screens have, and
+      # until 2026-08-25 it ran nowhere but a developer's machine — which is
+      # how a menu offering paths from someone else's setup passed CI. The
+      # rclone-backed checks inside skip themselves when rclone is absent, so
+      # a runner without it still gets the rest.
+      - name: Unit tests (sync/menu bench — synthetic tree, temp policy)
+        run: python tests/test_sync_bench.py -v
+
       - name: Regression suite (tests/test_ydm_fixes.sh)
         run: bash tests/test_ydm_fixes.sh
 
