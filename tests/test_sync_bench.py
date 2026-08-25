@@ -1472,6 +1472,41 @@ class TestTrashAndDatabaseSurfaces(BenchTestCase):
         self.assertIn("--trash-root trash:/Books_20260814T093000", text)
         self.assertIn("--restore-root /Books", text)
 
+    def test_the_printed_commands_survive_a_hostile_name(self):
+        """The commands are meant to be pasted, so they have to be pasteable.
+
+        Found on the live disk the day this shipped: the recovery left
+        `Books (1)` in the trash — the name Yandex gives a restore that
+        collides with an existing folder. Unquoted, the space splits the
+        argument and `(1)` is a shell metacharacter, so the line that was
+        supposed to save someone in a hurry fails to parse.
+        """
+        import shlex
+        import unittest.mock as mock
+
+        from tools import ydm_menu_actions
+
+        items = [{
+            "name": "Books (1)",
+            "path": "trash:/Books (1)_835c316a",
+            "type": "dir",
+            "deleted": "2026-08-16T10:41:00+00:00",
+            "origin_path": "disk:/Books (1)",
+        }]
+        with mock.patch.object(ydm_menu_actions, "_trash_top_level",
+                               return_value=items):
+            text = self.capture(ydm_menu_actions.print_trash_overview, self.cfg())
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("python3 tools/trash_scan.py"):
+                continue
+            # It must parse as one command, and the two paths must arrive
+            # whole rather than split on the space.
+            parts = shlex.split(stripped)
+            self.assertIn("trash:/Books (1)_835c316a", parts, stripped)
+            self.assertIn("/Books (1)", parts, stripped)
+
     def test_the_trash_screen_survives_a_missing_token(self):
         """`resolve_token()` raises SystemExit, which is not an Exception.
 

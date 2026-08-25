@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -715,8 +716,12 @@ def print_trash_overview(cfg: MenuConfig) -> None:
 
     print("\n  To inspect, then restore (the second one writes):")
     for item in items[:3]:
-        trash_root = item.get("path") or f"trash:/{item.get('name')}"
-        restore_root = _origin_of(item)
+        # Quoted, because these lines exist to be pasted. The recovery from
+        # 2026-08-14 left `Books (1)` in the trash — the name Yandex gives a
+        # restore that collides with an existing folder — and unquoted, the
+        # space splits the argument while `(1)` is a shell metacharacter.
+        trash_root = shlex.quote(item.get("path") or f"trash:/{item.get('name')}")
+        restore_root = shlex.quote(_origin_of(item))
         print(f"\n    # {item.get('name')}")
         print(f"    python3 tools/trash_scan.py scan "
               f"--trash-root {trash_root} --restore-root {restore_root}")
