@@ -672,6 +672,14 @@ class StorageManager:
             except Exception as e:
                 print(f"Warning: Failed to record scan start in disk DB: {e}", file=sys.stderr)
         else:
+            # The tmpfs branch above migrates the disk database before writing
+            # to it; this one has to as well. It is the path every tool takes —
+            # tools/sync_common.py builds a StorageManager with
+            # use_temp_storage=False, and such an object never calls
+            # init_db() — so without this, `scan_root` reaches an unmigrated
+            # `scans` table and every tool-driven scan dies on a database that
+            # only ydm.py had ever opened for writing.
+            self._ensure_scan_scope_columns(conn)
             cursor.execute(
                 "INSERT INTO scans (scan_type, status, duration, scan_root, scan_depth)"
                 " VALUES (?, ?, ?, ?, ?)",

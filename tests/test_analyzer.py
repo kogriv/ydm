@@ -130,6 +130,67 @@ class TestStorageManagerBasics(AnalyzerTestCase):
         self.assertEqual([s["id"] for s in status], [7, 6, 5, 4, 3])
 
 
+class TestStartScanOnAPreExistingDatabase(unittest.TestCase):
+    """A database written before `scans.scan_root` existed must still take a
+    scan.
+
+    Not hypothetical: the migration is only reachable from `init_db()` /
+    `_init_final_db()`, and `tools/sync_common.py` builds a StorageManager
+    with `use_temp_storage=False`, which calls neither. So `ydm.py scan local`
+    worked — it goes through tmpfs, which migrates on the way — while every
+    tool-driven scan died with `table scans has no column named scan_root` on
+    any database that predated the columns.
+
+    Worse than a crash, because of where it landed: the Android job treats a
+    failing rename preflight as "sync anyway", so the guard was silently absent
+    while the log kept saying `run OK`.
+    """
+
+    #: The `scans` table exactly as it was before scan_root/scan_depth.
+    OLD_SCHEMA = """
+        CREATE TABLE scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            scan_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            duration REAL
+        )
+    """
+
+    def setUp(self):
+        import sqlite3
+
+        self.tmpdir = tempfile.mkdtemp(prefix="ydm_oldschema_")
+        self.db_path = os.path.join(self.tmpdir, "old.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(self.OLD_SCHEMA)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_a_tool_can_start_a_scan_without_running_init_first(self):
+        import sqlite3
+
+        storage = StorageManager(self.db_path, use_temp_storage=False,
+                                 config=dict(DEFAULT_CONFIG))
+        scan_id = storage.start_scan("local", scan_root="/mirror")
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+            self.assertIn("scan_root", columns)
+            self.assertIn("scan_depth", columns)
+            row = conn.execute(
+                "SELECT scan_type, scan_root, scan_depth FROM scans WHERE id=?",
+                (scan_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row, ("local", "/mirror", None))
+
+
 class TestDiffSimple(AnalyzerTestCase):
     def test_missing_local_and_missing_cloud(self):
         self.insert_scan(1, "cloud", "success")
