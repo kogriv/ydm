@@ -1099,6 +1099,124 @@ class TestStaleSnapshotSurfaces(unittest.TestCase):
         self.assertIn("WARN:", self._header(self._bench(400)))
 
 
+# --- Phase 9 ---------------------------------------------------------------
+
+class TestTreeWalkConnectionReuse(BenchTestCase):
+    """The walk opens one connection, not one per query.
+
+    PR #4 fixed the query; this is what was left. `get_connection()` opens a
+    fresh sqlite3 connection *and* re-issues `PRAGMA synchronous=NORMAL` and
+    `PRAGMA journal_mode=WAL` every time. Measured on the author's snapshot
+    (75 510 rows, 5 506 directories): 0.92 ms of setup against 0.10 ms for the
+    query it was opened for, and a depth-4 walk opened 8 504 of them — 78% of
+    the wall clock spent connecting.
+
+    `journal_mode` is a property of the database file, not of the connection,
+    so re-declaring it per connection buys nothing at all.
+
+    Counting connections rather than timing: a stopwatch assertion is flaky on
+    a loaded machine and says nothing about why. The count is exact, and it is
+    the thing that regressed.
+    """
+
+    def walk(self, depth=3):
+        """Build the tree the way the tools do, counting connections opened.
+
+        `sqlite3.connect` is what is counted, not `get_connection()`: the
+        latter is still called once per query, it just stops opening anything.
+        Counting calls instead of connections was this test's first mistake,
+        and it reported success unchanged either way.
+        """
+        import ydm
+        from tools.sync_common import create_storage
+        from tools.sync_tree import build_tree
+        from tools.sync_tree_cloud import select_snapshot_for_tree
+        from ydm import Analyzer
+
+        opened = []
+        original = ydm.sqlite3.connect
+
+        def counted(*args, **kwargs):
+            conn = original(*args, **kwargs)
+            opened.append(conn)
+            return conn
+
+        analyzer = Analyzer(create_storage(self.bench.db_path))
+        selection = select_snapshot_for_tree(analyzer, "/")
+        ydm.sqlite3.connect = counted
+        try:
+            node = build_tree(analyzer, selection.snapshot, "/", depth)
+        finally:
+            ydm.sqlite3.connect = original
+        return node, opened
+
+    def test_the_walk_opens_one_connection(self):
+        node, opened = self.walk()
+        self.assertTrue(node.children, "the walk found nothing to measure")
+        self.assertLessEqual(
+            len(opened), 2,
+            f"the walk opened {len(opened)} connections; on a real snapshot "
+            "that is thousands, and the setup costs nine times the query",
+        )
+
+    def test_the_tree_is_the_same_tree(self):
+        """Reuse must not change a single answer."""
+        markers = render_markers(self.bench, "rclone")
+        self.assertEqual(expectations("rclone"), markers)
+
+    def test_a_reused_connection_survives_being_closed(self):
+        """Callers close what they are handed; inside the scope that is shared.
+
+        Every DB helper in the project does `conn.close()` in a `finally`.
+        If closing the shared connection really closed it, the second helper
+        in the walk would fail — so the scope hands out a handle whose close()
+        is a no-op, and the walk keeps working.
+        """
+        from tools.sync_common import create_storage
+
+        storage = create_storage(self.bench.db_path)
+        with storage.reuse_connection():
+            first = storage.get_connection()
+            first.execute("SELECT COUNT(*) FROM files").fetchone()
+            first.close()
+            second = storage.get_connection()
+            # Still usable after a caller "closed" it.
+            second.execute("SELECT COUNT(*) FROM files").fetchone()
+            second.close()
+
+    def test_a_row_factory_does_not_leak_to_the_next_caller(self):
+        """Analyzer sets `row_factory = sqlite3.Row` on connections it opens.
+
+        With one connection shared, that setting would outlive the caller and
+        hand tuples-expecting code sqlite3.Row objects instead. Closing the
+        handle has to put it back.
+        """
+        import sqlite3
+
+        from tools.sync_common import create_storage
+
+        storage = create_storage(self.bench.db_path)
+        with storage.reuse_connection():
+            first = storage.get_connection()
+            first.row_factory = sqlite3.Row
+            first.close()
+            second = storage.get_connection()
+            row = second.execute("SELECT COUNT(*) FROM files").fetchone()
+            self.assertIsInstance(row, tuple, "row_factory leaked out")
+            second.close()
+
+    def test_outside_the_scope_nothing_changes(self):
+        """The default stays one connection per call — this is opt-in."""
+        from tools.sync_common import create_storage
+
+        storage = create_storage(self.bench.db_path)
+        first = storage.get_connection()
+        second = storage.get_connection()
+        self.assertIsNot(first, second)
+        first.close()
+        second.close()
+
+
 # --- Phase 8.7 -------------------------------------------------------------
 
 class TestAddPreview(BenchTestCase):

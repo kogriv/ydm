@@ -136,17 +136,21 @@ def list_orphan_paths(
     if policy_ctx.policy:
         membership = set(effective_download_paths(policy_ctx.policy))
 
-    node = build_tree(analyzer, snapshot, root, max_depth)
-    compute_status_whitelist(
-        node,
-        membership,
-        collapse=False,
-        synced_paths=synced_policy_paths_set(policy_ctx) if policy_ctx.policy else None,
-        local_root=local_root,
-    )
-    local_scan_id = get_latest_successful_scan_id(storage, "local")
-    apply_sync_percent(node, analyzer, snapshot, local_scan_id, local_root)
-    apply_policy_overlay(node, policy_ctx, local_root)
+    # One connection for the whole read: build_tree has its own scope, but the
+    # counting that follows opened one per node on top of that — 7 802 in a
+    # single run here. Everything between these lines reads.
+    with storage.reuse_connection():
+        node = build_tree(analyzer, snapshot, root, max_depth)
+        compute_status_whitelist(
+            node,
+            membership,
+            collapse=False,
+            synced_paths=synced_policy_paths_set(policy_ctx) if policy_ctx.policy else None,
+            local_root=local_root,
+        )
+        local_scan_id = get_latest_successful_scan_id(storage, "local")
+        apply_sync_percent(node, analyzer, snapshot, local_scan_id, local_root)
+        apply_policy_overlay(node, policy_ctx, local_root)
 
     orphans: List[OrphanEntry] = []
     _collect_orphans_from_node(node, local_root, orphans)

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+import bisect
 import hashlib
 import json
 import os
@@ -30,6 +31,48 @@ ANDROID_SHARED_STORAGE_LOCAL_ENCODING = (
 class CompositeSnapshot:
     base_scan_id: int
     folder_updates: Dict[str, int]
+
+    #: Keys of folder_updates in sorted order, built on first use. See
+    #: folder_updates_under() for why, and sorted_folders() for the caching.
+    _sorted_folders: Optional[List[str]] = field(default=None, repr=False,
+                                                 compare=False)
+
+    def sorted_folders(self) -> List[str]:
+        if self._sorted_folders is None:
+            self._sorted_folders = sorted(
+                folder for folder in self.folder_updates if folder
+            )
+        return self._sorted_folders
+
+
+def folder_updates_under(snapshot: CompositeSnapshot, subtree: str) -> Dict[str, int]:
+    """The updated folders at or beneath `subtree`.
+
+    Callers used to rebuild this by testing `folder.startswith(subtree + "/")`
+    against every key — once per node of the tree, so on the author's snapshot
+    (2 251 updated folders, 3 810 nodes) a single `orphans` run made 9.38
+    million string comparisons, second only to the database itself.
+
+    Sorted, the descendants are one contiguous slice: everything from
+    `<subtree>/` up to `<subtree>0`, plus `<subtree>` itself. The boundary
+    starts at the slash for the reason it does in SQL — `/Books/Math-old`
+    sorts between `/Books/Math` and `/Books/Math0`, and is not a descendant.
+
+    The sort itself happens once per snapshot; doing it per call would cost
+    more than the sweep it replaces.
+    """
+    updates = snapshot.folder_updates
+    if not subtree:
+        return {folder: scan_id for folder, scan_id in updates.items() if folder}
+
+    base = subtree.rstrip("/")
+    folders = snapshot.sorted_folders()
+    start = bisect.bisect_left(folders, f"{base}/")
+    end = bisect.bisect_left(folders, f"{base}0")
+    result = {folder: updates[folder] for folder in folders[start:end]}
+    if base in updates:
+        result[base] = updates[base]
+    return result
 
 
 @dataclass
@@ -524,21 +567,38 @@ def build_composite_snapshot(analyzer: Analyzer) -> CompositeSnapshot:
 
 
 def select_scan_id_for_path(path: str, snapshot: CompositeSnapshot) -> int:
+    """Which scan serves this folder: the newest one covering it.
+
+    Climbing, not scanning. This used to walk every key of `folder_updates`
+    keeping the longest prefix match, once per node of the tree — and on the
+    author's snapshot `folder_updates` holds 2 251 entries while a depth-4
+    walk visits 2 816 nodes, so the lookup alone ran 6.34 million
+    `startswith` calls and outweighed every database query in the walk put
+    together.
+
+    The ancestors of a path are knowable without consulting the keys at all:
+    the path, then its parent, and so on up. The first one present is by
+    construction the longest, so the answer is the same and the cost is a
+    handful of dict lookups instead of a full pass.
+    """
     normalized = normalize_db_parent_path(path)
+    updates = snapshot.folder_updates
     if normalized == "":
-        return snapshot.folder_updates.get("", snapshot.base_scan_id)
+        return updates.get("", snapshot.base_scan_id)
 
-    best_match = None
-    for candidate in snapshot.folder_updates.keys():
-        if not candidate:
-            continue
-        if normalized == candidate or normalized.startswith(candidate + "/"):
-            if best_match is None or len(candidate) > len(best_match):
-                best_match = candidate
+    candidate = normalized
+    while candidate:
+        scan_id = updates.get(candidate)
+        if scan_id is not None:
+            return scan_id
+        parent, separator, _name = candidate.rpartition("/")
+        if not separator:
+            break
+        # `/Books` -> parent `''`: there is no shorter ancestor to try, and the
+        # empty key belongs to the root, which the branch above already served.
+        candidate = parent
 
-    if best_match is None:
-        return snapshot.base_scan_id
-    return snapshot.folder_updates[best_match]
+    return snapshot.base_scan_id
 
 
 def fetch_child_dirs(

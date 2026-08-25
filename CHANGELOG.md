@@ -5,6 +5,59 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-25 — the tree stops being slow, and it was never where we looked
+
+Phase 9 ([`tasks/ydm_menu/BACKLOG.md`](tasks/ydm_menu/BACKLOG.md)). Issue #3
+named three leftovers after its index fix; profiling found that none of them
+was the dominant cost, and the two that were had been named nowhere.
+
+| | before | after |
+|---|---|---|
+| `sync_tree --depth 3` | 11.98 s | **1.12 s** |
+| `sync_tree --depth 4` | 22.05 s | **1.15 s** |
+| `sync_tree --depth 5` | 37.74 s | **1.37 s** |
+| `ydm_menu orphans` | 120.94 s | **2.30 s** |
+
+Measured on a snapshot of 75 510 rows and 5 506 directories — the same size as
+the device's. JSON output is byte-identical in all four cases once
+`folder_updates` key order is normalized.
+
+- **Two lookups swept a 2 251-entry dict once per node.**
+  `select_scan_id_for_path()` walked every key keeping the longest prefix
+  match — 6.34 million `startswith` calls in a depth-4 walk. But the ancestors
+  of a path need no search: they are the path, then its parent, and so on, so
+  a handful of dict lookups answers it. `count_cloud_files_for_path()` did the
+  mirror image looking for *descendants* — 9.38 million comparisons in one
+  `orphans` run — and descendants are a contiguous slice of the sorted keys,
+  found by binary search. Same boundary as PR #4's SQL range, and for the same
+  reason: the slice starts at `<subtree>/`, or `/Books/Math-old` is counted as
+  part of `/Books/Math`.
+- **The `LIKE` PR #4 removed from one half was still in the other.**
+  `_folder_file_counts()` and `_count_files_for_prefix()` filtered subtrees
+  with `parent_path LIKE '<prefix>/%'`, which SQLite cannot fold into an index
+  range while LIKE is case-insensitive — once per node this time, not once per
+  folder. Now a range, and split into two statements: SQLite will not turn an
+  `OR` into a single range seek, so keeping the folder's own row in the same
+  query would have quietly kept the full scan.
+- **One connection per walk instead of thousands.** `get_connection()` opened
+  a fresh connection for every query — 8 504 in a depth-4 walk, 7 802 more in
+  the counting that followed. `StorageManager.reuse_connection()` serves them
+  all from one, and needs no changes at the call sites: the handle it returns
+  ignores `close()` and resets `row_factory`, because every DB helper here
+  closes in a `finally` and Analyzer sets `sqlite3.Row` on connections it
+  opens. Reads only, and deliberately scoped to start after the local scan.
+- **`_dir_size()` was left alone, on purpose.** Issue #3 listed it, and on
+  this machine it is 0.22 s of an 11.8 s profile — the cost is `/sdcard`'s
+  FUSE layer, which cannot be reproduced here. Changing it blind would be
+  guessing; it stays filed as 9.3 with the device to measure it.
+- **A method that has never run.** `StorageManager` defines `get_connection`
+  twice and the second wins, so the pragmas in the first — `synchronous`,
+  `journal_mode` — are never applied, and neither is the tmpfs schema-recovery
+  block. That is why the "connection setup costs 0.92 ms" reading taken from
+  it was wrong: the live path is a bare `sqlite3.connect` at 0.08 ms. Marked
+  in place and filed as 9.5; un-shadowing it changes runtime behaviour and
+  deserves its own change.
+
 ## 2026-08-25 — the barrier goes where the damage came from
 
 Phase 8's two open decisions, settled and built

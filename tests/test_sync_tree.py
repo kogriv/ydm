@@ -268,10 +268,16 @@ class CompositeFileCountTests(unittest.TestCase):
         def get_connection(self):
             return sqlite3.connect(self.path)
 
-    class _Snapshot:
-        def __init__(self, base_scan_id, folder_updates):
-            self.base_scan_id = base_scan_id
-            self.folder_updates = folder_updates
+    # The real dataclass rather than a stand-in: it carries a sorted index of
+    # `folder_updates` built on first use, and a double without it would let a
+    # per-call sort through unnoticed — which would cost more than the sweep
+    # the index replaced.
+    @staticmethod
+    def _Snapshot(base_scan_id, folder_updates):
+        from tools.sync_common import CompositeSnapshot
+
+        return CompositeSnapshot(base_scan_id=base_scan_id,
+                                 folder_updates=folder_updates)
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -498,6 +504,307 @@ class SyncTreeCliSmokeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("--schema", proc.stdout)
         self.assertIn("sync_tree:v2", proc.stdout)
+
+
+class FileCountRangeTests(unittest.TestCase):
+    """Counting files under a folder seeks the index too.
+
+    PR #4 replaced `parent_path LIKE '<prefix>/%'` with a range in
+    `infer_dirs_from_files`. The same LIKE survived in the counting half —
+    `_folder_file_counts()` and `_count_files_for_prefix()` — where it runs
+    once per node of the tree rather than once per folder without dir rows.
+    Profiling the whole `sync_tree` command on 2026-08-25 put it at 12 s of
+    an 18 s run, the largest single cost once the walk itself was fixed.
+
+    The boundaries are the same ones and matter for the same reason:
+    ['<prefix>/', '<prefix>0') and not ['<prefix>', '<prefix>0'), or
+    `/Books/Math-old` is counted as part of `/Books/Math`.
+    """
+
+    def _db(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(path)
+        conn.execute(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, md5 TEXT,
+                created TEXT, modified TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_files_unique ON files(scan_id, parent_path, name)"
+        )
+        rows = [
+            (1, 1, "/Books/Math", "loose.pdf", "file"),
+            (2, 1, "/Books/Math/АнГем", "a.pdf", "file"),
+            (3, 1, "/Books/Math/База/poya", "deep.pdf", "file"),
+            (4, 1, "/Books/Math-old", "archived.pdf", "file"),
+            (5, 1, "/Books", "top.pdf", "file"),
+        ]
+        for row in rows:
+            conn.execute(
+                "INSERT INTO files VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, NULL)", row
+            )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_the_subtree_count_is_a_range_not_a_like(self):
+        from tools.sync_tree import _folder_file_counts
+
+        path = self._db()
+        try:
+            statements = []
+            conn = sqlite3.connect(path)
+            conn.set_trace_callback(statements.append)
+            counts = _folder_file_counts(conn, 1, "/Books/Math")
+            conn.close()
+
+            ranged = [s for s in statements if "parent_path >=" in s]
+            self.assertTrue(ranged, f"no range query was issued: {statements}")
+
+            conn = sqlite3.connect(path)
+            try:
+                plan = conn.execute("EXPLAIN QUERY PLAN " + ranged[0]).fetchall()
+            finally:
+                conn.close()
+            detail = " ".join(str(row[-1]) for row in plan)
+            self.assertIn("parent_path>", detail,
+                          f"the index range is not being used: {detail}")
+
+            # And the answer is unchanged: the prefix sibling stays out.
+            self.assertEqual(
+                {"/Books/Math": 1, "/Books/Math/АнГем": 1, "/Books/Math/База/poya": 1},
+                counts,
+            )
+        finally:
+            os.unlink(path)
+
+    def test_a_prefix_sibling_is_not_counted_as_a_child(self):
+        from tools.sync_tree import _count_files_for_prefix
+
+        path = self._db()
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                # /Books/Math holds three files; /Books/Math-old is not one.
+                self.assertEqual(3, _count_files_for_prefix(conn, 1, "/Books/Math"))
+                self.assertEqual(1, _count_files_for_prefix(conn, 1, "/Books/Math-old"))
+                self.assertEqual(5, _count_files_for_prefix(conn, 1, ""))
+            finally:
+                conn.close()
+        finally:
+            os.unlink(path)
+
+    def test_the_whole_tree_counts_the_same_as_before(self):
+        """Root-level totals do not change because the predicate did."""
+        from tools.sync_tree import _folder_file_counts
+
+        path = self._db()
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                self.assertEqual(5, sum(_folder_file_counts(conn, 1, "").values()))
+                self.assertEqual(5, sum(_folder_file_counts(conn, 1, "/Books").values()))
+            finally:
+                conn.close()
+        finally:
+            os.unlink(path)
+
+
+class SnapshotDescendantTests(unittest.TestCase):
+    """Which updated folders sit *under* a path, found by search not by sweep.
+
+    The mirror image of SnapshotLookupTests. `count_cloud_files_for_path()`
+    rebuilt the set of relevant `folder_updates` on every call by testing
+    `folder.startswith(subtree + "/")` against all 2 251 of them — once per
+    node, so 9.38 million string comparisons in one `orphans` run.
+
+    Descendants of a path are a contiguous slice of the sorted keys, between
+    `<subtree>/` and `<subtree>0` — the same boundary as the SQL range, for
+    the same reason.
+    """
+
+    def test_it_finds_exactly_the_descendants(self):
+        from tools.sync_common import CompositeSnapshot, folder_updates_under
+
+        snap = CompositeSnapshot(base_scan_id=1, folder_updates={
+            "": 5, "/Books": 7, "/Books/Math": 8, "/Books/Math/ЛинАл": 9,
+            "/Books/Math-old": 10, "/pro": 11,
+        })
+        self.assertEqual(
+            {"/Books/Math": 8, "/Books/Math/ЛинАл": 9},
+            folder_updates_under(snap, "/Books/Math"),
+        )
+
+    def test_a_prefix_sibling_is_not_a_descendant(self):
+        from tools.sync_common import CompositeSnapshot, folder_updates_under
+
+        snap = CompositeSnapshot(base_scan_id=1, folder_updates={
+            "/Books/Math": 8, "/Books/Math-old": 10,
+        })
+        self.assertNotIn("/Books/Math-old", folder_updates_under(snap, "/Books/Math"))
+
+    def test_the_root_takes_everything_except_the_root_entry(self):
+        """`""` is the root's own key and is excluded, as the old filter did."""
+        from tools.sync_common import CompositeSnapshot, folder_updates_under
+
+        snap = CompositeSnapshot(base_scan_id=1, folder_updates={
+            "": 5, "/Books": 7, "/pro": 11,
+        })
+        self.assertEqual({"/Books": 7, "/pro": 11}, folder_updates_under(snap, ""))
+
+    def test_it_agrees_with_the_filter_it_replaces(self):
+        from tools.sync_common import CompositeSnapshot, folder_updates_under
+
+        updates = {
+            "": 5, "/Books": 7, "/Books/Math": 8, "/Books/Math/ЛинАл": 9,
+            "/Books/Math-old": 10, "/pro": 11, "/pro/agents": 12,
+            "/proximity": 13,
+        }
+        snap = CompositeSnapshot(base_scan_id=1, folder_updates=updates)
+        for subtree in ("", "/Books", "/Books/Math", "/pro", "/nothing"):
+            expected = {
+                folder: scan_id for folder, scan_id in updates.items()
+                if folder and (not subtree or folder == subtree
+                               or folder.startswith(subtree + "/"))
+            }
+            with self.subTest(subtree=subtree):
+                self.assertEqual(expected, folder_updates_under(snap, subtree))
+
+    def test_the_sorted_index_is_built_once(self):
+        """Sorting per call would be worse than the sweep it replaces."""
+        from tools.sync_common import CompositeSnapshot, folder_updates_under
+
+        snap = CompositeSnapshot(base_scan_id=1, folder_updates={
+            "/Books": 7, "/Books/Math": 8,
+        })
+        folder_updates_under(snap, "/Books")
+        first = snap.sorted_folders()
+        folder_updates_under(snap, "/Books/Math")
+        self.assertIs(first, snap.sorted_folders())
+
+
+class SnapshotLookupTests(unittest.TestCase):
+    """Which scan serves a folder, found by climbing rather than scanning.
+
+    `select_scan_id_for_path()` answered by walking every key of
+    `folder_updates` and keeping the longest prefix match. That is once per
+    node of the tree, and on the author's snapshot `folder_updates` holds
+    2 251 entries — a depth-4 walk visits 2 816 nodes, so the lookup alone ran
+    6.34 million `startswith` calls and was the single largest cost in the
+    walk, ahead of every database query put together.
+
+    The set of ancestors of a path is knowable without looking at the keys:
+    it is the path, then its parent, and so on. That is at most as many dict
+    lookups as the path has components — five or six, against 2 251.
+
+    Found by profiling on 2026-08-25, after issue #3 had already named three
+    other leftovers. This one was in none of the lists.
+    """
+
+    def snapshot(self, folder_updates, base=1):
+        from tools.sync_common import CompositeSnapshot
+
+        return CompositeSnapshot(base_scan_id=base, folder_updates=folder_updates)
+
+    def select(self, path, folder_updates, base=1):
+        from tools.sync_common import select_scan_id_for_path
+
+        return select_scan_id_for_path(path, self.snapshot(folder_updates, base))
+
+    def test_the_root_uses_its_own_entry_when_there_is_one(self):
+        self.assertEqual(9, self.select("/", {"": 9}))
+        self.assertEqual(1, self.select("/", {"/Books": 9}))
+
+    def test_an_exact_match_wins(self):
+        self.assertEqual(9, self.select("/Books", {"/Books": 9}))
+
+    def test_the_longest_ancestor_wins(self):
+        updates = {"/Books": 7, "/Books/Math": 8, "/Books/Math/ЛинАл": 9}
+        self.assertEqual(9, self.select("/Books/Math/ЛинАл/Lay", updates))
+        self.assertEqual(8, self.select("/Books/Math/ТерВер", updates))
+        self.assertEqual(7, self.select("/Books/Other", updates))
+
+    def test_a_prefix_sibling_is_not_an_ancestor(self):
+        """`/Books/Math-old` is not inside `/Books/Math`.
+
+        The same boundary PR #4 pinned for the SQL range, in the other half of
+        the lookup: matching on the bare prefix would claim it.
+        """
+        self.assertEqual(7, self.select("/Books/Math-old", {"/Books": 7, "/Books/Math": 8}))
+
+    def test_no_ancestor_falls_back_to_the_base(self):
+        self.assertEqual(1, self.select("/elsewhere", {"/Books": 9}))
+
+    def test_the_lookup_does_not_read_every_entry(self):
+        """The regression guard, stated structurally rather than by stopwatch.
+
+        A dict that refuses to be iterated: the answer has to come from
+        lookups, so a return to prefix-scanning fails here rather than merely
+        getting slower somewhere nobody is timing.
+        """
+        class NoScanDict(dict):
+            def keys(self):
+                raise AssertionError("the lookup scanned every entry again")
+
+            def __iter__(self):
+                raise AssertionError("the lookup scanned every entry again")
+
+            def items(self):
+                raise AssertionError("the lookup scanned every entry again")
+
+        updates = NoScanDict({f"/dir{i}": i for i in range(5000)})
+        updates["/Books/Math"] = 99
+        self.assertEqual(99, self.select("/Books/Math/ЛинАл", updates))
+        self.assertEqual(1, self.select("/nothing/here", updates))
+
+    def test_it_agrees_with_the_prefix_scan_it_replaces(self):
+        """Equivalence against the original implementation, spelled out here.
+
+        The old code is short enough to keep as an oracle, which is worth more
+        than trusting that the rewrite "looks the same".
+        """
+        def old(path, snapshot):
+            from tools.sync_common import normalize_db_parent_path
+
+            normalized = normalize_db_parent_path(path)
+            if normalized == "":
+                return snapshot.folder_updates.get("", snapshot.base_scan_id)
+            best_match = None
+            for candidate in snapshot.folder_updates.keys():
+                if not candidate:
+                    continue
+                if normalized == candidate or normalized.startswith(candidate + "/"):
+                    if best_match is None or len(candidate) > len(best_match):
+                        best_match = candidate
+            if best_match is None:
+                return snapshot.base_scan_id
+            return snapshot.folder_updates[best_match]
+
+        from tools.sync_common import select_scan_id_for_path
+
+        updates = {
+            "": 5,
+            "/Books": 7,
+            "/Books/Math": 8,
+            "/Books/Math/ЛинАл": 9,
+            "/Books/Math-old": 10,
+            "/pro": 11,
+            "/pro/agents": 12,
+        }
+        snap = self.snapshot(updates, base=1)
+        paths = [
+            "/", "/Books", "/Books/", "/Books/Math", "/Books/Math/ЛинАл/Lay",
+            "/Books/Math-old", "/Books/Math-old/x", "/Books/Mathematics",
+            "/pro", "/pro/agents/x", "/proximity", "/elsewhere", "/pro/",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(old(path, snap), select_scan_id_for_path(path, snap))
 
 
 if __name__ == "__main__":

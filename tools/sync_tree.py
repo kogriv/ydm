@@ -19,6 +19,7 @@ from tools.sync_backends import (  # noqa: E402
 )
 from tools.sync_common import (  # noqa: E402
     create_storage,
+    folder_updates_under,
     legacy_filter_path,
     get_latest_successful_scan_id,
     load_exclude_dirs,
@@ -183,7 +184,12 @@ def build_tree(
 
         return node
 
-    return build_node(root_path, depth)
+    # One connection for the whole walk. Each node asks the database for its
+    # children, and opening a connection per question cost more than every
+    # question put together — 78% of a depth-4 walk. Reads only; see
+    # StorageManager.reuse_connection().
+    with storage.reuse_connection():
+        return build_node(root_path, depth)
 
 
 def _count_files_for_prefix(conn, scan_id: int, prefix: str) -> int:
@@ -202,18 +208,29 @@ def _count_files_for_prefix(conn, scan_id: int, prefix: str) -> int:
     variants = {prefix, prefix.lstrip("/"), f"/{prefix.lstrip('/')}"}
     total = 0
     for variant in variants:
-        row = conn.execute(
+        base = variant.rstrip("/")
+        # Two queries, not one with an OR: SQLite will not turn an OR into a
+        # single index range, and the whole point of the range is to seek.
+        # The folder's own files and the files beneath it, added.
+        here = conn.execute(
             """
             SELECT COUNT(*)
             FROM files
-            WHERE scan_id = ?
-              AND type = 'file'
-              AND (parent_path = ? OR parent_path LIKE ?)
+            WHERE scan_id = ? AND type = 'file' AND parent_path = ?
             """,
-            (scan_id, variant, f"{variant.rstrip('/')}/%"),
+            (scan_id, variant),
         ).fetchone()
-        if row:
-            total = max(total, row[0])
+        below = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM files
+            WHERE scan_id = ? AND type = 'file'
+              AND parent_path >= ? AND parent_path < ?
+            """,
+            (scan_id, f"{base}/", f"{base}0"),
+        ).fetchone()
+        count = (here[0] if here else 0) + (below[0] if below else 0)
+        total = max(total, count)
     return total
 
 
@@ -222,17 +239,37 @@ def _folder_file_counts(conn, scan_id: int, subtree: str) -> Dict[str, int]:
 
     Cloud scans always store parent_path with a leading slash ("" at the
     root), so one GROUP BY answers for every folder at once.
+
+    A range, not `LIKE`, for the reason PR #4 established for the other half
+    of the tree: SQLite folds LIKE into an index range only when LIKE is
+    case-sensitive, and it is not by default, so the LIKE form read every row
+    of the scan. Here that happened once per node of the tree — 12 s of an
+    18 s `sync_tree --depth 4` when it was profiled on 2026-08-25. The
+    boundary starts at `<subtree>/` and not at `<subtree>`, or `/Books/Math`
+    swallows `/Books/Math-old`, since '-' sorts below '0'.
     """
     if subtree:
+        base = subtree.rstrip("/")
+        # Two queries rather than one with an OR: SQLite will not fold an OR
+        # into a single index range, and seeking is the entire point.
         rows = conn.execute(
             """
             SELECT parent_path, COUNT(*)
             FROM files
-            WHERE scan_id = ? AND type = 'file'
-              AND (parent_path = ? OR parent_path LIKE ?)
+            WHERE scan_id = ? AND type = 'file' AND parent_path = ?
             GROUP BY parent_path
             """,
-            (scan_id, subtree, f"{subtree}/%"),
+            (scan_id, subtree),
+        ).fetchall()
+        rows += conn.execute(
+            """
+            SELECT parent_path, COUNT(*)
+            FROM files
+            WHERE scan_id = ? AND type = 'file'
+              AND parent_path >= ? AND parent_path < ?
+            GROUP BY parent_path
+            """,
+            (scan_id, f"{base}/", f"{base}0"),
         ).fetchall()
     else:
         rows = conn.execute(
@@ -262,11 +299,7 @@ def count_cloud_files_for_path(analyzer: Analyzer, snapshot, path: str) -> int:
     rel = rel_path_from_cloud(path)
     subtree = "" if rel in ("", "/") else normalize_path(rel)
 
-    updates = {
-        folder: scan_id
-        for folder, scan_id in snapshot.folder_updates.items()
-        if folder and (not subtree or folder == subtree or folder.startswith(subtree + "/"))
-    }
+    updates = folder_updates_under(snapshot, subtree)
     by_scan: Dict[int, List[str]] = {}
     for folder, scan_id in updates.items():
         by_scan.setdefault(scan_id, []).append(folder)
@@ -690,19 +723,22 @@ def main() -> None:
         if local_result.started and local_result.scan_id is not None:
             local_scan_id = local_result.scan_id
 
-    node = build_tree(analyzer, snapshot, root_path, args.depth)
-    if effective_backend == "daemon":
-        compute_status(node, membership_dirs, collapse=collapse)
-    else:
-        compute_status_whitelist(
-            node, membership_dirs, collapse=collapse, synced_paths=synced_path_set,
-            local_root=args.local_root,
-        )
+    # One connection for the read that follows. Deliberately after the local
+    # scan above, which writes; nothing below this line does.
+    with storage.reuse_connection():
+        node = build_tree(analyzer, snapshot, root_path, args.depth)
+        if effective_backend == "daemon":
+            compute_status(node, membership_dirs, collapse=collapse)
+        else:
+            compute_status_whitelist(
+                node, membership_dirs, collapse=collapse, synced_paths=synced_path_set,
+                local_root=args.local_root,
+            )
 
-    apply_sync_percent(node, analyzer, snapshot, local_scan_id, args.local_root)
+        apply_sync_percent(node, analyzer, snapshot, local_scan_id, args.local_root)
 
-    if use_policy and schema == SCHEMA_V2:
-        apply_policy_overlay(node, policy_ctx, args.local_root)
+        if use_policy and schema == SCHEMA_V2:
+            apply_policy_overlay(node, policy_ctx, args.local_root)
 
     extra_warnings: List[str] = list(source_warnings)
     if node.children_count == 0 and root_path != "/":
