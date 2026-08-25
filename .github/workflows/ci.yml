@@ -60,6 +60,9 @@ jobs:
       - name: Unit tests (cloud_delta staleness detection, offline fake client)
         run: python tests/test_cloud_delta.py -v
 
+      - name: Unit tests (shell aliases — names, ydm=menu, mirror guard)
+        run: python tests/test_aliases.py -v
+
       - name: Regression suite (tests/test_ydm_fixes.sh)
         run: bash tests/test_ydm_fixes.sh
 

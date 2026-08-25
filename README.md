@@ -33,14 +33,17 @@ echo "source $(pwd)/tools/aliases.sh" >> ~/.bashrc
 ```
 
 ```bash
-ydm-menu
+ydm
 ydm-scan-cloud
 ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
+ydm-sync-pick /Books/Math
+ydm-sync-state
 ydm-sync-rm /Projects/2024
+ydm-bisync-status
 ydm-help
 ```
 
@@ -330,30 +333,62 @@ echo "source /path/to/ydm/tools/aliases.sh" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Three variables control everything; set any of them before sourcing:
+These variables control everything; set any of them before sourcing:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `YDM_ROOT` | the checkout the script sits in | project directory |
 | `YDM_DB` | `$YDM_ROOT/monitor.db` | database |
 | `YDM_LOCAL_ROOT` | **none** | your local mirror |
+| `YDM_POLICY` | `$YDM_ROOT/var/sync_policy.json` | which paths sync, and how |
+| `YDM_BISYNC_FILTER` | `$YDM_LOCAL_ROOT.bisync.filters` | the bidirectional filter |
+| `YDM_REMOTE` | `yandex` | rclone remote name |
 
 `YDM_LOCAL_ROOT` has no default on purpose: the mirror is wherever you put
 it, and guessing would mean scanning or syncing the wrong directory.
 Commands that need it stop and say so.
 
 ### What you get
-- `ydm` — the base command with `--db-path` already set
-- `ydm-scan-cloud` — full cloud scan
+
+Looking:
+- `ydm` — the interactive sync UI (daemon or rclone); `ydm-menu` is a synonym
+- `ydm-cli <command>` — the raw CLI with `--db-path` filled in, e.g.
+  `ydm-cli report diff`
+- `ydm-tree [depth]` / `ydm-tree <path> [depth]` — sync tree with policy markers
+- `ydm-tree-path <path> [depth]` — the same with every branch shown
+- `ydm-sync-state` — one-line sync status and the next action
+
+Scanning:
+- `ydm-scan-cloud [path]` — full cloud scan, or one folder if you name it
 - `ydm-scan-cloud-path <path>` — cloud scan of one folder
 - `ydm-scan-local` — local scan of `$YDM_LOCAL_ROOT`
-- `ydm-menu` — interactive sync UI (daemon or rclone)
-- `ydm-tree` — sync tree (text + branches)
-- `ydm-tree-path <path> [depth]` — sync tree for one folder, with depth
-- `ydm-sync-add <path> [mode]` — include a folder; mode is `bidirectional`
-  (default), `download_only` or `disabled`
-- `ydm-sync-rm <path>` — exclude a folder
-- `ydm-help` — the cheat sheet, including the paths currently in effect
+
+Changing what is synced:
+- `ydm-sync-add <path>` / `ydm-sync-add --mode <mode> <path>` — include a
+  folder; mode is `bidirectional` (default), `download_only` or `disabled`
+- `ydm-sync-pick <parent>` — choose a child folder by number from the cloud
+  listing, instead of typing a path
+- `ydm-sync-rm <path>` — exclude a folder, offering to drop the local copy
+
+Bisync:
+- `ydm-bisync-status` — state, lock, recent log lines
+- `ydm-bisync-run` — one pass, applies
+- `ydm-bisync-resync` — re-establish the baseline; **dry run** until you pass
+  `--apply`, because a resync lets the local side overwrite the cloud
+
+Renames — a cloud-side rename has to be settled before bisync sees a missing
+file and a new one and concludes delete-then-upload:
+- `ydm-rename <old> <new>` — rename one path safely
+- `ydm-rename-detect` / `ydm-rename-status` / `ydm-rename-apply`
+- `ydm-rename-policy` / `ydm-rename-policy-set <mode> [path]`
+
+Policy:
+- `ydm-policy-status` — modes per path
+- `ydm-policy-inspect <path>` — why this path has this mode
+- `ydm-policy-render` — regenerate the rclone filters
+
+And `ydm-help` — the cheat sheet, including the paths currently in effect.
+`ydm-help --plain` skips the pager.
 
 If `ydm-sync-add` prints `BLOCKED` with `Risk: path_not_found`, the path exists
 in the cloud but is missing from the current YDM cloud snapshot. Refresh that
@@ -391,11 +426,20 @@ shipped it. Neither was right: the three lines above are the whole fix, and
 this project does not ship a wrapper for them.)
 
 ### Important
-- `ydm-sync-add` and `ydm-sync-rm` **run with `--apply` directly**.
-  The `exclude-dirs` change is applied immediately, followed by a daemon
-  restart and a local scan (the `sync_exclude` defaults). For a dry run,
-  call `python3 tools/sync_policy.py add --path <path> --mode <mode>`
-  without `--apply`.
+
+Four of these **run with `--apply` directly**, with no dry run of their own:
+`ydm-sync-add`, `ydm-sync-rm`, `ydm-bisync-run` and `ydm-rename-apply`. On the
+`yandex-disk` daemon the first two rewrite `exclude-dirs` and restart it,
+which starts real syncing or real removal of local copies. For a dry run, call
+the tool directly and leave `--apply` off:
+
+```bash
+python3 tools/sync_policy.py add --path <path> --mode <mode>
+```
+
+`ydm-bisync-resync` is the exception among the bisync wrappers: it stays a dry
+run until you pass `--apply` yourself, because a resync lets the local side
+overwrite the cloud.
 
 ### Examples
 ```bash

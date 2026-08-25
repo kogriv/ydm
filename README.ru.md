@@ -32,14 +32,17 @@ echo "source $(pwd)/tools/aliases.sh" >> ~/.bashrc
 ```
 
 ```bash
-ydm-menu
+ydm
 ydm-scan-cloud
 ydm-scan-cloud-path /video
 ydm-scan-local
 ydm-tree
 ydm-tree-path /video 3
 ydm-sync-add /Projects/2024
+ydm-sync-pick /Books/Math
+ydm-sync-state
 ydm-sync-rm /Projects/2024
+ydm-bisync-status
 ydm-help
 ```
 
@@ -314,30 +317,62 @@ echo "source /путь/к/ydm/tools/aliases.sh" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Всё управляется тремя переменными; любую можно задать до подключения:
+Всё управляется переменными; любую можно задать до подключения:
 
 | Переменная | По умолчанию | Что это |
 |---|---|---|
 | `YDM_ROOT` | каталог, в котором лежит сам скрипт | корень проекта |
 | `YDM_DB` | `$YDM_ROOT/monitor.db` | база |
 | `YDM_LOCAL_ROOT` | **нет** | локальная копия |
+| `YDM_POLICY` | `$YDM_ROOT/var/sync_policy.json` | какие пути синхронизируются и как |
+| `YDM_BISYNC_FILTER` | `$YDM_LOCAL_ROOT.bisync.filters` | двусторонний фильтр |
+| `YDM_REMOTE` | `yandex` | имя rclone remote |
 
 У `YDM_LOCAL_ROOT` намеренно нет значения по умолчанию: копия лежит там, куда
 её положили, и угадывание означало бы скан или синхронизацию не того каталога.
 Команды, которым она нужна, останавливаются и говорят об этом.
 
 ### Что появляется
-- `ydm` — базовая команда с уже подставленным `--db-path`
-- `ydm-scan-cloud` — полный cloud scan
+
+Смотреть:
+- `ydm` — интерактивное меню (демон или rclone); `ydm-menu` — синоним
+- `ydm-cli <команда>` — голый CLI с подставленным `--db-path`, например
+  `ydm-cli report diff`
+- `ydm-tree [depth]` / `ydm-tree <path> [depth]` — дерево синка с метками политики
+- `ydm-tree-path <path> [depth]` — то же, но со всеми ветками
+- `ydm-sync-state` — статус синка одной строкой и следующее действие
+
+Сканировать:
+- `ydm-scan-cloud [path]` — полный cloud scan, либо одна папка, если указать её
 - `ydm-scan-cloud-path <path>` — cloud scan одной папки
 - `ydm-scan-local` — local scan каталога `$YDM_LOCAL_ROOT`
-- `ydm-menu` — интерактивное меню (демон или rclone)
-- `ydm-tree` — дерево синка (text + ветки)
-- `ydm-tree-path <path> [depth]` — дерево для папки с глубиной
-- `ydm-sync-add <path> [mode]` — включить папку; режим `bidirectional`
-  (по умолчанию), `download_only` или `disabled`
-- `ydm-sync-rm <path>` — убрать папку из sync
-- `ydm-help` — подсказка, включая действующие сейчас пути
+
+Менять состав синка:
+- `ydm-sync-add <path>` / `ydm-sync-add --mode <mode> <path>` — включить папку;
+  режим `bidirectional` (по умолчанию), `download_only` или `disabled`
+- `ydm-sync-pick <parent>` — выбрать подпапку по номеру из облачного листинга,
+  вместо ввода пути руками
+- `ydm-sync-rm <path>` — убрать папку из sync, с предложением удалить локальную копию
+
+Bisync:
+- `ydm-bisync-status` — состояние, лок, последние строки лога
+- `ydm-bisync-run` — один проход, применяет
+- `ydm-bisync-resync` — переустановить базу; **сухой прогон**, пока сами не
+  передадите `--apply`: resync разрешает локальной стороне перезаписать облако
+
+Переименования — облачный rename нужно разрешить до того, как bisync увидит
+пропавший файл и новый и решит, что это удаление плюс загрузка:
+- `ydm-rename <old> <new>` — безопасно переименовать один путь
+- `ydm-rename-detect` / `ydm-rename-status` / `ydm-rename-apply`
+- `ydm-rename-policy` / `ydm-rename-policy-set <mode> [path]`
+
+Политика:
+- `ydm-policy-status` — режимы по путям
+- `ydm-policy-inspect <path>` — почему у пути такой режим
+- `ydm-policy-render` — перегенерировать rclone-фильтры
+
+И `ydm-help` — подсказка, включая действующие сейчас пути; `ydm-help --plain`
+без пейджера.
 
 Если `ydm-sync-add` пишет `BLOCKED` с `Risk: path_not_found`, это значит, что
 путь есть в облаке, но его ещё нет в актуальном cloud snapshot `ydm`. Сначала
@@ -376,11 +411,21 @@ tput rmcup; stty sane
 другое: такой команды в Termux нет, а весь фикс — три строки выше.)
 
 ### Важно
-- `ydm-sync-add` и `ydm-sync-rm` **выполняют `--apply` напрямую**.
-  Это значит, что изменение `exclude-dirs` применяется сразу, а затем
-  запускается рестарт демона и локальный скан (по умолчанию в `sync_exclude`).
-  Для сухого прогона вызывайте
-  `python3 tools/sync_policy.py add --path <path> --mode <mode>` без `--apply`.
+
+Четыре команды **выполняют `--apply` напрямую**, своего сухого прогона у них
+нет: `ydm-sync-add`, `ydm-sync-rm`, `ydm-bisync-run` и `ydm-rename-apply`. На
+демоне `yandex-disk` первые две переписывают `exclude-dirs` и перезапускают
+его — то есть начинается настоящая синхронизация или настоящее удаление
+локальных копий. Для сухого прогона вызывайте инструмент напрямую, без
+`--apply`:
+
+```bash
+python3 tools/sync_policy.py add --path <path> --mode <mode>
+```
+
+`ydm-bisync-resync` — исключение среди bisync-обёрток: он остаётся сухим
+прогоном, пока вы сами не передадите `--apply`, потому что resync разрешает
+локальной стороне перезаписать облако.
 
 ### Примеры
 ```bash
