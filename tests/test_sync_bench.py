@@ -31,6 +31,8 @@ from tests.bench import (  # noqa: E402
     SAMPLE_TREE,
     build_bench,
     expectations,
+    make_daemon_policy,
+    read_exclude_dirs,
     render_markers,
 )
 
@@ -1554,6 +1556,390 @@ class TestTrashAndDatabaseSurfaces(BenchTestCase):
             text = self.capture(ydm_menu_actions.print_detailed_status, self.cfg())
         self.assertTrue(text.strip())
         self.assertNotIn("Traceback", text)
+
+
+# --- Phase 10 --------------------------------------------------------------
+
+class TestStopSyncingOnTheDaemon(BenchTestCase):
+    """Menu 4 under a blacklist, where until 2026-08-27 it did the opposite.
+
+    The daemon has no whitelist: `exclude-dirs` is all it reads, and everything
+    absent from it syncs. A policy for it therefore holds exclusions and
+    nothing else — `_policy_to_exclude_dirs()` drops `bidirectional` and raises
+    on `download_only`. Menu 4 listed the policy under "Remove folder from
+    sync", so on a real machine it offered 52 excluded folders and removing one
+    *started* syncing it. `Books` sat second in that list.
+
+    The bench never caught it because its policy is rclone-shaped and holds all
+    three modes at once. `make_daemon_policy()` is the missing degenerate case.
+
+    See tasks/ydm_menu/AUDIT-2026-08-27.md.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.excluded = make_daemon_policy(self.bench)
+
+    def cfg(self, backend="daemon"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend=backend,
+            plain=True,
+        )
+
+    def run_screen(self, answers, backend="daemon", screen=None):
+        """Drive menu 4, with the daemon restart stubbed out.
+
+        `apply_policy(dry_run=False)` ends in `yandex-disk stop && start`. Left
+        alone that would restart the operator's live daemon from inside a unit
+        test — the bench isolates files, not the machine. The stub also records
+        that the restart was reached, which is the difference between "wrote
+        the config" and "the daemon read it".
+        """
+        import contextlib
+        import io
+        import unittest.mock as mock
+
+        from tools import sync_backends, ydm_menu
+        from tools.ydm_menu_prompts import scripted_reader
+
+        screen = screen or ydm_menu.screen_remove
+        buffer = io.StringIO()
+        with mock.patch.object(sync_backends, "stop_start_daemon",
+                               return_value={}) as restart:
+            with contextlib.redirect_stdout(buffer):
+                screen(self.cfg(backend), scripted_reader(answers))
+        self.restarts = restart.call_count
+        return buffer.getvalue()
+
+    def offered(self, text):
+        """The paths the screen put in front of the person, in its order.
+
+        Numbered lines only, whole line taken: a folder name may hold spaces,
+        and the prose around the list may hold a path as an example.
+        """
+        paths = []
+        for line in text.splitlines():
+            number, _, rest = line.strip().partition("  ")
+            rest = rest.strip()
+            if number.isdigit() and rest.startswith("/"):
+                paths.append(rest)
+        return paths
+
+    def index_of(self, text, path):
+        """Match the whole rest of the line: folder names contain spaces."""
+        for line in text.splitlines():
+            number, _, rest = line.strip().partition("  ")
+            if number.isdigit() and rest.strip() == path:
+                return number
+        self.fail(f"{path} is not on the screen:\n{text}")
+
+    # --- 10.1 the degenerate policy itself ---------------------------------
+
+    def test_the_bench_can_hold_a_policy_of_pure_exclusions(self):
+        """The shape a daemon machine actually has, and the bench lacked."""
+        policy = self.bench.read_policy()
+        self.assertTrue(policy["paths"])
+        self.assertEqual({"disabled"},
+                         {meta["mode"] for meta in policy["paths"].values()})
+        # Both halves have to agree, or the test would be checking a fiction.
+        self.assertEqual(sorted(policy["paths"]), read_exclude_dirs(self.bench))
+
+    # --- 10.2 the screen excludes instead of including ---------------------
+
+    def test_the_screen_never_offers_an_excluded_folder(self):
+        """The defect, stated directly.
+
+        Every path on this screen used to be excluded; now none may be.
+        `/Books` is the one that matters — second in the live list, 113 GB,
+        and the folder the 2026-08-14 incident emptied.
+        """
+        text = self.run_screen(["0"])
+        offered = self.offered(text)
+        self.assertTrue(offered, f"nothing offered at all:\n{text}")
+        for path in offered:
+            self.assertNotIn(path.lstrip("/"), self.excluded,
+                             f"{path} is excluded and was offered:\n{text}")
+
+    def test_the_screen_offers_what_is_actually_syncing(self):
+        """Under a blacklist that is everything the exclude list misses."""
+        text = self.run_screen(["0"])
+        offered = set(self.offered(text))
+        for path in ("/pro", "/video", "/Docs", "/shared", "/mix", "/orphans"):
+            self.assertIn(path, offered, text)
+
+    def test_choosing_a_folder_excludes_it(self):
+        """The action, in the direction the label promises."""
+        listing = self.run_screen(["0"])
+        pick = self.index_of(listing, "/video")
+
+        self.run_screen([pick, "y"])
+
+        self.assertIn("video", read_exclude_dirs(self.bench))
+        self.assertEqual("disabled",
+                         self.bench.read_policy()["paths"]["video"]["mode"])
+        self.assertEqual(1, self.restarts, "the daemon never read the change")
+
+    def test_it_can_only_ever_add_exclusions(self):
+        """The invariant that makes the old behaviour unreachable.
+
+        Not "this particular answer is safe" — no path through this screen may
+        shrink the exclude list, whatever is typed into it. The old screen
+        shrank it on every successful run.
+        """
+        before = set(read_exclude_dirs(self.bench))
+        previous = None
+        while True:
+            listing = self.run_screen(["0"])
+            paths = self.offered(listing)
+            if not paths:
+                break
+            if previous is not None:
+                # Bounds the loop, and says the other half of the invariant:
+                # each exclusion takes one folder out of scope for good. A
+                # screen that offered the excluded back would loop forever,
+                # and a hang is not a failure anyone can read.
+                self.assertLess(len(paths), previous, listing)
+            previous = len(paths)
+            with self.subTest(path=paths[0]):
+                self.run_screen([self.index_of(listing, paths[0]), "y"])
+                after = set(read_exclude_dirs(self.bench))
+                self.assertTrue(before <= after,
+                                f"{paths[0]} un-excluded {before - after}")
+                before = after
+
+    def test_declining_leaves_both_halves_alone(self):
+        policy_before = self.bench.read_policy()
+        config_before = read_exclude_dirs(self.bench)
+        listing = self.run_screen(["0"])
+
+        text = self.run_screen([self.index_of(listing, "/video"), "n"])
+
+        self.assertEqual(policy_before, self.bench.read_policy())
+        self.assertEqual(config_before, read_exclude_dirs(self.bench))
+        self.assertEqual(0, self.restarts, "the daemon was restarted anyway")
+        self.assertIn("Cancelled", text)
+
+    def test_it_shows_the_delta_before_applying_it(self):
+        """The 8.7 preview, on the operation that now runs here."""
+        listing = self.run_screen(["0"])
+        text = self.run_screen([self.index_of(listing, "/video"), "n"])
+        self.assertIn("newly excluded", text)
+        self.assertIn("video", text)
+
+    def test_back_changes_nothing(self):
+        before = self.bench.read_policy()
+        self.run_screen(["0"])
+        self.assertEqual(before, self.bench.read_policy())
+
+    def test_a_custom_path_reaches_below_the_top_level(self):
+        """The live exclude list is mostly depth 2 — `video/Математика` and kin.
+
+        A screen that could only exclude top-level folders would not be able to
+        express the configuration this machine already runs.
+        """
+        listing = self.run_screen(["0"])
+        self.assertNotIn("/shared/live", self.offered(listing),
+                         "sub-paths belong behind Custom, not in the list")
+
+        text = self.run_screen([self._custom_index(listing), "/shared/live", "y"])
+        self.assertIn("shared/live", read_exclude_dirs(self.bench), text)
+
+    def test_the_sync_root_cannot_be_typed_in(self):
+        """`normalize_entry("/")` is the empty string.
+
+        Written into `exclude-dirs` that is not "exclude everything" — it is a
+        stray comma the daemon reads as nothing at all.
+        """
+        listing = self.run_screen(["0"])
+        before = read_exclude_dirs(self.bench)
+
+        text = self.run_screen([self._custom_index(listing), "/"])
+
+        self.assertEqual(before, read_exclude_dirs(self.bench))
+        self.assertIn("root", text.lower())
+        self.assertEqual(0, self.restarts)
+
+    def test_a_custom_path_already_covered_says_so_instead_of_acting(self):
+        """`Books` is excluded, so excluding `Books/Math` changes nothing."""
+        listing = self.run_screen(["0"])
+        before = read_exclude_dirs(self.bench)
+
+        text = self.run_screen([self._custom_index(listing), "/Books/Math"])
+
+        self.assertEqual(before, read_exclude_dirs(self.bench))
+        self.assertIn("Books", text)
+        self.assertEqual(0, self.restarts)
+
+    def _custom_index(self, text):
+        for line in text.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit() and "Custom" in parts[1]:
+                return parts[0]
+        self.fail(f"no Custom option on the screen:\n{text}")
+
+    def test_excluding_a_parent_names_the_children_it_would_shadow(self):
+        """A blacklist has no way to keep a child of an excluded folder.
+
+        `_policy_to_exclude_dirs()` simply drops `bidirectional` entries, so a
+        child left in the policy under a newly excluded parent stops syncing
+        without a word. That is the same silence this whole phase is about.
+        """
+        policy = self.bench.read_policy()
+        policy["paths"]["shared/live"] = {"mode": "bidirectional"}
+        with open(self.bench.policy_path, "w", encoding="utf-8") as handle:
+            json.dump(policy, handle, ensure_ascii=False, indent=2)
+
+        listing = self.run_screen(["0"])
+        text = self.run_screen([self.index_of(listing, "/shared"), "n"])
+        self.assertIn("shared/live", text)
+
+    # --- 10.3 / 10.4 what the person is told -------------------------------
+
+    def test_the_menu_calls_it_stopping_on_the_daemon(self):
+        from tools.ydm_menu_screens import render_main_menu
+        from tools.ydm_menu_status import load_status
+
+        cfg = self.cfg("daemon")
+        text = "\n".join(render_main_menu(cfg, load_status(cfg)))
+        self.assertIn(" 4  Stop syncing", text)
+        self.assertNotIn("Remove folder from sync", text)
+        # The digits keep meaning what they meant; only the wording moves.
+        self.assertIn(" 2  Add folder from cloud", text)
+
+    def test_the_menu_still_calls_it_removing_on_rclone(self):
+        from tools.ydm_menu_screens import render_main_menu
+        from tools.ydm_menu_status import load_status
+
+        cfg = self.cfg("rclone")
+        text = "\n".join(render_main_menu(cfg, load_status(cfg)))
+        self.assertIn(" 4  Remove folder from sync", text)
+
+    def test_the_excluded_are_counted_and_the_way_back_is_named(self):
+        """They leave this screen, so the screen has to say where they went."""
+        text = self.run_screen(["0"])
+        self.assertIn(str(len(self.excluded)), text)
+        self.assertIn("excluded", text.lower())
+        self.assertRegex(text, r"menu 2|item 2|\b2\b")
+
+    def test_it_prints_the_command_rather_than_deleting_anything(self):
+        """Reclaiming the space is a separate, human-pressed step.
+
+        The order — exclude, let the daemon restart, then delete — is the only
+        safe one, and putting an irreversible step immediately after a daemon
+        restart is the shape of the 2026-08-14 incident. So the screen hands
+        over a pasteable command and stops.
+        """
+        import shlex
+
+        listing = self.run_screen(["0"])
+        text = self.run_screen([self.index_of(listing, "/video"), "y"])
+
+        line = next((l.strip() for l in text.splitlines()
+                     if l.strip().startswith("rm -rf")), None)
+        self.assertIsNotNone(line, f"no reclaim command printed:\n{text}")
+        self.assertIn(os.path.join(self.bench.local_root, "video"),
+                      shlex.split(line))
+        # And it only printed it: the folder is still there.
+        self.assertTrue(os.path.isdir(os.path.join(self.bench.local_root, "video")))
+
+    def test_the_printed_command_survives_a_hostile_name(self):
+        """Same lesson as the trash screen, learned on `Books (1)` on 16.08."""
+        import shlex
+
+        os.makedirs(os.path.join(self.bench.local_root, "odd name (1)"),
+                    exist_ok=True)
+        listing = self.run_screen(["0"])
+        text = self.run_screen([self.index_of(listing, "/odd name (1)"), "y"])
+
+        line = next((l.strip() for l in text.splitlines()
+                     if l.strip().startswith("rm -rf")), None)
+        self.assertIsNotNone(line, f"no reclaim command printed:\n{text}")
+        self.assertIn(os.path.join(self.bench.local_root, "odd name (1)"),
+                      shlex.split(line))
+
+    def test_a_locally_created_folder_is_offered_too(self):
+        """A blacklist syncs what the snapshot has never seen.
+
+        Made locally and not yet scanned, it is still inside the daemon's
+        scope, so a screen built from the snapshot alone would fail to offer
+        the one folder most likely to be a mistake.
+        """
+        os.makedirs(os.path.join(self.bench.local_root, "brand-new"),
+                    exist_ok=True)
+        self.assertIn("/brand-new", self.offered(self.run_screen(["0"])))
+
+    def test_nothing_left_to_exclude_is_an_answer(self):
+        """Every path excluded is a legitimate state, not an empty screen."""
+        make_daemon_policy(self.bench, [
+            entry.path for entry in SAMPLE_TREE
+            if entry.path != "/" and "/" not in entry.path.strip("/")
+        ] + ["brand-new"])
+        text = self.run_screen(["0"])
+        self.assertTrue(text.strip())
+        self.assertIn("everything", text.lower())
+
+
+class TestRemoveScreenOnRclone(BenchTestCase):
+    """The whitelist side, where "remove" has always meant what it says.
+
+    Kept as its own class so a change made for the daemon has to prove it left
+    this one alone: under rclone a policy entry means "synced", and deleting it
+    is exactly how a folder stops syncing.
+    """
+
+    def cfg(self, backend="rclone"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend=backend,
+            plain=True,
+        )
+
+    def run_screen(self, answers):
+        import contextlib
+        import io
+
+        from tools.ydm_menu import screen_remove
+        from tools.ydm_menu_prompts import scripted_reader
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            screen_remove(self.cfg(), scripted_reader(answers))
+        return buffer.getvalue()
+
+    def _index_of(self, text, entry):
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == entry:
+                return parts[0]
+        self.fail(f"{entry} is not on the screen:\n{text}")
+
+    def test_it_still_lists_the_policy_and_still_removes(self):
+        listing = self.run_screen(["0"])
+        self.run_screen([self._index_of(listing, "video"), "y", "video", "n"])
+        self.assertNotIn("video", self.bench.read_policy()["paths"])
+
+    def test_an_excluded_entry_is_not_called_removing_from_sync(self):
+        """Under a whitelist, dropping a `[X]` entry changes no syncing at all.
+
+        `effective_download_paths()` never looked at it: the folder was out of
+        the filters because it was absent from them, not because of the entry.
+        Calling that "remove from sync" is the daemon's mistake in miniature.
+        """
+        listing = self.run_screen(["0"])
+        text = self.run_screen([self._index_of(listing, "Books"), "n"])
+        self.assertNotIn("Remove /Books from sync?", text)
+        self.assertIn("not synced", text.lower())
 
 
 if __name__ == "__main__":

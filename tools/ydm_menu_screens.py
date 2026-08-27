@@ -67,7 +67,12 @@ def render_main_menu(cfg: MenuConfig, status: MenuStatus) -> List[str]:
         " 1  Show sync tree",
         " 2  Add folder from cloud",
         " 3  Add LOCAL folder to sync",
-        " 4  Remove folder from sync",
+        # The daemon keeps a blacklist, so its menu 4 adds an exclusion where
+        # rclone's deletes a policy entry. Calling both "remove from sync" made
+        # the daemon's screen offer 52 excluded folders under a label promising
+        # the opposite. See tasks/ydm_menu/AUDIT-2026-08-27.md.
+        " 4  Stop syncing a folder (exclude)" if is_daemon
+        else " 4  Remove folder from sync",
         # The daemon syncs continuously and has no resync baseline; naming
         # these after rclone bisync misdescribes what they do here.
         " 5  Restart daemon sync now" if is_daemon else " 5  Run bisync now",

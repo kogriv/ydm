@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,8 +23,11 @@ from tools.ydm_menu_actions import (  # noqa: E402
     check_cloud_changes,
     cloud_list_dirs,
     confirm_and_add,
+    covering_exclusion,
+    daemon_sync_scope,
     handle_blocked_add,
     list_stale_folders,
+    policy_children_of,
     offer_resync_if_needed,
     print_cloud_local_diff,
     print_detailed_status,
@@ -50,7 +55,11 @@ from tools.ydm_menu_prompts import (  # noqa: E402
 )
 from tools.ydm_menu_screens import render_main_menu, render_short_help  # noqa: E402
 from tools.ydm_menu_status import load_status  # noqa: E402
-from tools.sync_policy import load_policy, policy_paths_by_mode  # noqa: E402
+from tools.sync_policy import (  # noqa: E402
+    load_policy,
+    normalize_entry,
+    policy_paths_by_mode,
+)
 
 
 Reader = Callable[[str], str]
@@ -187,6 +196,101 @@ def screen_add_orphans(cfg: MenuConfig, reader: Reader) -> None:
 
 
 def screen_remove(cfg: MenuConfig, reader: Reader) -> None:
+    """Menu 4. What "remove" means depends on which list the backend keeps.
+
+    Under rclone the policy is a whitelist: an entry means "synced", and
+    deleting it is how a folder stops syncing. Under the daemon it is a
+    blacklist — an entry means "excluded" — and deleting one *starts* a sync.
+    The same screen therefore did the opposite of its own label on every
+    daemon machine. See tasks/ydm_menu/AUDIT-2026-08-27.md.
+    """
+    if cfg.backend_kind == "daemon":
+        screen_stop_syncing(cfg, reader)
+        return
+    screen_remove_from_whitelist(cfg, reader)
+
+
+def screen_stop_syncing(cfg: MenuConfig, reader: Reader) -> None:
+    """Menu 4 on the daemon: put a folder into `exclude-dirs`.
+
+    Excluding is the only direction that is safe by construction here — it
+    takes a folder out of the daemon's reach and cannot delete anything,
+    locally or in the cloud. The opposite direction, un-excluding, is what
+    emptied /Books on 2026-08-14, and it stays where it belongs: menu 2, which
+    shows the delta first.
+    """
+    scope = daemon_sync_scope(cfg)
+    synced, excluded = scope["synced"], scope["excluded"]
+    footer = (f"Excluded now: {len(excluded)} folder(s). "
+              f"To start syncing one again use menu 2.")
+    if not synced:
+        print("The daemon is already excluding everything it knows about — "
+              "there is nothing left to stop syncing.")
+        print(footer)
+        return
+
+    print("Folders the daemon is syncing (pick one to STOP syncing):\n")
+    for i, path in enumerate(synced, start=1):
+        print(f" {i:2d}  {path}")
+    custom = len(synced) + 1
+    print(f" {custom:2d}  Custom path (a subfolder, e.g. /video/Blender)")
+    print("  0  Back")
+    print(f"\n{footer}")
+
+    pick = prompt_int("Stop syncing which", reader=reader)
+    if pick is None:
+        return
+    if pick == custom:
+        typed = prompt_line("Path: ", reader=reader)
+        if not typed:
+            return
+        entry = normalize_entry(typed)
+        if not entry:
+            # `normalize_entry("/")` is the empty string, and an empty
+            # exclude-dirs entry is not "exclude everything" — it is a stray
+            # comma in the daemon's config.
+            print("\nThe sync root itself cannot be excluded. "
+                  "To stop the daemon entirely: yandex-disk stop")
+            return
+        path = f"/{entry}"
+    elif 1 <= pick <= len(synced):
+        path = synced[pick - 1]
+    else:
+        return
+
+    covered = covering_exclusion(path, excluded)
+    if covered:
+        # A blacklist excludes whole subtrees, so this would add an entry that
+        # changes nothing and report success for it.
+        print(f"\n/{covered} is already excluded, so {path} is not syncing "
+              f"either. Nothing to do.")
+        return
+
+    shadowed = policy_children_of(cfg, path)
+    if shadowed:
+        print(f"\nWARN: the daemon cannot keep a child of an excluded folder, "
+              f"so these stop syncing too, whatever the policy says about them:")
+        for child in shadowed:
+            print(f"    /{child}")
+
+    result = confirm_and_add(cfg, path, "disabled", reader=reader)
+    if result is None:
+        return
+    print(result.message)
+    if not result.ok:
+        return
+    local = os.path.join(cfg.local_root, path.strip("/"))
+    if os.path.isdir(local):
+        # Printed, not pressed. The order — exclude, let the daemon restart,
+        # then delete — is the only safe one, and an irreversible step placed
+        # right after a daemon restart is the shape of the 14.08 incident.
+        print(f"\nThe daemon no longer touches {path}. "
+              f"The local copy is untouched; to reclaim the space:")
+        print(f"  rm -rf {shlex.quote(local)}")
+
+
+def screen_remove_from_whitelist(cfg: MenuConfig, reader: Reader) -> None:
+    """Menu 4 on rclone, where a policy entry means the folder is synced."""
     policy = load_policy(cfg.policy_path)
     if not policy:
         print("No policy file.")
@@ -210,7 +314,16 @@ def screen_remove(cfg: MenuConfig, reader: Reader) -> None:
         return
     _label, path, mode = entries[pick - 1]
     cloud_path = f"/{path}"
-    print(f"\nRemove {cloud_path} from sync?")
+    if mode == "disabled":
+        # `effective_download_paths()` never looked at this entry: the folder
+        # is out of the filters because it is absent from them, not because of
+        # the mark. Calling that "remove from sync" is the daemon's mistake in
+        # miniature, and it is the one place a whitelist can make it.
+        print(f"\n{cloud_path} is marked excluded and is not synced under "
+              f"rclone either way — dropping the entry only removes the mark.")
+        print("Drop it?")
+    else:
+        print(f"\nRemove {cloud_path} from sync?")
     if not prompt_yes_no("Confirm", default=False, reader=reader):
         return
     basename = path.rsplit("/", 1)[-1]

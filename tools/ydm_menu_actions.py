@@ -24,6 +24,8 @@ from tools.sync_policy import (
     add_policy_path,
     inspect_path,
     load_policy,
+    normalize_entry,
+    policy_paths_by_mode,
     remove_policy_path,
     render_filters,
 )
@@ -158,8 +160,14 @@ def action_add(
 
 def _preview_lines_daemon(path: str, mode: str, delta: dict) -> List[str]:
     before, after = delta["before"], delta["after"]
+    # "Adding X as disabled" is the policy's vocabulary, not the operator's:
+    # under a blacklist that operation is an exclusion, and menu 4 reaches it.
+    headline = (
+        f"\nExcluding {path} will change the daemon config:" if mode == "disabled"
+        else f"\nAdding {path} as {mode} will change the daemon config:"
+    )
     lines = [
-        f"\nAdding {path} as {mode} will change the daemon config:",
+        headline,
         f"  exclude-dirs: {len(before)} -> {len(after)}",
     ]
     removed = delta.get("removed") or []
@@ -492,6 +500,84 @@ def snapshot_top_level(cfg: MenuConfig, limit: int = 6) -> List[str]:
         # says so elsewhere, and offering nothing is better than crashing.
         return []
     return [f"/{name}" for name in names[:limit]]
+
+
+def covering_exclusion(entry: str, excluded) -> Optional[str]:
+    """The exclusion that already covers `entry`, shallowest first.
+
+    A blacklist excludes a whole subtree, so `Books/Math` is out of sync the
+    moment `Books` is — with no entry of its own. Anything that offers to
+    exclude a path has to know that, or it offers a change that changes
+    nothing and reports success.
+    """
+    entry = entry.strip("/")
+    for candidate in sorted(excluded, key=lambda item: (item.count("/"), item)):
+        if candidate and (entry == candidate or entry.startswith(candidate + "/")):
+            return candidate
+    return None
+
+
+def daemon_excluded_entries(cfg: MenuConfig) -> List[str]:
+    """Everything currently out of the daemon's scope.
+
+    The union of two sources that are supposed to agree: the policy, which is
+    what the next apply will write, and the `exclude-dirs` line the daemon is
+    running on right now. When they disagree the policy is behind — the case
+    `clears_exclude_dirs` refuses an apply over — and taking the union keeps
+    the menu from offering to "stop syncing" something already stopped.
+    """
+    policy = load_policy(cfg.policy_path) or {}
+    entries = set(policy_paths_by_mode(policy, "disabled"))
+    try:
+        backend = backend_from_args(_policy_ns(cfg))
+        live = backend.apply_policy(policy, dry_run=True).get("before") or []
+        entries.update(live)
+    except Exception:
+        # An unreadable config is not a reason to hide the screen; the policy
+        # alone still describes what the next apply would do.
+        pass
+    return sorted(entries, key=str.lower)
+
+
+def daemon_sync_scope(cfg: MenuConfig) -> dict:
+    """{"synced": [...], "excluded": [...]} — top level, as the daemon sees it.
+
+    There is no list of synced folders to read anywhere: the daemon syncs
+    everything `exclude-dirs` misses, so the list has to be reconstructed. Two
+    sources, and both are needed — the cloud snapshot, and the local disk. A
+    folder created locally and never scanned is inside the daemon's scope too,
+    and it is the likeliest one to be there by mistake.
+    """
+    excluded = daemon_excluded_entries(cfg)
+    names = {path.strip("/") for path in snapshot_top_level(cfg, limit=100_000)}
+    try:
+        for name in os.listdir(cfg.local_root):
+            if name.startswith("."):
+                continue
+            if os.path.isdir(os.path.join(cfg.local_root, name)):
+                names.add(name)
+    except OSError:
+        pass
+    synced = [
+        f"/{name}" for name in sorted(names, key=str.lower)
+        if name and not covering_exclusion(name, excluded)
+    ]
+    return {"synced": synced, "excluded": excluded}
+
+
+def policy_children_of(cfg: MenuConfig, path: str) -> List[str]:
+    """Policy entries beneath `path` that are not exclusions themselves.
+
+    `_policy_to_exclude_dirs()` simply drops `bidirectional` entries, so a
+    child left in the policy under a newly excluded parent stops syncing
+    without a word anywhere. Naming them is the whole of the fix.
+    """
+    entry = normalize_entry(path)
+    policy = load_policy(cfg.policy_path) or {}
+    return sorted(
+        child for child, meta in (policy.get("paths") or {}).items()
+        if child.startswith(entry + "/") and meta.get("mode") != "disabled"
+    )
 
 
 def cloud_list_dirs(cfg: MenuConfig, parent: str) -> List[str]:

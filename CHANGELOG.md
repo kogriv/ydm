@@ -5,6 +5,51 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-27 — the menu entry that did the opposite of its label
+
+Phase 10. Menu 4 read "Remove folder from sync" and, on the daemon, listed
+the 52 folders that were **excluded**. Picking one deleted its policy entry,
+which under a blacklist means the folder leaves `exclude-dirs` and starts
+syncing. `Books` — 113 GB, the folder the 2026-08-14 incident emptied — sat
+second in that list.
+
+- **The screen now depends on the backend, like items 5 and 6 already did.**
+  On the daemon it is "Stop syncing a folder (exclude)": it lists what is
+  actually syncing and adds an exclusion. Excluding is the one direction that
+  is safe by construction here — it takes a folder out of the daemon's reach
+  and cannot delete anything. The opposite direction stays in menu 2, which
+  shows the `no longer excluded` line first. On rclone nothing changed:
+  there a policy entry does mean "synced".
+- **No data was ever at risk on this machine**, and that is luck rather than
+  design: the fatal case is a folder missing locally, and `deletion_risk_paths`
+  refuses the daemon restart for exactly that. But 16 of the 52 exclusions do
+  exist locally, and for those no guard fires — the menu would simply have
+  started downloading them.
+- **The bench could not have caught it.** Its policy is rclone-shaped and
+  holds all three modes, so `[X]` is one entry among many. A daemon policy is
+  *nothing but* exclusions, and in that degenerate case the screen inverts.
+  `make_daemon_policy()` is the missing case; the invariant on top of it is
+  that no path through menu 4 may shrink the exclude list.
+- **Four smaller things found while fixing it.** A locally created folder is
+  inside the daemon's scope but absent from the snapshot, so the screen reads
+  the disk as well. Excluding a parent silently kills `bidirectional` children
+  in the policy, so they are named before the confirmation. Excluding below an
+  existing exclusion is a no-op that used to report success. And the preview
+  said "Adding /video as disabled" — the policy's vocabulary, not the
+  operator's.
+- **The local copy is not deleted.** The order — exclude, let the daemon
+  restart, then delete — is the only safe one, and an irreversible step placed
+  immediately after a daemon restart is the shape of the incident. The screen
+  prints a quoted `rm -rf` and stops.
+- **`monitor.db-wal` and `monitor.db-shm` were tracked** although `monitor.db`
+  is ignored — committed by accident two days ago, and deleted again by the
+  next clean close, so `git status` reported a deletion after every test run.
+  Untracked and ignored.
+
+310 tests → 339. Ten mutations, each killed; one of them first *hung* the
+run instead of failing it, which is why the loop that drains the screen now
+requires the list to shrink on every round.
+
 ## 2026-08-25 — a method that had never run, and the leak hiding behind it
 
 Phase 9.5. `StorageManager` defined `get_connection` twice; Python keeps the

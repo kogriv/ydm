@@ -1,6 +1,11 @@
 # Data & Logs
 monitor.db
 *.db
+# SQLite's sidecars for an ignored database. Committed by accident in b845066
+# and removed again by the next clean close of the file, so leaving them
+# tracked makes `git status` report a deletion after every test run.
+*.db-wal
+*.db-shm
 *.db.backup
 monitor.db.backup
 scan_*.log

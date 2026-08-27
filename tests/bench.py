@@ -20,7 +20,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -398,6 +398,56 @@ def build_bench(tmpdir: str, *, base_age_days: int = 1) -> Bench:
             str(ROOT_DIR / "var" / "sync_policy.json"),
         ),
     )
+
+
+#: The exclusions of the degenerate daemon policy — see make_daemon_policy().
+#:
+#: Chosen so that nothing left in sync is missing from disk: `agents`, `arch`
+#: and `archive` are the three top-level folders the sample tree keeps out of
+#: the local filesystem, and a folder that stays in scope while absent locally
+#: is what `deletion_risk_paths` refuses a daemon restart over. Excluding them
+#: here keeps that guard out of the way of checks that are about something else.
+DAEMON_EXCLUDED: Tuple[str, ...] = ("Books", "agents", "arch", "archive")
+
+
+def make_daemon_policy(
+    bench: Bench,
+    excluded: Iterable[str] = DAEMON_EXCLUDED,
+) -> List[str]:
+    """Rewrite the bench policy into the shape a machine with the daemon has.
+
+    The default bench policy is rclone-shaped: it holds all three modes at
+    once, so `[X]` is one entry among many and any screen listing the policy
+    looks plausible. A daemon cannot express the other two — `_policy_to_
+    exclude_dirs()` drops `bidirectional` and raises on `download_only` — so a
+    real daemon policy is **nothing but exclusions**, and in that degenerate
+    case a screen that lists the policy inverts its own meaning.
+
+    That is the case Phase 10 exists for, and until 2026-08-27 no bench
+    modelled it. See tasks/ydm_menu/AUDIT-2026-08-27.md.
+
+    Rewrites both halves, because they have to agree: the policy file and the
+    `exclude-dirs` line the daemon actually reads. Returns the exclusions.
+    """
+    entries = sorted({_rel(entry) for entry in excluded if _rel(entry)})
+    policy = bench.read_policy()
+    policy["paths"] = {entry: {"mode": "disabled"} for entry in entries}
+    with open(bench.policy_path, "w", encoding="utf-8") as handle:
+        json.dump(policy, handle, ensure_ascii=False, indent=2)
+    with open(bench.exclude_config, "w", encoding="utf-8") as handle:
+        handle.write(f"dir=\"{bench.local_root}\"\n")
+        handle.write("exclude-dirs=" + ",".join(entries) + "\n")
+    return entries
+
+
+def read_exclude_dirs(bench: Bench) -> List[str]:
+    """The `exclude-dirs` line as the daemon would parse it."""
+    with open(bench.exclude_config, encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("exclude-dirs="):
+                raw = line.split("=", 1)[1].strip()
+                return [p.strip() for p in raw.split(",") if p.strip()]
+    return []
 
 
 def render_markers(bench: Bench, backend: str, *, depth: int = 3) -> Dict[str, str]:
