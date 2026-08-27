@@ -95,6 +95,33 @@ def _daemon_status(cfg: MenuConfig) -> MenuStatus:
     return status
 
 
+def menu_exclude_dirs(cfg: MenuConfig) -> set:
+    """The exclusions in force for this backend — an empty set, never None.
+
+    Under the daemon that is `exclude-dirs` from the configured file. Under
+    rclone it is nothing: a whitelist backend is not governed by the daemon's
+    blacklist, and folders it names are compared like any other.
+
+    One definition for both readers — the freshness line and the diff screen —
+    because two readers deriving this separately is how they drift apart, which
+    is the same reason `load_exclude_dirs` lives in ydm.py rather than inside
+    `get_diff()`.
+
+    None is not an option here on purpose. Until 2026-08-27 both callers passed
+    it, and both functions downstream read it as "go and load the daemon's
+    config from its *default* path" — the live one, on any machine that has
+    both backends installed. The effect was to move stale folders into the
+    bucket that never warns.
+    """
+    # `load_exclude_dirs` from ydm, not from sync_common: the two share a name
+    # but not a return type, and what is wanted here is the plain set.
+    from ydm import load_exclude_dirs
+
+    if cfg.backend_kind != "daemon":
+        return set()
+    return load_exclude_dirs(cfg.exclude_config)
+
+
 def _apply_snapshot_freshness(cfg: MenuConfig, status: MenuStatus) -> None:
     """How old the snapshot is, said where a person will see it.
 
@@ -103,18 +130,12 @@ def _apply_snapshot_freshness(cfg: MenuConfig, status: MenuStatus) -> None:
     snapshot whose age nobody had mentioned. Same rule as the tree: age is
     reported always, warned about only when the stale part is compared.
     """
-    # `load_exclude_dirs` from ydm, not from sync_common: the two share a name
-    # but not a return type, and snapshot_freshness() needs the plain set.
     from tools.sync_common import create_storage
-    from ydm import Analyzer, load_exclude_dirs
+    from ydm import Analyzer
 
     try:
         analyzer = Analyzer(create_storage(cfg.db_path))
-        exclude_dirs = (
-            load_exclude_dirs(cfg.exclude_config)
-            if cfg.backend_kind == "daemon" else None
-        )
-        fresh = analyzer.snapshot_freshness(exclude_dirs=exclude_dirs)
+        fresh = analyzer.snapshot_freshness(exclude_dirs=menu_exclude_dirs(cfg))
     except Exception:
         return
     if not fresh or fresh.get("base_scan_id") is None:

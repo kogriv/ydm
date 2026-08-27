@@ -5,6 +5,46 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-27 — one sentinel, two meanings, and a warning that never fired
+
+Phase 11. `tests/test_ydm_menu.py` named `ROOT/monitor.db` and
+`ROOT/var/sync_policy.json` outright and let the backend auto-detect, so what
+those checks asserted depended on the machine running them. Fixing that was
+meant to be mechanical. It was not: a probe written to prove the isolation
+found the live daemon config still being opened, and the caller was the
+product.
+
+- **`snapshot_freshness(exclude_dirs=None)` loaded the daemon's `exclude-dirs`
+  from the *default* path.** The menu passes no list under rclone on purpose —
+  a whitelist backend is not governed by the daemon's blacklist — and got the
+  daemon's exclusions applied to its numbers anyway. Folders rclone does
+  compare were counted as "never compared", which moves them into the bucket
+  that never warns. The failure direction is the bad one: a stale snapshot
+  stayed quiet. No list now means nothing is excluded; callers that want the
+  daemon's list ask for it.
+- **`get_diff()` did the same thing**, with no parameter to say otherwise, and
+  the menu's `d` screen inherited it. It gained an `exclude_dirs` argument;
+  omitted, it behaves exactly as before, which is right for the CLI.
+- **One definition for both menu readers.** `menu_exclude_dirs(cfg)` — the
+  daemon's list from the configured file, or an empty set. Two readers
+  deriving this separately is how they drift apart.
+- **A mutation survived and had to be answered.** Removing the explicit list
+  from `sync_tree`'s freshness call broke nothing in the suite, although it
+  would have silently changed the stale/excluded split on the live machine.
+  Now covered by a bench that puts an `exclude-dirs` file in its own home
+  directory.
+- **The probe is kept**: `tests/probe_live_state.py`, outside CI. It hooks
+  `open` and `sqlite3.connect`, prints the stack for every touch of
+  `monitor.db`, `var/sync_policy.json` or `~/.config/yandex-disk/config.cfg`,
+  and exits non-zero. Nine modules, zero touches.
+- Also: four `MenuConfig` constructions in the bench were missing
+  `exclude_config` and so read the live one, and `test_from_env` asserted that
+  `db_path` ends in "monitor.db" — true of the default too, so the argument
+  could have been ignored entirely.
+
+Header on the live daemon before and after: `base #72, 176 day(s) old, serves
+48.0% of files`. 339 tests → 347.
+
 ## 2026-08-27 — the menu entry that did the opposite of its label
 
 Phase 10. Menu 4 read "Remove folder from sync" and, on the daemon, listed

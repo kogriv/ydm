@@ -712,12 +712,16 @@ def print_cloud_local_diff(cfg: MenuConfig) -> None:
     tasks/ydm_menu/AUDIT-2026-08-24.md A.
     """
     from tools.sync_common import create_storage
+    from tools.ydm_menu_status import menu_exclude_dirs
     from ydm import Analyzer
 
     print("Comparing the cloud snapshot with the local copy…")
     try:
         analyzer = Analyzer(create_storage(cfg.db_path))
-        result = analyzer.get_diff()
+        # Whose exclusions, said out loud. `get_diff()` on its own reads the
+        # daemon's config from the default path — right for the CLI, wrong for
+        # a menu that knows which backend it is on.
+        result = analyzer.get_diff(exclude_dirs=menu_exclude_dirs(cfg))
     except Exception as exc:
         print(f"  diff failed: {exc}")
         return

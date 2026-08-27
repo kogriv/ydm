@@ -716,6 +716,7 @@ class TestMenuScreens(BenchTestCase):
             db_path=self.bench.db_path,
             local_root=self.bench.local_root,
             policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
             backend=backend,
             plain=True,
         )
@@ -835,6 +836,7 @@ class TestSmartCloudScan(BenchTestCase):
             db_path=self.bench.db_path,
             local_root=self.bench.local_root,
             policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
             backend="rclone",
             plain=True,
         )
@@ -949,6 +951,7 @@ class TestMenuHeader(BenchTestCase):
             db_path=self.bench.db_path,
             local_root=self.bench.local_root,
             policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
             backend=backend,
             plain=True,
         )
@@ -1001,6 +1004,7 @@ class TestMenuHeader(BenchTestCase):
             db_path=self.bench.db_path,
             local_root=self.bench.local_root,
             policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
             backend="rclone",
             plain=True,
         )
@@ -1087,6 +1091,45 @@ class TestStaleSnapshotSurfaces(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
         return proc.stdout
+
+    def _freshness(self, bench):
+        proc = subprocess.run(
+            [
+                sys.executable, str(ROOT_DIR / "tools" / "sync_tree.py"),
+                "--path", "/", "--depth", "1", "--format", "json",
+                "--schema", "sync_tree:v2", "--no-local-scan", "--show-all",
+                *bench.cli_args("rclone"),
+            ],
+            capture_output=True, text=True, check=False,
+            env=bench.env(),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
+        payload = json.loads(proc.stdout)
+        return payload["header"]["cloud_snapshot"]["snapshot_freshness"]
+
+    def test_the_daemon_exclusions_still_split_the_stale_count(self):
+        """The split survives the sentinel being taken away from it.
+
+        `snapshot_freshness()` used to load the daemon's `exclude-dirs` by
+        itself whenever no list was given. That default was removed on
+        2026-08-27 because two callers relied on the opposite meaning — but the
+        tree does mean the daemon's exclusions, so it now asks for them, and
+        this is the check that it still gets them. Without it, dropping the
+        argument leaves the tree warning about every excluded folder forever,
+        which is exactly what the split was built to stop.
+        """
+        bench = self._bench(400)
+        config = Path(bench.root) / "home" / ".config" / "yandex-disk" / "config.cfg"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("exclude-dirs=Books\n", encoding="utf-8")
+
+        fresh = self._freshness(bench)
+        self.assertGreater(fresh["stale_excluded_files"], 0,
+                           "the daemon's exclusions were not applied")
+        self.assertEqual(
+            fresh["files_from_base"],
+            fresh["stale_compared_files"] + fresh["stale_excluded_files"],
+        )
 
     def test_a_fresh_snapshot_does_not_warn(self):
         self.assertNotIn("WARN:", self._header(self._bench(1)))

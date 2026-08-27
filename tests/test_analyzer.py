@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -1089,6 +1090,32 @@ class TestSnapshotFreshness(AnalyzerTestCase):
             freshness["files_from_base"],
             freshness["stale_compared_files"] + freshness["stale_excluded_files"],
         )
+
+    def test_no_list_means_nothing_is_excluded_not_read_the_daemons_config(self):
+        """The sentinel that meant two different things in two places.
+
+        Until 2026-08-27 an absent list fell back to `load_exclude_dirs()`,
+        which resolves the *default* config path — so a caller that had
+        deliberately passed nothing got the live daemon's exclusions applied
+        to its numbers. The menu under rclone is exactly such a caller, and
+        the effect was to move stale files into the bucket that never warns.
+
+        Stated as behaviour, not as a mock: `/downloads` is an exclude-dirs
+        entry on the author's machine, and with no list given it must be
+        counted as compared like anything else.
+        """
+        import ydm
+
+        self._base(1, "2020-01-01 00:00:00", {"/downloads": 5})
+        self._partial(2, "2026-08-16 08:00:00", "/A", 1)
+
+        with patch.object(ydm, "load_exclude_dirs") as loader:
+            freshness = self.analyzer.snapshot_freshness()
+
+        loader.assert_not_called()
+        self.assertEqual(freshness["stale_excluded_files"], 0)
+        self.assertEqual(freshness["stale_compared_files"], 5)
+        self.assertTrue(freshness["warnings"])
 
     def test_nested_exclude_entry_counts_as_excluded(self):
         """`video/Обучение` excludes its subtree; `video` alone does not."""

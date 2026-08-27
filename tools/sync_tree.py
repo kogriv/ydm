@@ -750,7 +750,19 @@ def main() -> None:
 
     # The composite is only as fresh as the folders someone rescanned; say so
     # rather than letting the tree read as current.
-    freshness = analyzer.snapshot_freshness()
+    #
+    # The daemon's list is asked for, not defaulted into: `snapshot_freshness`
+    # used to load it whenever no list was given, which made a caller with no
+    # list indistinguishable from one that wanted the daemon's. Same numbers as
+    # before here — the tree does mean the daemon's exclusions.
+    #
+    # From ydm, not from sync_common: the two share a name but not a return
+    # type, and this argument is the plain set. The one imported at the top of
+    # this file is the other one.
+    from ydm import load_exclude_dirs as daemon_exclude_dirs
+    freshness = analyzer.snapshot_freshness(
+        exclude_dirs=daemon_exclude_dirs(getattr(args, "exclude_config", None))
+    )
 
     if args.format == "json":
         if schema == SCHEMA_V2:

@@ -2374,7 +2374,8 @@ class Analyzer:
             compare_scans={"cloud": cloud_id, "local": local_id},
         )
 
-    def get_diff(self, cloud_scan_id=None, local_scan_id=None, use_composite=True):
+    def get_diff(self, cloud_scan_id=None, local_scan_id=None, use_composite=True,
+                 exclude_dirs=None):
         """
         Compares cloud scan vs local scan with optional composite scan support.
         
@@ -2382,11 +2383,17 @@ class Analyzer:
             cloud_scan_id: Specific cloud scan ID to use (optional, uses last if not specified)
             local_scan_id: Specific local scan ID to use (optional, uses last successful if not specified)
             use_composite: If True and cloud_scan_id not specified, build composite scan from base + partials
-        
+            exclude_dirs: folders this comparison must not reach. Omitted means
+                the daemon's `exclude-dirs`, which is what the CLI wants; a
+                caller that knows its backend passes its own list, because on
+                rclone the daemon's blacklist is not in force and reading it
+                would exclude folders this diff does compare.
+
         Returns:
             dict: Comparison results with missing files counts and samples
         """
-        exclude_dirs = load_exclude_dirs()
+        if exclude_dirs is None:
+            exclude_dirs = load_exclude_dirs()
 
         conn = self.storage.get_connection()
         
@@ -2636,8 +2643,15 @@ class Analyzer:
         if "error" in composite:
             return {"error": composite["error"]}
 
-        if exclude_dirs is None:
-            exclude_dirs = load_exclude_dirs()
+        # No list means nothing is excluded — not "go and read the daemon's
+        # config". Until 2026-08-27 this fell back to `load_exclude_dirs()`,
+        # which resolves the default path, so a caller that had deliberately
+        # passed no list got the live daemon's exclusions applied to its
+        # numbers. The menu is exactly such a caller: under rclone the daemon's
+        # blacklist is not in force, and folders it names are compared. They
+        # were being counted as "never compared", which suppresses the warning
+        # — the direction that hides a stale snapshot instead of showing it.
+        exclude_dirs = set() if exclude_dirs is None else exclude_dirs
         base_scan_id = composite["base_scan_id"]
         folder_updates = composite.get("folder_updates") or {}
 

@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
-"""Tests for YDM menu."""
+"""Tests for YDM menu.
+
+Nothing here may read the machine it runs on. Until 2026-08-27 four of these
+checks named `ROOT/monitor.db` and `ROOT/var/sync_policy.json` outright and
+let the backend auto-detect, so what they asserted depended on whether a
+daemon happened to be installed and on what the operator's snapshot held.
+Opening the live database was even visible in the working tree: a clean close
+checkpoints `monitor.db-wal` away, and `git status` reported a deletion after
+every run.
+
+That is the failure mode `TestBenchIsolation` exists to prevent — this file
+had simply never been brought over. See tasks/ydm_menu/BACKLOG.md.
+"""
 from __future__ import annotations
 
 import io
+import json
 import os
 import shutil
 import sys
@@ -50,6 +63,61 @@ def _seed_cloud_db(db_path: str) -> None:
         conn.close()
 
 
+class MenuTestCase(unittest.TestCase):
+    """A whole setup of its own: database, policy, daemon config, local root.
+
+    Small on purpose — this file is about config resolution, status and
+    prompts, not about rendering trees, so it does not need `tests/bench.py`.
+    What it does need is the same rule: every path a MenuConfig is given here
+    was made by this test and is deleted with it.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="ydm_menu_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+        _seed_cloud_db(self.db_path)
+
+        self.local_root = os.path.join(self.tmpdir, "ya_disk")
+        os.makedirs(self.local_root, exist_ok=True)
+
+        self.policy_path = os.path.join(self.tmpdir, "sync_policy.json")
+        with open(self.policy_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "ydm_sync_policy:v1",
+                "local_root": self.local_root,
+                "remote": "bench",
+                "paths": {"Books": {"mode": "disabled"}},
+            }, handle, ensure_ascii=False)
+
+        self.exclude_config = os.path.join(self.tmpdir, "config.cfg")
+        with open(self.exclude_config, "w", encoding="utf-8") as handle:
+            handle.write(f"dir=\"{self.local_root}\"\n")
+            handle.write("exclude-dirs=Books\n")
+
+        self.bisync_filter_path = os.path.join(self.tmpdir, "ya_disk.bisync.filters")
+
+    def cfg(self, backend="rclone", **overrides):
+        """A MenuConfig pinned to this fixture.
+
+        `backend` is always passed explicitly: left to auto-detect,
+        `detect_backend()` asks the host whether a daemon is configured, and
+        the two backends report status in different terms — so the assertions
+        would change meaning depending on where the suite ran.
+        """
+        params = {
+            "db_path": self.db_path,
+            "local_root": self.local_root,
+            "policy_path": self.policy_path,
+            "exclude_config": self.exclude_config,
+            "bisync_filter_path": self.bisync_filter_path,
+            "backend": backend,
+        }
+        params.update(overrides)
+        return MenuConfig.from_env_and_args(**params)
+
+
 class MenuPromptTests(unittest.TestCase):
     def test_prompt_int_default(self):
         self.assertEqual(prompt_int("x", default=4, reader=lambda _: ""), 4)
@@ -61,15 +129,64 @@ class MenuPromptTests(unittest.TestCase):
         self.assertTrue(prompt_yes_no("x", default=True, reader=lambda _: ""))
 
 
-class MenuConfigTests(unittest.TestCase):
-    def test_from_env(self):
-        cfg = MenuConfig.from_env_and_args(
-            db_path=str(ROOT / "monitor.db"),
-            local_root="/tmp/ydm-test",
-            policy_path=str(ROOT / "var/sync_policy.json"),
-        )
-        self.assertTrue(cfg.db_path.endswith("monitor.db"))
-        self.assertEqual(cfg.local_root, "/tmp/ydm-test")
+class MenuConfigTests(MenuTestCase):
+    def test_every_path_the_fixture_hands_out_is_its_own(self):
+        """The guard that keeps this file from drifting back.
+
+        `MenuConfig` resolves five paths, and each has a fallback that lands
+        on the live setup. Adding a sixth field, or dropping one argument from
+        `cfg()`, would restore exactly the state this rework removed — and it
+        would do so silently, because reading the operator's snapshot makes
+        nothing fail.
+        """
+        cfg = self.cfg()
+        for name in ("db_path", "local_root", "policy_path",
+                     "bisync_filter_path", "exclude_config"):
+            value = getattr(cfg, name)
+            self.assertTrue(value.startswith(self.tmpdir),
+                            f"{name} points outside the fixture: {value}")
+
+    def test_arguments_win_over_the_environment(self):
+        """Three sources, in a fixed order, and only the first was checked.
+
+        The old version passed explicit paths and then asserted that
+        `db_path` ended in "monitor.db" — true of the default too, so the
+        argument could have been ignored entirely and the check would still
+        have passed. The env layer sits between argument and default and had
+        no check at all.
+        """
+        env = {
+            "YDM_DB": os.path.join(self.tmpdir, "from-env.db"),
+            "YDM_POLICY": os.path.join(self.tmpdir, "from-env.json"),
+            "YDM_REMOTE": "env-remote",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            from_env = self.cfg(db_path=None, policy_path=None, remote=None)
+            from_args = self.cfg(remote="arg-remote")
+
+        self.assertEqual(env["YDM_DB"], from_env.db_path)
+        self.assertEqual(env["YDM_POLICY"], from_env.policy_path)
+        self.assertEqual("env-remote", from_env.remote)
+
+        self.assertEqual(self.db_path, from_args.db_path)
+        self.assertEqual(self.policy_path, from_args.policy_path)
+        self.assertEqual("arg-remote", from_args.remote)
+
+    def test_a_missing_local_root_is_refused_rather_than_guessed(self):
+        """`require_local_root` exists because a guess here writes elsewhere."""
+        # Patched where it is *used*: ydm_menu_config imported the name at
+        # module load, so patching `ydm.DEFAULT_CONFIG` would rebind a dict
+        # nobody reads and the check would pass for the wrong reason.
+        blank = {"local_root": "", "rclone_remote": "x",
+                 "exclude_config": self.exclude_config}
+        # The refusal writes its instructions to stderr; captured so a passing
+        # run stays readable.
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("tools.ydm_menu_config.DEFAULT_CONFIG", blank):
+                    with self.assertRaises(SystemExit):
+                        MenuConfig.from_env_and_args(local_root=None)
+        self.assertIn("--local-root", err.getvalue())
 
     def test_no_backend_available_is_reported_not_raised(self):
         """A host with neither the daemon nor an rclone remote (CI runners,
@@ -81,7 +198,7 @@ class MenuConfigTests(unittest.TestCase):
             "tools.ydm_menu_config.detect_backend",
             side_effect=BackendError("No sync backend available: ..."),
         ):
-            cfg = MenuConfig.from_env_and_args(local_root="/tmp/ydm-test")
+            cfg = self.cfg()
         self.assertEqual(cfg.backend_kind, "")
         self.assertEqual(cfg.backend_name, "none available")
         self.assertIn("No sync backend available", cfg.backend_error)
@@ -90,42 +207,24 @@ class MenuConfigTests(unittest.TestCase):
         self.assertIn("No sync backend available", header)
 
 
-class MenuScopeTests(unittest.TestCase):
+class MenuScopeTests(MenuTestCase):
     def test_bisync_scope_lines(self):
         from tools.ydm_menu_actions import bisync_scope_lines
 
-        tmpdir = tempfile.mkdtemp()
-        filter_path = os.path.join(tmpdir, "test.bisync.filters")
-        with open(filter_path, "w", encoding="utf-8") as handle:
+        with open(self.bisync_filter_path, "w", encoding="utf-8") as handle:
             handle.write("+ /Books/Math/**\n- **\n")
-        try:
-            cfg = MenuConfig.from_env_and_args(
-                local_root="/sdcard/Download/ya_disk",
-                bisync_filter_path=filter_path,
-            )
-            lines = bisync_scope_lines(cfg)
-            text = "\n".join(lines)
-            self.assertIn("NOT the whole disk", text)
-            self.assertIn("+ /Books/Math/", text)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        lines = bisync_scope_lines(self.cfg())
+        text = "\n".join(lines)
+        self.assertIn("NOT the whole disk", text)
+        self.assertIn("+ /Books/Math/", text)
 
 
-class MenuStatusTests(unittest.TestCase):
+class MenuStatusTests(MenuTestCase):
     """The backend must be pinned: which one auto-detection picks depends on
     what is installed, and the two report status in different terms."""
 
-    def _cfg(self, backend):
-        return MenuConfig.from_env_and_args(
-            backend=backend,
-            db_path=str(ROOT / "monitor.db"),
-            local_root="/sdcard/Download/ya_disk",
-            policy_path=str(ROOT / "var/sync_policy.json"),
-            bisync_filter_path="/sdcard/Download/ya_disk.bisync.filters",
-        )
-
     def test_rclone_status_smoke(self):
-        status = load_status(self._cfg("rclone"))
+        status = load_status(self.cfg("rclone"))
         self.assertTrue(status.bisync_fields_apply)
         self.assertTrue(
             status.overall.startswith(("OK", "NEEDS RESYNC", "CHECK", "BUSY"))
@@ -141,7 +240,7 @@ class MenuStatusTests(unittest.TestCase):
             stderr="",
         )
         with patch("tools.sync_backends.run_command", return_value=fake):
-            status = load_status(self._cfg("daemon"))
+            status = load_status(self.cfg("daemon"))
         self.assertFalse(status.bisync_fields_apply)
         self.assertEqual(status.overall, "idle")
         self.assertFalse(status.resync_needed)
@@ -153,9 +252,71 @@ class MenuStatusTests(unittest.TestCase):
             cmd=["yandex-disk", "status"], returncode=1, stdout="", stderr="not started"
         )
         with patch("tools.sync_backends.run_command", return_value=fake):
-            status = load_status(self._cfg("daemon"))
+            status = load_status(self.cfg("daemon"))
         self.assertEqual(status.overall, "daemon not running")
         self.assertIn("not started", status.warnings)
+
+    def test_rclone_does_not_consult_the_daemon_config(self):
+        """`None` meant two different things in two places.
+
+        The menu passes no exclusion list under rclone, because a whitelist
+        backend is not governed by the daemon's blacklist. `snapshot_freshness()`
+        read that None as "load the daemon's config from its default path" —
+        the live one, on any machine that has both installed. Folders rclone
+        does compare were then counted as never compared, which suppresses the
+        staleness warning: the direction that hides a stale snapshot.
+
+        Found by a probe written for the isolation rework — the live config was
+        the one live path still being opened after the rest were fixed.
+        """
+        import ydm
+
+        with patch.object(ydm, "load_exclude_dirs") as loader:
+            load_status(self.cfg("rclone"))
+        loader.assert_not_called()
+
+    def test_the_daemon_reads_the_config_it_was_given(self):
+        """And the backend that *is* governed by that list still gets it —
+        from the configured path, never from the default."""
+        import ydm
+
+        with patch.object(ydm, "load_exclude_dirs", return_value=set()) as loader:
+            from tools.sync_common import CommandResult
+
+            fake = CommandResult(
+                cmd=["yandex-disk", "status"], returncode=0,
+                stdout="Sync core status: idle\n", stderr="",
+            )
+            with patch("tools.sync_backends.run_command", return_value=fake):
+                load_status(self.cfg("daemon"))
+        loader.assert_called_once_with(self.exclude_config)
+
+    def test_the_diff_screen_uses_this_backends_exclusions(self):
+        """The same sentinel, second victim.
+
+        `get_diff()` reads the daemon's config when told nothing, and the `d`
+        screen told it nothing — so on a host with both backends installed the
+        menu's comparison silently dropped whatever the daemon excludes, even
+        when the menu was running on rclone.
+        """
+        import ydm
+        from tools.ydm_menu_actions import print_cloud_local_diff
+
+        with patch.object(ydm, "load_exclude_dirs") as loader:
+            with patch("sys.stdout", new_callable=io.StringIO):
+                print_cloud_local_diff(self.cfg("rclone"))
+        loader.assert_not_called()
+
+    def test_the_status_reads_this_snapshot_and_not_the_machine_s(self):
+        """The finding this file was reworked for, stated as a check.
+
+        The fixture's database holds exactly one scan, seeded here. If a
+        MenuConfig in this file ever falls back to the repository's own
+        `monitor.db` again, the reported base scan will not be #1.
+        """
+        status = load_status(self.cfg("rclone"))
+        self.assertIsNotNone(status.snapshot_line, "no snapshot line at all")
+        self.assertIn("base #1", status.snapshot_line)
 
 
 class MenuCliTests(unittest.TestCase):
