@@ -46,7 +46,7 @@ second in that list.
   next clean close, so `git status` reported a deletion after every test run.
   Untracked and ignored.
 
-310 tests → 339. Ten mutations, each killed; one of them first *hung* the
+318 tests → 339. Ten mutations, each killed; one of them first *hung* the
 run instead of failing it, which is why the loop that drains the screen now
 requires the list to shrink on every round.
 
