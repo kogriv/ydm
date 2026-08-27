@@ -146,6 +146,20 @@ class MenuConfigTests(MenuTestCase):
             self.assertTrue(value.startswith(self.tmpdir),
                             f"{name} points outside the fixture: {value}")
 
+    def test_the_menu_accepts_an_exclude_config_flag(self):
+        """`MenuConfig` always had the field and `YDM_EXCLUDE_CONFIG` set it.
+
+        Only the command-line flag was missing, so the path most worth
+        redirecting was the one that could not be — and `run_sync_tree()` had
+        nothing to hand its child process either.
+        """
+        from tools.ydm_menu import parse_args
+
+        argv = ["ydm_menu.py", "--exclude-config", self.exclude_config]
+        with patch.object(sys, "argv", argv):
+            args = parse_args()
+        self.assertEqual(self.exclude_config, args.exclude_config)
+
     def test_arguments_win_over_the_environment(self):
         """Three sources, in a fixed order, and only the first was checked.
 

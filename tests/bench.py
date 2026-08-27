@@ -217,11 +217,17 @@ class Bench:
     guarded: Tuple[str, ...] = field(default_factory=tuple)
 
     def cli_args(self, backend: str) -> List[str]:
-        """The arguments that point sync_tree/ydm_menu at this bench."""
+        """The arguments that point sync_tree/ydm_menu at this bench.
+
+        `--exclude-config` among them since 2026-08-27: before the flag
+        existed, a daemon-backed run resolved `~/.config/yandex-disk/config.cfg`
+        and only the bench's own HOME kept it off the operator's file.
+        """
         return [
             "--db-path", self.db_path,
             "--local-root", self.local_root,
             "--policy-path", self.policy_path,
+            "--exclude-config", self.exclude_config,
             "--backend", backend,
         ]
 

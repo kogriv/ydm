@@ -42,8 +42,23 @@ product.
   `db_path` ends in "monitor.db" — true of the default too, so the argument
   could have been ignored entirely.
 
+- **`--exclude-config` now exists.** `sync_tree` read
+  `getattr(args, "exclude_config", None)` in three places and got None every
+  time, because the flag had never been declared — so it resolved the daemon's
+  default path however it was invoked, and on the bench only an overridden
+  HOME kept that off the operator's own file. The menu had the field in
+  `MenuConfig` and the `YDM_EXCLUDE_CONFIG` variable, but no flag to fill it
+  and nothing to hand its `sync_tree` child. Both have it now, same name and
+  default as `sync_policy.py`.
+
+Two of the four mutations on that flag survived the first pass. One of them
+took some finding out: the config-driven membership cannot be observed through
+markers at all — with the policy switched off there is no overlay, so every
+node renders `[?]` whatever the exclusions are. What is observable is the
+`config_path` the run reports, and only the v1 schema reports it.
+
 Header on the live daemon before and after: `base #72, 176 day(s) old, serves
-48.0% of files`. 339 tests → 347.
+48.0% of files`. 339 tests → 352.
 
 ## 2026-08-27 — the menu entry that did the opposite of its label
 

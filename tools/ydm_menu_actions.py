@@ -677,6 +677,11 @@ def run_sync_tree(cfg: MenuConfig, path: str, depth: int) -> ActionResult:
         cfg.local_root,
         "--policy-path",
         cfg.policy_path,
+        # Which config, said rather than assumed: without it the child process
+        # resolves the daemon's default path, so a menu pointed somewhere else
+        # rendered its tree against this machine's exclusions.
+        "--exclude-config",
+        cfg.exclude_config,
         "--path",
         path,
         "--depth",

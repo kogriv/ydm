@@ -1070,6 +1070,100 @@ class TestPolicyEditingStaysOnTheBench(BenchTestCase):
         self.assertEqual(render_markers(self.bench, "rclone")["/video"], "[L]")
 
 
+class TestExcludeConfigFlag(BenchTestCase):
+    """`--exclude-config` reaches the two readers that were guessing.
+
+    sync_tree read `getattr(args, "exclude_config", None)` in three places and
+    got None every time, because no such flag existed until 2026-08-27; the
+    menu had the field in `MenuConfig` but nothing to fill it from, and handed
+    its sync_tree child nothing either. Both resolved the daemon's default
+    path whatever they were told.
+    """
+
+    def _run_against_config(self, config_path):
+        """A run whose membership comes from exclude-dirs, and what it reported.
+
+        `--no-use-policy` is what sends the daemon branch to the config file
+        instead of the policy. The schema is v1 because that is where the file
+        actually read is reported — v2's header carries `policy_path` and says
+        nothing about the config even when the config is what it used, which is
+        a small honesty gap of its own (tasks/ydm_menu/BACKLOG.md).
+        """
+        proc = subprocess.run(
+            [
+                sys.executable, str(ROOT_DIR / "tools" / "sync_tree.py"),
+                "--path", "/", "--depth", "3", "--format", "json",
+                "--schema", "sync_tree:v1", "--no-local-scan", "--show-all",
+                "--no-use-policy",
+                *self.bench.cli_args("daemon"),
+                "--exclude-config", str(config_path),
+            ],
+            capture_output=True, text=True, check=False,
+            env=self.bench.env(),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
+        payload = json.loads(proc.stdout)
+        return payload, payload.get("warnings") or []
+
+    def test_the_membership_source_is_the_config_it_was_given(self):
+        """The tree names the file it read, and it must be the one asked for.
+
+        Markers cannot carry this: with the policy switched off there is no
+        overlay, so every node renders `[?]` whichever exclusions are in force.
+        What is observable is the source — and before the flag existed the
+        source was always the daemon's default path.
+        """
+        chosen = Path(self.bench.root) / "books.cfg"
+        chosen.write_text("exclude-dirs=Books\n", encoding="utf-8")
+
+        payload, _ = self._run_against_config(chosen)
+        self.assertEqual(str(chosen), payload["config_path"])
+
+    def test_a_config_that_is_not_there_says_so_about_that_config(self):
+        """The warning has to name the file the person pointed at.
+
+        Pointed at a missing file, the old code reported the default path as
+        missing instead — a message about a file nobody mentioned.
+        """
+        absent = Path(self.bench.root) / "no-such.cfg"
+
+        payload, warnings = self._run_against_config(absent)
+        self.assertEqual(str(absent), payload["config_path"])
+        self.assertTrue(any(str(absent) in w for w in warnings), warnings)
+
+    def test_the_menu_hands_the_path_to_its_child_process(self):
+        """`run_sync_tree` shells out, so the flag has to be in the command.
+
+        Without it the child resolves the daemon's default path and renders a
+        tree against this machine's exclusions while the menu believes it is
+        pointed somewhere else.
+        """
+        import unittest.mock as mock
+
+        from tools import ydm_menu_actions
+        from tools.ydm_menu_config import MenuConfig
+
+        cfg = MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend="daemon",
+            plain=True,
+        )
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(ydm_menu_actions.subprocess, "run",
+                               return_value=completed) as run:
+            with mock.patch.object(ydm_menu_actions.sys.stdin, "isatty",
+                                   return_value=False):
+                ydm_menu_actions.run_sync_tree(cfg, "/", 2)
+
+        cmd = run.call_args[0][0]
+        self.assertIn("--exclude-config", cmd)
+        self.assertEqual(self.bench.exclude_config,
+                         cmd[cmd.index("--exclude-config") + 1])
+
+
 class TestStaleSnapshotSurfaces(unittest.TestCase):
     """An old snapshot has to say so — the header is where anyone would look."""
 
@@ -1092,13 +1186,16 @@ class TestStaleSnapshotSurfaces(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
         return proc.stdout
 
-    def _freshness(self, bench):
+    def _freshness(self, bench, exclude_config=None):
+        # argparse keeps the last occurrence, so an override appended after
+        # cli_args wins over the bench's own config.
+        override = ["--exclude-config", exclude_config] if exclude_config else []
         proc = subprocess.run(
             [
                 sys.executable, str(ROOT_DIR / "tools" / "sync_tree.py"),
                 "--path", "/", "--depth", "1", "--format", "json",
                 "--schema", "sync_tree:v2", "--no-local-scan", "--show-all",
-                *bench.cli_args("rclone"),
+                *bench.cli_args("rclone"), *override,
             ],
             capture_output=True, text=True, check=False,
             env=bench.env(),
@@ -1118,18 +1215,42 @@ class TestStaleSnapshotSurfaces(unittest.TestCase):
         argument leaves the tree warning about every excluded folder forever,
         which is exactly what the split was built to stop.
         """
-        bench = self._bench(400)
-        config = Path(bench.root) / "home" / ".config" / "yandex-disk" / "config.cfg"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text("exclude-dirs=Books\n", encoding="utf-8")
-
-        fresh = self._freshness(bench)
+        fresh = self._freshness(self._bench(400))
         self.assertGreater(fresh["stale_excluded_files"], 0,
                            "the daemon's exclusions were not applied")
         self.assertEqual(
             fresh["files_from_base"],
             fresh["stale_compared_files"] + fresh["stale_excluded_files"],
         )
+
+    def test_the_tree_reads_the_config_it_is_pointed_at(self):
+        """`--exclude-config` did not exist until 2026-08-27.
+
+        Three places in sync_tree read `getattr(args, "exclude_config", None)`
+        and got None every time, so the tree always resolved the daemon's
+        default path however it was invoked. On the bench only an overridden
+        HOME kept that off the operator's own file — isolation by accident.
+
+        Two files, two answers: the same snapshot must split differently.
+        """
+        bench = self._bench(400)
+        everything = Path(bench.root) / "excludes-everything.cfg"
+        everything.write_text(
+            "exclude-dirs=" + ",".join(
+                entry.path.strip("/") for entry in SAMPLE_TREE if entry.path != "/"
+            ) + "\n",
+            encoding="utf-8",
+        )
+        nothing = Path(bench.root) / "excludes-nothing.cfg"
+        nothing.write_text("exclude-dirs=\n", encoding="utf-8")
+
+        wide = self._freshness(bench, str(everything))
+        narrow = self._freshness(bench, str(nothing))
+
+        self.assertGreater(wide["stale_excluded_files"], 0)
+        self.assertEqual(wide["stale_compared_files"], 0)
+        self.assertEqual(narrow["stale_excluded_files"], 0)
+        self.assertEqual(narrow["stale_compared_files"], narrow["files_from_base"])
 
     def test_a_fresh_snapshot_does_not_warn(self):
         self.assertNotIn("WARN:", self._header(self._bench(1)))

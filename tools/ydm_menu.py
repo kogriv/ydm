@@ -507,6 +507,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-root", default=None)
     parser.add_argument("--policy-path", default=None)
     parser.add_argument("--bisync-filter-path", default=None)
+    # MenuConfig has always had the field and the YDM_EXCLUDE_CONFIG variable;
+    # only the flag was missing, so the one path a person is most likely to
+    # want to redirect was the one they could not.
+    parser.add_argument("--exclude-config", default=None)
     parser.add_argument("--remote", default=None)
     parser.add_argument(
         "--backend",
@@ -528,6 +532,7 @@ def main() -> int:
         local_root=args.local_root,
         policy_path=args.policy_path,
         bisync_filter_path=args.bisync_filter_path,
+        exclude_config=args.exclude_config,
         remote=args.remote,
         backend=args.backend,
         plain=args.plain,

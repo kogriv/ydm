@@ -610,6 +610,15 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Sync backend: daemon (yandex-disk config.cfg), rclone (filter whitelist), api (alias for daemon), or auto",
     )
+    # Three places in this file read this and each guarded against the flag
+    # not existing, which it did not until 2026-08-27: the tree always fell
+    # back to the daemon's default path, even when told to look elsewhere.
+    # Same name and default as sync_policy.py, so one path means one thing.
+    parser.add_argument(
+        "--exclude-config",
+        default=DEFAULT_CONFIG["exclude_config"],
+        help="Path to yandex-disk config.cfg (daemon backend only)",
+    )
     parser.add_argument("--filter-path", default=None, help="Override rclone filter-file path")
     parser.add_argument(
         "--policy-path",
@@ -636,7 +645,7 @@ def _resolve_backend_name(args) -> str:
             backend = detect_backend(
                 db_path=args.db_path,
                 local_root=args.local_root,
-                config_path=args.exclude_config if hasattr(args, "exclude_config") else DEFAULT_CONFIG["exclude_config"],
+                config_path=args.exclude_config,
             ).kind
         except Exception:
             backend = "daemon"
@@ -699,7 +708,7 @@ def main() -> None:
             source_path = policy_path
             source_warnings = []
         else:
-            exclude_result = load_exclude_dirs(getattr(args, "exclude_config", None))
+            exclude_result = load_exclude_dirs(args.exclude_config)
             membership_dirs = normalize_exclude_dirs(exclude_result.exclude_dirs)
             source_path = exclude_result.config_path
             source_warnings = exclude_result.warnings
@@ -761,7 +770,7 @@ def main() -> None:
     # this file is the other one.
     from ydm import load_exclude_dirs as daemon_exclude_dirs
     freshness = analyzer.snapshot_freshness(
-        exclude_dirs=daemon_exclude_dirs(getattr(args, "exclude_config", None))
+        exclude_dirs=daemon_exclude_dirs(args.exclude_config)
     )
 
     if args.format == "json":
