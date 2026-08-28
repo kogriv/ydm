@@ -20,7 +20,14 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from query_count import counting_queries  # noqa: E402
 from tools.sync_common import CompositeSnapshot  # noqa: E402
-from tools.sync_tree import build_tree, count_cloud_files_for_path  # noqa: E402
+from tools.sync_tree import (  # noqa: E402
+    FolderFileCounts,
+    _count_files_for_prefix,
+    _folder_file_counts,
+    apply_sync_percent,
+    build_tree,
+    count_cloud_files_for_path,
+)
 from tools.sync_tree_cloud import (  # noqa: E402
     ChildIndex,
     fetch_child_names,
@@ -976,6 +983,110 @@ class ChildIndexTests(unittest.TestCase):
         self.assertEqual(ChildIndex(storage).children(99, "/"), [])
 
 
+class FolderFileCountsTests(unittest.TestCase):
+    """Reading the counts once must answer what asking per node did.
+
+    Same discipline as `ChildIndexTests`: the two functions it replaces are
+    the specification, so what is checked is that they agree, not that the
+    index matches numbers written down by hand.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, modified TEXT, md5 TEXT, path TEXT
+            );
+            CREATE UNIQUE INDEX idx_files_unique ON files (scan_id, parent_path, name);
+            """
+        )
+        rows = [
+            # `/Books/Math-old` pins the boundary: '-' sorts below '0', so a
+            # range starting at the folder name rather than at its slash would
+            # count it as a descendant of `/Books/Math`.
+            (1, "/Books", "readme.txt", "file"),
+            (1, "/Books/Math", "a.pdf", "file"),
+            (1, "/Books/Math", "b.pdf", "file"),
+            (1, "/Books/Math/ЛинАл", "c.pdf", "file"),
+            (1, "/Books/Math-old", "d.pdf", "file"),
+            (1, "/Books", "Math", "dir"),
+            # A second scan, so the cache cannot answer for the wrong one.
+            (2, "/pro", "main.py", "file"),
+            # Relative spelling, which `_count_files_for_prefix` covers with
+            # its three variants.
+            (3, "pro/agents", "x.py", "file"),
+        ]
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size)"
+            " VALUES (?, ?, ?, ?, 1)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+        self.conn = sqlite3.connect(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_the_per_subtree_counts_are_the_same(self):
+        counts = FolderFileCounts()
+        cases = [
+            (1, ""), (1, "/Books"), (1, "/Books/Math"), (1, "/Books/Math-old"),
+            (1, "/Books/Math/ЛинАл"), (1, "/nothing"), (2, ""), (2, "/pro"),
+            (3, ""), (99, ""), (99, "/Books"),
+        ]
+        for scan_id, subtree in cases:
+            with self.subTest(scan_id=scan_id, subtree=subtree):
+                self.assertEqual(
+                    _folder_file_counts(self.conn, scan_id, subtree),
+                    counts.in_subtree(self.conn, scan_id, subtree),
+                )
+
+    def test_the_totals_at_and_under_a_prefix_are_the_same(self):
+        counts = FolderFileCounts()
+        cases = [
+            (1, ""), (1, "Books"), (1, "/Books"), (1, "Books/Math"),
+            (1, "/Books/Math"), (1, "Books/Math/"), (1, "Books/Math-old"),
+            (1, "Books/Math/ЛинАл"), (1, "nothing"), (2, "pro"),
+            (3, "pro"), (3, "pro/agents"), (99, "Books"),
+        ]
+        for scan_id, prefix in cases:
+            with self.subTest(scan_id=scan_id, prefix=prefix):
+                self.assertEqual(
+                    _count_files_for_prefix(self.conn, scan_id, prefix),
+                    counts.at_and_under(self.conn, scan_id, prefix),
+                )
+
+    def test_a_prefix_sibling_is_not_counted_as_a_descendant(self):
+        counts = FolderFileCounts()
+        self.assertEqual(counts.at_and_under(self.conn, 1, "Books/Math"), 3)
+        self.assertEqual(counts.at_and_under(self.conn, 1, "Books/Math-old"), 1)
+        self.assertEqual(counts.at_and_under(self.conn, 1, "Books"), 5)
+
+    def test_the_composite_count_is_unchanged_by_the_index(self):
+        """The end the index exists for, checked against the un-indexed path."""
+        storage = _Storage(self.db_path)
+
+        class _Analyzer:
+            def __init__(self, storage):
+                self.storage = storage
+
+        analyzer = _Analyzer(storage)
+        snapshot = CompositeSnapshot(base_scan_id=1, folder_updates={})
+        counts = FolderFileCounts()
+        for path in ("/", "/Books", "/Books/Math", "/Books/Math-old", "/nope"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    count_cloud_files_for_path(analyzer, snapshot, path),
+                    count_cloud_files_for_path(analyzer, snapshot, path, counts=counts),
+                )
+
+
 class TreeQueryBudgetTests(unittest.TestCase):
     """How many queries the walk costs, which is the cost that survived.
 
@@ -1034,12 +1145,19 @@ class TreeQueryBudgetTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _walk(self, depth):
+    def _walk(self, depth, with_percent=False):
         storage = StorageManager(self.db_path, use_temp_storage=False)
         analyzer = Analyzer(storage)
         snapshot = CompositeSnapshot(base_scan_id=1, folder_updates={})
         with counting_queries() as queries:
-            tree = build_tree(analyzer, snapshot, "/", depth)
+            # As the CLI does it. Outside this block every node opens its own
+            # connection, and the PRAGMAs that costs drown out what is being
+            # measured — which is how a first reading of these numbers came
+            # out four times too high.
+            with storage.reuse_connection():
+                tree = build_tree(analyzer, snapshot, "/", depth)
+                if with_percent:
+                    apply_sync_percent(tree, analyzer, snapshot, 1, "/nowhere")
 
         def count(node):
             return 1 + sum(count(child) for child in node.children)
@@ -1066,6 +1184,22 @@ class TreeQueryBudgetTests(unittest.TestCase):
         shallow_nodes, shallow = self._walk(3)
         deep_nodes, deep = self._walk(4)
         self.assertGreater(deep_nodes, shallow_nodes * 3)
+        self.assertEqual(deep.count, shallow.count, deep.report())
+
+    def test_filling_in_the_counts_does_not_pay_per_node_either(self):
+        """The counting half, which was the other 23 000 queries.
+
+        `apply_sync_percent` asked for a file count per node, and the
+        composite asked again for every scan serving an update beneath it.
+        Both answers come from one `GROUP BY` per scan now.
+        """
+        nodes, queries = self._walk(4, with_percent=True)
+        self.assertGreater(nodes, 300)
+        self.assertLess(queries.count, 30, queries.report())
+
+    def test_the_counts_do_not_grow_with_depth(self):
+        _shallow_nodes, shallow = self._walk(3, with_percent=True)
+        _deep_nodes, deep = self._walk(4, with_percent=True)
         self.assertEqual(deep.count, shallow.count, deep.report())
 
 

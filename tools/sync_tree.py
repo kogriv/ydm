@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import sys
 from dataclasses import dataclass, field
@@ -289,7 +290,80 @@ def _folder_file_counts(conn, scan_id: int, subtree: str) -> Dict[str, int]:
     return {row[0]: row[1] for row in rows}
 
 
-def count_cloud_files_for_path(analyzer: Analyzer, snapshot, path: str) -> int:
+class FolderFileCounts:
+    """How many files each folder holds, read once per scan.
+
+    The other half of Phase 12. `_folder_file_counts` and
+    `_count_files_for_prefix` are already index seeks rather than table scans —
+    that was Phase 9 — but `apply_sync_percent` asks them once per node, and
+    the composite asks again for every scan serving an update beneath that
+    node. On the device that was 15 201 + 7 803 calls in a single `orphans`.
+
+    A count per folder is a property of the scan. One `GROUP BY` reads all of
+    them; a sorted key list and running totals then answer both questions
+    without going back to the database:
+
+    - "the counts in this subtree" is a slice of the keys;
+    - "files at and under this prefix" is a difference of two running totals.
+
+    The slice starts at `<base>/` rather than `<base>`, for the reason it does
+    in SQL and in `folder_updates_under`: `/Books/Math-old` sorts between
+    `/Books/Math` and `/Books/Math0` and is not a descendant.
+
+    Keys stay exactly as the scan wrote them. The composite compares them
+    against `folder_updates` by string, so normalizing here would silently
+    stop folders from matching their updates.
+    """
+
+    def __init__(self) -> None:
+        self._scans: Dict[int, tuple] = {}
+
+    def _for_scan(self, conn, scan_id: int):
+        cached = self._scans.get(scan_id)
+        if cached is None:
+            counts = _folder_file_counts(conn, scan_id, "")
+            keys = sorted(counts)
+            running = [0]
+            for key in keys:
+                running.append(running[-1] + counts[key])
+            cached = (counts, keys, running)
+            self._scans[scan_id] = cached
+        return cached
+
+    def _sum_below(self, keys, running, base: str) -> int:
+        start = bisect.bisect_left(keys, f"{base}/")
+        end = bisect.bisect_left(keys, f"{base}0")
+        return running[end] - running[start]
+
+    def in_subtree(self, conn, scan_id: int, subtree: str) -> Dict[str, int]:
+        """What `_folder_file_counts` returns, without asking again."""
+        counts, keys, _running = self._for_scan(conn, scan_id)
+        if not subtree:
+            return counts
+        base = subtree.rstrip("/")
+        start = bisect.bisect_left(keys, f"{base}/")
+        end = bisect.bisect_left(keys, f"{base}0")
+        result = {key: counts[key] for key in keys[start:end]}
+        if subtree in counts:
+            result[subtree] = counts[subtree]
+        return result
+
+    def at_and_under(self, conn, scan_id: int, prefix: str) -> int:
+        """What `_count_files_for_prefix` returns, without asking again."""
+        counts, keys, running = self._for_scan(conn, scan_id)
+        if prefix == "":
+            return running[-1]
+        total = 0
+        for variant in {prefix, prefix.lstrip("/"), f"/{prefix.lstrip('/')}"}:
+            here = counts.get(variant, 0)
+            below = self._sum_below(keys, running, variant.rstrip("/"))
+            total = max(total, here + below)
+        return total
+
+
+def count_cloud_files_for_path(
+    analyzer: Analyzer, snapshot, path: str, counts: Optional[FolderFileCounts] = None
+) -> int:
     """Files under `path` in the composite snapshot.
 
     The composite resolves *per folder*: each folder is served by the newest
@@ -311,24 +385,33 @@ def count_cloud_files_for_path(analyzer: Analyzer, snapshot, path: str) -> int:
 
     conn = analyzer.storage.get_connection()
     try:
+        def per_folder(scan_id: int) -> Dict[str, int]:
+            if counts is not None:
+                return counts.in_subtree(conn, scan_id, subtree)
+            return _folder_file_counts(conn, scan_id, subtree)
+
         total = sum(
             count
-            for folder, count in _folder_file_counts(conn, snapshot.base_scan_id, subtree).items()
+            for folder, count in per_folder(snapshot.base_scan_id).items()
             if folder not in updates
         )
         for scan_id, folders in by_scan.items():
-            counts = _folder_file_counts(conn, scan_id, subtree)
-            total += sum(counts.get(folder, 0) for folder in folders)
+            served = per_folder(scan_id)
+            total += sum(served.get(folder, 0) for folder in folders)
     finally:
         conn.close()
 
     return total
 
 
-def count_local_files_for_path(storage, local_scan_id: int, path: str) -> int:
+def count_local_files_for_path(
+    storage, local_scan_id: int, path: str, counts: Optional[FolderFileCounts] = None
+) -> int:
     prefix = normalize_path(path).lstrip("/")
     conn = storage.get_connection()
     try:
+        if counts is not None:
+            return counts.at_and_under(conn, local_scan_id, prefix)
         return _count_files_for_prefix(conn, local_scan_id, prefix)
     finally:
         conn.close()
@@ -340,9 +423,18 @@ def apply_sync_percent(
     snapshot,
     local_scan_id: int | None,
     local_root: str,
+    counts: Optional[FolderFileCounts] = None,
 ) -> None:
-    cloud_count = count_cloud_files_for_path(analyzer, snapshot, node.path)
-    local_count = count_local_files_for_path(analyzer.storage, local_scan_id, node.path) if local_scan_id else 0
+    # One index for the whole tree, built on the first node that needs it.
+    # Every node asks the same questions of the same scans, and the answers
+    # do not change while the tree is being filled in.
+    if counts is None:
+        counts = FolderFileCounts()
+    cloud_count = count_cloud_files_for_path(analyzer, snapshot, node.path, counts=counts)
+    local_count = (
+        count_local_files_for_path(analyzer.storage, local_scan_id, node.path, counts=counts)
+        if local_scan_id else 0
+    )
     node.cloud_file_count = cloud_count
     node.local_file_count = local_count
 
@@ -354,7 +446,7 @@ def apply_sync_percent(
         node.sync_percent = round((local_count / cloud_count) * 100.0, 1)
 
     for child in node.children:
-        apply_sync_percent(child, analyzer, snapshot, local_scan_id, local_root)
+        apply_sync_percent(child, analyzer, snapshot, local_scan_id, local_root, counts=counts)
 
 
 def compute_status(node: TreeNode, exclude_dirs: Set[str], collapse: bool) -> bool:

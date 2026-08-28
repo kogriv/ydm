@@ -5,6 +5,33 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-28 — and the counting half asked them too
+
+Phase 12.2 and 12.3, closing the phase. `_folder_file_counts` and
+`_count_files_for_prefix` were already index seeks rather than table scans —
+that was Phase 9 — but `apply_sync_percent` asked them once per node, and the
+composite asked again for every scan serving an update beneath that node.
+
+- **A count per folder is a property of the scan.** `FolderFileCounts` reads
+  all of them with one `GROUP BY`, then answers both questions from a sorted
+  key list and running totals: "the counts in this subtree" is a slice, "files
+  at and under this prefix" is a difference of two totals. The slice starts at
+  `<base>/` and not at `<base>`, for the reason it does in SQL and in
+  `folder_updates_under` — `/Books/Math-old` sorts between `/Books/Math` and
+  `/Books/Math0` and is not a descendant.
+- **Measured on the author's snapshot**, walk and counts together, inside
+  `reuse_connection()` as the CLI runs them: depth 4 **39 319 queries → 125**,
+  depth 5 **53 820 → 125**, and the count no longer grows with depth.
+  `ydm_menu orphans` **54 568 → 873**. Output identical in every case.
+- **The first reading of those numbers was four times too high**, because the
+  harness called `apply_sync_percent` outside `reuse_connection()` and every
+  node then opened its own connection — two PRAGMAs each, 15 240 of them,
+  swamping what was being measured. The budget tests now wrap it the way the
+  CLI does.
+- **`sync_tree`'s own wall clock moves less than the query count**, because a
+  CLI run also takes a local scan, and those inserts are most of what is left.
+  Unrelated to this, and not something to expect back.
+
 ## 2026-08-28 — the tree asked the same questions once per node
 
 Phase 12.1 and 12.5. What the device's profile found once 9.3 turned out not
