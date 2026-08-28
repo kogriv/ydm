@@ -119,12 +119,16 @@
 
 *Estimate:* 2–3 h
 
-| ID | Task | Acceptance |
-|----|------|------------|
-| 7.1 | `ydm_menu.py add-orphan --path … --mode … --apply` | agent can call |
-| 7.2 | JSON stdout for all script subcommands | machine-readable |
+| ID | Task | Где | Acceptance |
+|----|------|-----|------------|
+| 7.1 | `ydm_menu.py add-orphan --path … --mode … --apply` | ✅ 28.08, как `add` | закрыт попутно с 5.1. Имя другое намеренно: подкоманда добавляет любой путь, а не только сироту, и «orphan» в имени обещал бы разбор, которого нет |
+| 7.2 | JSON stdout for all script subcommands | ✅ 28.08 | обе подкоманды, `orphans` и `add`, печатают JSON; третьей нет |
 
 Not a substitute for `sync_policy.py`; convenience wrapper only.
+
+**Закрыта 28.08.** Не отдельной работой: 5.1 требовал общей точки входа для
+«добавить этот путь», а это и есть то, чего просила 7.1. Если понадобится
+третья подкоманда — JSON у неё обязателен по 7.2, но самой нужды пока нет.
 
 ---
 
@@ -607,7 +611,7 @@ Phase 9.
 | User request | ✅ docs this task |
 | Implementation | ✅ Phases 1–4, 6 (menu REPL, orphans, actions, tests, CI) |
 | Phase 5 polish | ✅ 28.08 — 5.1 закрыт: `ydm-sync-add` ходит через `ydm_menu.py add`, ту же точку, что и меню |
-| Phase 7 script mode | partial (`orphans`, `add`; 7.2 — JSON у остальных подкоманд) |
+| Phase 7 script mode | ✅ 28.08 — `orphans` и `add`, обе с JSON; закрылась попутно с 5.1 |
 | Phase 8 catch-up | ✅ 8.1–8.6 24.08, 8.7–8.8 25.08 |
 | Phase 9 performance | ✅ полностью 28.08 — 9.1, 9.2, 9.5 закрыты правкой; 9.3 закрыт как несуществующий, 9.4 замерен на устройстве |
 | Phase 10 пункт 4 | ✅ 27.08 |
