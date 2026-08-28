@@ -60,6 +60,21 @@ notify() {
     "$binary" --title "$1" --content "$2" >/dev/null 2>&1 || true
 }
 
+# The same file sync_bisync.py appends to. It resolves this through
+# var_path(), which YDM_VAR_DIR redirects, so writing a bare `var/` here would
+# split the log in two the moment anything sets it.
+BISYNC_LOG="${YDM_VAR_DIR:-$PROJECT_DIR/var}/bisync.log"
+
+# Every run that does not do the ordinary thing says so in the log. Only
+# `sync_bisync.py` used to write there, so a guard decision left no trace at
+# all: the log showed `run OK` lines, then a gap, then `run OK` again, and
+# nothing distinguished "the guard stopped it" from "the job never fired". The
+# notification is not a substitute — it is not kept.
+log_decision() {
+    printf '%s rename preflight %s (%s)\n' "$(date -Is)" "$1" "$2" \
+        >> "$BISYNC_LOG" 2>/dev/null || true
+}
+
 # --- 1. rename preflight ----------------------------------------------------
 
 preflight_json=$(python3 tools/sync_rename.py preflight \
@@ -69,13 +84,19 @@ preflight_json=$(python3 tools/sync_rename.py preflight \
     --format json 2>/dev/null)
 preflight_rc=$?
 
-decision=$(printf "%s" "$preflight_json" | python3 -c '
-import json, sys
+preflight_field() {
+    printf "%s" "$preflight_json" | PF_KEY="$1" PF_FALLBACK="$2" python3 -c '
+import json, os, sys
 try:
-    print(json.load(sys.stdin).get("data", {}).get("decision", "allow_bisync"))
+    print(json.load(sys.stdin).get("data", {}).get(os.environ["PF_KEY"])
+          or os.environ["PF_FALLBACK"])
 except Exception:
-    print("allow_bisync")
-')
+    print(os.environ["PF_FALLBACK"])
+'
+}
+
+decision=$(preflight_field decision allow_bisync)
+preflight_reason() { preflight_field reason unknown; }
 
 # A preflight that cannot answer must not stop syncing — but say so, because
 # this is the guard being absent, not the guard passing. On 2026-08-24 a
@@ -85,15 +106,24 @@ if [ "$preflight_rc" -ne 0 ]; then
     decision="allow_bisync"
     echo "job_run.sh: rename preflight failed (rc=$preflight_rc); running without the guard." >&2
     printf '%s rename preflight FAILED rc=%s\n' "$(date -Is)" "$preflight_rc" \
-        >> var/bisync.log 2>/dev/null || true
+        >> "$BISYNC_LOG" 2>/dev/null || true
+elif [ "$decision" = "allow_bisync" ] && [ "$(preflight_reason)" = "error" ]; then
+    # The guard passing and the guard being absent both end up allowing bisync,
+    # and only one of them is fine. An error inside the preflight travels in the
+    # JSON envelope with exit code 0, so the rc test above does not see it, and
+    # without this line a run with no guard at all looks exactly like a clean
+    # one. That is issue #5, which cost hours of `run OK`.
+    log_decision allow_bisync error
 fi
 
 # --- 2. bisync --------------------------------------------------------------
 
 case "$decision" in
     skip_bisync)
+        log_decision skip_bisync "$(preflight_reason)"
         ;;
     block_bisync)
+        log_decision block_bisync "$(preflight_reason)"
         notify "ydm rename preflight" "bisync blocked; run sync_rename.py status"
         ;;
     *)

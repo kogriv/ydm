@@ -490,6 +490,18 @@ def ensure_db(storage: StorageManager, db_path: str) -> None:
         storage.init_db()
 
 
+def normalized_local_root(local_root: str) -> str:
+    """Canonical form of a local mirror path, for recording and comparing.
+
+    Written into `scans.scan_root` and compared against it, so both sides must
+    agree on `~`, relative paths and trailing slashes. Symlinks are deliberately
+    not resolved: the mirror is identified by the path the operator syncs, and
+    on Android `/sdcard` is a symlink whose target is not stable across setups.
+    """
+    resolved = os.path.abspath(os.path.expanduser(local_root))
+    return resolved.rstrip("/") or "/"
+
+
 def run_local_scan(db_path: str, local_root: str) -> LocalScanResult:
     start_time = time.time()
     storage = create_storage(db_path)
@@ -503,7 +515,13 @@ def run_local_scan(db_path: str, local_root: str) -> LocalScanResult:
             duration_sec=None,
         )
 
-    scan_id = storage.start_scan("local")
+    # Record which tree this scan covered. Without it every local scan in the
+    # database looks alike, and `sync_rename` — which detects renames by
+    # diffing the two most recent local scans — cannot tell a scan of this
+    # mirror from a scan of some other directory. One hand-run preflight with
+    # the wrong `--local-root` was enough to make the next run compare two
+    # unrelated trees and invent renames. See issue #14.
+    scan_id = storage.start_scan("local", scan_root=normalized_local_root(local_root))
     try:
         scanner = LocalScanner(local_root)
         scanner.scan(scan_id, storage)

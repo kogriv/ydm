@@ -30,6 +30,7 @@ from tools.sync_common import (  # noqa: E402
     filter_file_hash,
     load_bisync_state,
     local_encoding_flags_for_path,
+    normalized_local_root,
     run_command,
     run_local_scan,
     var_path,
@@ -240,23 +241,61 @@ def md5_file(path: str, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def latest_successful_local_scan_id(db_path: str) -> Optional[int]:
+def latest_successful_local_scan_id(db_path: str, local_root: Optional[str] = None) -> Optional[int]:
+    """Newest successful local scan of `local_root`, or None if there is none.
+
+    The baseline has to describe the *same tree* as the scan it will be diffed
+    against. It did not used to: the query took the newest local scan whatever
+    it covered, so one preflight run against a different `--local-root` left a
+    scan of another directory sitting at the top of the table, and the next run
+    read the difference between two unrelated trees as renames. On 2026-08-28
+    that produced two `blocked` candidates pointing at `/RCLONE_TEST` — the
+    bisync sentinel file, matched by size — and stopped the scheduled sync.
+
+    A scan with `scan_root IS NULL` predates the column being written for local
+    scans and cannot be attributed to any mirror, so it is not a candidate
+    either. That makes the first run after this change find no baseline, which
+    the caller answers by skipping one bisync cycle rather than guessing; the
+    scan that run takes is attributed, so the next run has one.
+
+    Failing to *read* the database is not the same as finding no baseline, and
+    raises rather than returning None. Both end in a skipped cycle, but they
+    send the reader of `var/bisync.log` to different places, and the log line
+    exists to be read.
+    """
     if not os.path.exists(db_path):
         return None
     conn = sqlite3.connect(db_path)
     try:
-        row = conn.execute(
+        # A database old enough to lack the column cannot answer the question,
+        # and that is the only unreadable state answered with "no baseline". A
+        # locked database would otherwise be reported as an unattributed
+        # mirror, sending whoever reads the log to check `--local-root` for a
+        # fault that is not there.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+        if "scan_root" not in columns:
+            return None
+        rows = conn.execute(
             """
-            SELECT id
+            SELECT id, scan_root
             FROM scans
             WHERE scan_type = 'local' AND status = 'success'
             ORDER BY id DESC
-            LIMIT 1
             """
-        ).fetchone()
+        ).fetchall()
     finally:
         conn.close()
-    return int(row[0]) if row else None
+
+    if local_root is None:
+        return int(rows[0][0]) if rows else None
+
+    wanted = normalized_local_root(local_root)
+    for scan_id, scan_root in rows:
+        if scan_root is None:
+            continue
+        if normalized_local_root(str(scan_root)) == wanted:
+            return int(scan_id)
+    return None
 
 
 def load_scan_files(db_path: str, scan_id: int) -> Dict[str, dict]:
@@ -432,6 +471,55 @@ def summarize_candidates(candidates: List[dict]) -> dict:
         "high": sum(1 for item in candidates if item.get("confidence") == "high"),
         "review": sum(1 for item in candidates if item.get("confidence") == "review"),
         "blocked": sum(1 for item in candidates if item.get("confidence") == "blocked"),
+    }
+
+
+def detect_decision_reason(detect_payload: dict) -> Optional[str]:
+    decision = detect_payload.get("decision")
+    if not isinstance(decision, dict):
+        return None
+    return decision.get("reason")
+
+
+# Verdicts that mean "the guard had nothing to compare", as opposed to "the
+# guard compared and found nothing". Both produce an empty candidate list, so
+# `cmd_preflight` — which recomputes from that list — has to carry them across
+# by name or it would collapse them into `allow_bisync (no_candidates)`.
+NO_BASELINE_REASONS = frozenset({"no_comparable_baseline", "baseline_unreadable"})
+
+
+def decide_no_baseline(mode: str, reason: str = "no_comparable_baseline") -> dict:
+    """No local scan of this mirror to compare against: skip, do not guess.
+
+    Renames are undetectable without a baseline, so the guard has nothing to
+    say. The two honest answers are "run bisync unguarded" and "do not run
+    bisync", and only the second is safe: an unguarded run is exactly the
+    situation the guard exists to prevent, where a cloud-side rename reaches
+    rclone as a deletion and an upload.
+
+    Skipping cannot wedge the sync. `cmd_detect` takes its own local scan
+    before this is reached, and that scan is attributed to this mirror, so the
+    next run has a baseline — the cost is one cycle. `observe` mode still
+    allows, because it is defined as not interfering.
+
+    `reason` separates the two ways of having no baseline: none was recorded
+    for this mirror, or the database would not answer. The decision is the
+    same and the diagnosis is not.
+    """
+    summary = summarize_candidates([])
+    summary["applied"] = 0
+    if mode == "observe":
+        return {
+            "decision": "allow_bisync",
+            "reason": "observe_mode",
+            "notify": False,
+            "summary": summary,
+        }
+    return {
+        "decision": "skip_bisync",
+        "reason": reason,
+        "notify": False,
+        "summary": summary,
     }
 
 
@@ -776,7 +864,17 @@ def cmd_apply(args: argparse.Namespace) -> dict:
 def cmd_detect(args: argparse.Namespace) -> dict:
     rename_policy = load_rename_policy(args.rename_policy_path)
     requested_mode = args.mode or rename_policy.get("default_mode", "observe")
-    previous_scan_id = latest_successful_local_scan_id(args.db_path)
+    # A database that will not answer leaves the guard with nothing to compare,
+    # exactly as an unscanned mirror does, and gets the same skip. It does not
+    # get the same name: `no_comparable_baseline` reads as "wrong --local-root"
+    # and would send the operator looking for a fault that is not there. The
+    # scan below still runs — a lock during this query is usually gone by then.
+    baseline_error = None
+    try:
+        previous_scan_id = latest_successful_local_scan_id(args.db_path, args.local_root)
+    except sqlite3.Error as exc:
+        previous_scan_id = None
+        baseline_error = f"{type(exc).__name__}: {exc}"
     payload = {
         "schema": SCHEMA,
         "action": "detect",
@@ -807,12 +905,10 @@ def cmd_detect(args: argparse.Namespace) -> dict:
         "error": None,
     }
 
-    if previous_scan_id is None:
-        payload["error"] = "No previous successful local scan found."
-        payload["decision"] = decide_preflight(requested_mode, [], error=payload["error"])
-        write_json_file(var_path("rename_preflight_state.json"), payload)
-        return payload
-
+    # The scan is taken even when there is no baseline to compare it against,
+    # and that is the point: it becomes the baseline. Returning early here —
+    # which is what this did — left the next run without one too, so a database
+    # that had never seen an attributed local scan could never acquire one.
     local_scan = run_local_scan(args.db_path, args.local_root)
     payload["local_scan"] = vars(local_scan)
     if not local_scan.started or local_scan.scan_id is None:
@@ -822,6 +918,23 @@ def cmd_detect(args: argparse.Namespace) -> dict:
         return payload
 
     payload["current_scan_id"] = local_scan.scan_id
+
+    if previous_scan_id is None:
+        if baseline_error is None:
+            payload["warnings"].append(
+                f"No previous local scan of {normalized_local_root(args.local_root)} to compare "
+                "against; renames cannot be detected this run. Recorded one for the next."
+            )
+            payload["decision"] = decide_no_baseline(requested_mode)
+        else:
+            payload["warnings"].append(
+                f"Could not read the baseline from {args.db_path} ({baseline_error}); "
+                "renames cannot be detected this run. Recorded a scan for the next."
+            )
+            payload["decision"] = decide_no_baseline(requested_mode, "baseline_unreadable")
+        write_json_file(var_path("rename_preflight_state.json"), payload)
+        return payload
+
     candidates, warnings = find_candidates(args, previous_scan_id, local_scan.scan_id, rename_policy)
     payload["warnings"].extend(warnings)
     payload["candidates"] = candidates
@@ -884,11 +997,20 @@ def cmd_preflight(args: argparse.Namespace) -> dict:
                     "results": auto_result,
                 })
 
-    decision = decide_preflight(mode, candidates, applied=applied, error=error)
-    if error and mode in {"guard", "auto"}:
-        decision["decision"] = "allow_bisync"
-        decision["reason"] = "error"
-        decision["notify"] = True
+    # This recomputes the decision rather than reading detect's, so a verdict
+    # that does not follow from the candidate list has to be carried across
+    # explicitly. "No baseline" is exactly that: zero candidates because
+    # nothing could be compared, which is not the same as zero candidates
+    # because nothing changed, and the two must not collapse into one answer.
+    detect_reason = detect_decision_reason(detect_payload)
+    if not error and detect_reason in NO_BASELINE_REASONS:
+        decision = decide_no_baseline(mode, detect_reason)
+    else:
+        decision = decide_preflight(mode, candidates, applied=applied, error=error)
+        if error and mode in {"guard", "auto"}:
+            decision["decision"] = "allow_bisync"
+            decision["reason"] = "error"
+            decision["notify"] = True
     payload = {
         "schema": PREFLIGHT_SCHEMA,
         "action": "preflight",

@@ -190,7 +190,8 @@ export YDM_BINDS="--bind /storage/emulated/0/Documents:/root/notes"
 1. **Rename preflight** (`sync_rename.py preflight`). A cloud-side rename must
    be settled before bisync sees a missing file and a new one and concludes
    delete-then-upload. The preflight makes its own local scan, which is why
-   the database grows by one scan per run.
+   the database grows by one scan per run — and that scan is also the baseline
+   the *next* run compares against.
 2. **Bisync** (`sync_bisync.py run --apply`) with `--check-access`,
    `--max-delete 20` and a lock, using the **bidirectional** filter.
 3. **Prune, once a day** (`ydm.py report prune --apply --vacuum`), gated by
@@ -211,6 +212,31 @@ log still says `run OK`. It happened for real: a schema change made the
 preflight crash on every run, and nothing surfaced it. `job_run.sh` now writes
 a `rename preflight FAILED` line to `var/bisync.log` when it happens. Check
 for it before trusting a green log.
+
+**Always pass the same `--local-root`.** The preflight identifies renames by
+diffing its scan against the previous scan *of the same mirror*, so a hand-run
+with a different root simply finds no baseline and skips a cycle rather than
+comparing two unrelated trees. That skip is logged:
+
+```
+2026-08-28T04:10:02+00:00 rename preflight skip_bisync (no_comparable_baseline)
+2026-08-28T04:40:11+00:00 rename preflight block_bisync (ambiguous_candidates)
+2026-08-28T05:10:44+00:00 rename preflight skip_bisync (baseline_unreadable)
+2026-08-28T05:40:09+00:00 rename preflight allow_bisync (error)
+```
+
+All four lines are new — until 2026-08-28 a guard decision produced no log entry
+at all, so a stopped sync looked exactly like a job that never fired. Read them
+as two pairs:
+
+- `skip_bisync` — the guard had nothing to compare. `no_comparable_baseline`
+  means no scan of *this* mirror was recorded, so check `--local-root`;
+  `baseline_unreadable` means the database would not answer, so check the
+  database. Both cost one cycle and clear on their own.
+- `allow_bisync (error)` — bisync **ran without the guard**. The preflight
+  reports its errors inside the JSON envelope and still exits 0, so this is not
+  covered by the `FAILED rc=` line above. It is the one to chase: a run of these
+  is issue #5 repeating.
 
 **Prune is what keeps the database from growing without limit.** One local
 scan per run is ~589 rows here; left alone that reached 3865 scans and 2.14

@@ -5,6 +5,70 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-28 — the rename guard was comparing whatever it found
+
+Found on the Android device while verifying that the guard still worked after
+the five merges — the verification itself triggered it. Issue #14.
+
+- **The baseline was "the newest local scan", not "the newest scan of this
+  mirror."** `sync_rename` diffs the two most recent successful local scans to
+  find renames, and never checked what tree either one covered. One preflight
+  run against a different `--local-root` left a scan of another directory at
+  the top of the table, and the next run read the difference between two
+  unrelated trees as renames: two `blocked` candidates pointing at
+  `/RCLONE_TEST` — the bisync check-access sentinel, matched by size — and a
+  `block_bisync` that stopped the scheduled sync for a cycle.
+- **The column to fix it with had been added and never written.** PR #10 added
+  `scans.scan_root`; `ydm.py scan local` fills it, and `run_local_scan()` — the
+  path every tool takes, including the preflight — did not. All 93 local scans
+  on the device carried NULL. It records a normalized root now, and the
+  baseline query selects on it.
+- **NULL is not treated as a match.** Letting an unattributed scan stand in for
+  any mirror would have kept the defect alive in every database that already
+  existed, which at that point was all of them. The cost is one skipped cycle
+  the first time, after which there is an attributed scan to compare against.
+- **No baseline now means skip, not allow.** That path used to return early
+  with an error and `allow_bisync` — fail-open, and permanently so: returning
+  *before* taking the scan meant the next run had no baseline either. The scan
+  is taken first, and of the two honest answers to "nothing to compare against",
+  only "do not run bisync" is safe. `observe` mode still allows.
+- **`cmd_preflight` recomputes the verdict from the candidate list**, so the
+  reason is carried across explicitly. An empty list there means "nothing
+  changed", which is not what "nothing could be compared" means, and collapsing
+  the two would have restored the fail-open one layer up.
+- **Guard decisions reach the log.** Only `sync_bisync.py` wrote to
+  `var/bisync.log`, so `skip_bisync` and `block_bisync` left no trace at all:
+  `run OK` lines, a gap, `run OK` again, with nothing to distinguish the guard
+  stopping a run from the job never firing. The Termux notification is not a
+  substitute — it is not kept.
+- **`tests/test_sync_rename.py` is new**: the module had no tests whatsoever.
+  17 of them, none touching rclone. Six mutations, each killed.
+
+Found in review of the above, and fixed with it:
+
+- **"Cannot read the database" was being reported as "no scan of this
+  mirror."** The baseline query answered every `sqlite3.OperationalError` with
+  "no baseline", so a damaged or unopenable database produced
+  `skip_bisync (no_comparable_baseline)` — a log line that reads as "you passed
+  the wrong `--local-root`" and sends whoever is diagnosing it to the wrong
+  place. Only the missing column means that now; anything else raises and the
+  caller answers it under `baseline_unreadable`. Same verdict, both skip; the
+  point of the new log line is that the reason is true.
+- **The one branch that runs bisync *without* a guard still logged nothing.**
+  `job_run.sh` gained lines for `skip_bisync` and `block_bisync`, which stop
+  the sync — but an error inside the preflight travels in the JSON envelope
+  with exit code 0, so it is not caught by the `FAILED rc=` test and ends in
+  `allow_bisync (error)`: bisync runs, unguarded, looking exactly like a clean
+  run. That is issue #5 verbatim, and it is now written down.
+- **`var/bisync.log` is resolved the way the rest of the codebase resolves
+  it.** The script wrote a bare relative `var/bisync.log` while
+  `sync_bisync.py` goes through `var_path()`, which `YDM_VAR_DIR` redirects —
+  so anything setting it would have split the log in two.
+- **`tests/test_job_run.py` is new**: the scheduled job decides every half hour
+  whether bisync runs and had no coverage at all. 7 tests, driven through a
+  stub `python3` on PATH, reaching neither rclone nor the device. Seven further
+  mutations, each killed.
+
 ## 2026-08-27 — one sentinel, two meanings, and a warning that never fired
 
 Phase 11. `tests/test_ydm_menu.py` named `ROOT/monitor.db` and

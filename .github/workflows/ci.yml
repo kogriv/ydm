@@ -63,6 +63,18 @@ jobs:
       - name: Unit tests (shell aliases — names, ydm=menu, mirror guard)
         run: python tests/test_aliases.py -v
 
+      # No remote is involved: with the baseline attributed to a mirror, two
+      # unrelated trees never reach the stage that would consult rclone.
+      - name: Unit tests (rename baseline attribution, no rclone)
+        run: python tests/test_sync_rename.py -v
+
+      # The scheduled Android job decides every half hour whether bisync runs,
+      # and had no coverage at all. A stub `python3` earlier on PATH answers
+      # for the preflight, so this tests the script's reasoning and reaches
+      # neither rclone nor the device.
+      - name: Unit tests (Android job — what it does with the guard's verdict)
+        run: python tests/test_job_run.py -v
+
       # The synthetic bench: a policy file, folders on disk and a database,
       # driven end to end. It is the only coverage the menu screens have, and
       # until 2026-08-25 it ran nowhere but a developer's machine — which is
