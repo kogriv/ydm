@@ -5,6 +5,33 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-28 — one add, one daemon restart
+
+Phase 5.1: `ydm-sync-add` was a second implementation of "add this path", and
+it had drifted.
+
+- **Two commands where the menu runs one.** The alias ran `sync_policy.py add
+  --apply` and then `render-filters --apply`. Both of those apply the whole
+  policy to the backend, so a single add stopped and started the daemon
+  **twice**. The policy file came out identical either way, which is why
+  nothing noticed; on a 1.5 TB disk the second restart is a re-index that buys
+  nothing. Counted on the bench: 2 restarts against `action_add`'s 1.
+- **`ydm_menu.py add` is now the one entry point**, used by the alias and the
+  menu. It takes `--path`, `--mode`, `--force-risk`, and emits JSON.
+- **It is dry by default**, which the alias never had — `tools/aliases.sh` said
+  so in as many words and pointed at `sync_policy.py` for a preview. Without
+  `--apply` it prints the same delta the menu shows before asking, and writes
+  nothing.
+- **The dropped `render-filters` step is not a loss.** On rclone that is
+  exactly what `RcloneBackend.apply_policy` does, so routing through the shared
+  path keeps it; on the daemon it wrote filter files the daemon never reads.
+  Pinned by a test either way.
+- **The first theory was wrong and the bench said so.** `add_policy_path()`
+  writes only the policy file, which read like the alias never applying to the
+  daemon at all — a much worse defect. It does apply: `sync_policy.py`'s
+  command handler calls `_apply_backend_policy` after the write. The bench was
+  what settled it, before any of this was written down.
+
 ## 2026-08-28 — and the counting half asked them too
 
 Phase 12.2 and 12.3, closing the phase. `_folder_file_counts` and

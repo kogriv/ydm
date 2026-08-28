@@ -29,6 +29,7 @@ from tools.ydm_menu_actions import (  # noqa: E402
     list_stale_folders,
     policy_children_of,
     offer_resync_if_needed,
+    preview_add,
     print_cloud_local_diff,
     print_detailed_status,
     print_trash_overview,
@@ -37,6 +38,7 @@ from tools.ydm_menu_actions import (  # noqa: E402
     snapshot_top_level,
 )
 from tools.sync_backends import BackendError  # noqa: E402
+from tools.sync_policy import VALID_MODES  # noqa: E402
 from tools.ydm_menu_config import MenuConfig  # noqa: E402
 from tools.ydm_menu_orphans import (  # noqa: E402
     cloud_scan_available,
@@ -501,6 +503,38 @@ def cmd_orphans_json(cfg: MenuConfig) -> int:
     return 0
 
 
+def cmd_add_json(cfg: MenuConfig, args: argparse.Namespace) -> int:
+    """Add a path to the policy, or show what adding it would change.
+
+    The one place that answers "add this path" for every caller. Until
+    2026-08-28 `ydm-sync-add` reached the same end by running `sync_policy.py
+    add --apply` and then `render-filters --apply`, and both of those apply the
+    whole policy to the backend — so one add stopped and started the daemon
+    twice. On a 1.5 TB disk the second restart buys nothing and costs a
+    re-index.
+
+    Without `--apply` this is the dry run the alias never had: the same delta
+    the menu shows before asking, without touching anything.
+    """
+    if args.apply:
+        result = action_add(cfg, args.path, args.mode, force_risk=args.force_risk)
+    else:
+        result = preview_add(cfg, args.path, args.mode)
+    payload = {
+        "schema": "ydm_menu_add:v1",
+        "action": "add",
+        "dry_run": not args.apply,
+        "path": args.path,
+        "mode": args.mode,
+        "backend": cfg.backend_name,
+        "ok": result.ok,
+        "message": result.message,
+        "detail": result.details,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    return 0 if result.ok else 1
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="YDM interactive sync menu")
     parser.add_argument("--db-path", default=None)
@@ -522,6 +556,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--non-interactive", action="store_true", help="Script subcommands only")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("orphans", help="List local orphans as JSON")
+    add = sub.add_parser("add", help="Add a path to the policy, as JSON")
+    add.add_argument("--path", required=True)
+    add.add_argument("--mode", default="bidirectional", choices=sorted(VALID_MODES))
+    add.add_argument("--force-risk", action="store_true")
+    # Dry by default, like every other write in this repository: the caller
+    # that wants the change says so.
+    add.add_argument("--apply", action="store_true")
     return parser.parse_args()
 
 
@@ -539,8 +580,10 @@ def main() -> int:
     )
     if args.command == "orphans":
         return cmd_orphans_json(cfg)
+    if args.command == "add":
+        return cmd_add_json(cfg, args)
     if args.non_interactive:
-        print("Use subcommand, e.g. orphans", file=sys.stderr)
+        print("Use a subcommand: orphans, add", file=sys.stderr)
         return 2
     if not sys.stdin.isatty():
         print("YDM menu requires an interactive terminal.", file=sys.stderr)

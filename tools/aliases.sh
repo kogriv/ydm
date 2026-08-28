@@ -187,8 +187,12 @@ PY
 #
 # ydm-sync-add and ydm-sync-rm run with --apply: the change takes effect
 # immediately, and on the yandex-disk daemon that means rewriting exclude-dirs
-# and restarting it. There is no dry run here — use tools/sync_policy.py
-# directly for that.
+# and restarting it.
+#
+# To see the change first, run the shared entry point without --apply — it
+# prints the same delta the menu shows before asking:
+#
+#   python3 tools/ydm_menu.py add --path /X --mode disabled
 
 _ydm_offer_resync() {
   local status_json resync_needed answer
@@ -236,25 +240,36 @@ ydm-sync-add() {
     return 2
   fi
 
+  # One call, through the same entry point the menu uses. It used to be two —
+  # `sync_policy.py add --apply` followed by `render-filters --apply` — and
+  # both of those apply the whole policy to the backend, so a single add
+  # stopped and started the daemon twice. The second restart changed nothing
+  # and cost a re-index of 1.5 TB. See tasks/ydm_menu/BACKLOG.md, 5.1.
   local add_json add_status
-  add_json="$(python3 "$YDM_ROOT/tools/sync_policy.py" add --db-path "$YDM_DB" \
+  add_json="$(python3 "$YDM_ROOT/tools/ydm_menu.py" --db-path "$YDM_DB" \
     --local-root "$YDM_LOCAL_ROOT" --policy-path "$YDM_POLICY" \
-    --path "$path" --mode "$mode" "${force_args[@]}" --format json --apply)" || return
+    add --path "$path" --mode "$mode" "${force_args[@]}" --apply)"
+  # A refusal exits 1 and still prints its JSON, so the exit code is not the
+  # test — empty output is. Without this the parser below dies on json.loads
+  # and the reason never reaches the person.
+  if [ -z "$add_json" ]; then
+    echo "ydm-sync-add: no output from ydm_menu.py add — see the error above." >&2
+    return 1
+  fi
   add_status="$(YDM_ADD_JSON="$add_json" python3 - <<'PY'
 import json
 import os
 
 payload = json.loads(os.environ["YDM_ADD_JSON"])
-data = payload.get("data") or {}
+data = payload.get("detail") or {}
 risk = data.get("risk") or {}
-error = data.get("error")
-path = data.get("path") or risk.get("path") or "unknown"
-mode = data.get("mode") or "unknown"
-if error:
+path = payload.get("path") or data.get("path") or risk.get("path") or "unknown"
+mode = payload.get("mode") or data.get("mode") or "unknown"
+if not payload.get("ok"):
     print("BLOCKED")
     print(f"Path: {path}")
     print(f"Mode: {mode}")
-    print(f"Reason: {error}")
+    print(f"Reason: {payload.get('message') or data.get('error')}")
     for item in risk.get("risks") or []:
         code = item.get("code", "risk")
         count = item.get("count")
@@ -276,9 +291,6 @@ PY
   }
   printf '%s\n' "$add_status"
 
-  python3 "$YDM_ROOT/tools/sync_policy.py" render-filters --db-path "$YDM_DB" \
-    --local-root "$YDM_LOCAL_ROOT" --policy-path "$YDM_POLICY" \
-    --format json --apply >/dev/null || return
   if [ "$mode" = "bidirectional" ]; then
     _ydm_offer_resync
   else

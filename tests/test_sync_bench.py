@@ -2106,5 +2106,127 @@ class TestRemoveScreenOnRclone(BenchTestCase):
         self.assertIn("not synced", text.lower())
 
 
+class TestAddThroughTheSharedEntryPoint(BenchTestCase):
+    """`ydm_menu.py add` — what `ydm-sync-add` runs since 2026-08-28.
+
+    The alias used to reach the same end by two commands: `sync_policy.py add
+    --apply` and then `render-filters --apply`. Both of those apply the whole
+    policy to the backend, so one add stopped and started the daemon twice.
+    The policy file ended up identical, which is why nothing noticed; on a
+    1.5 TB disk the second restart is a re-index that buys nothing.
+
+    Phase 5.1 in tasks/ydm_menu/BACKLOG.md: one implementation of "add this
+    path", used by the menu and the shell alike.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.excluded = make_daemon_policy(self.bench)
+
+    def cfg(self, backend="daemon"):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend=backend,
+            plain=True,
+        )
+
+    def add(self, path, mode="disabled", *, apply=True, backend="daemon", force_risk=False):
+        """Run the subcommand and return (exit code, payload, restart count)."""
+        import argparse
+        import contextlib
+        import io
+        import json
+        import unittest.mock as mock
+
+        from tools import sync_backends, ydm_menu
+
+        args = argparse.Namespace(path=path, mode=mode, force_risk=force_risk, apply=apply)
+        buffer = io.StringIO()
+        with mock.patch.object(sync_backends, "stop_start_daemon",
+                               return_value={}) as restart:
+            with contextlib.redirect_stdout(buffer):
+                code = ydm_menu.cmd_add_json(self.cfg(backend), args)
+        return code, json.loads(buffer.getvalue()), restart.call_count
+
+    def test_one_add_restarts_the_daemon_once(self):
+        """The defect this closes, stated as a number.
+
+        Two commands meant two applications of the policy, and on the daemon
+        each application ends in `yandex-disk stop && start`.
+        """
+        code, payload, restarts = self.add("/DAO")
+        self.assertEqual(code, 0, payload)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(restarts, 1)
+
+    def test_the_exclusion_reaches_the_config_the_daemon_reads(self):
+        before = read_exclude_dirs(self.bench)
+        self.add("/DAO")
+        after = read_exclude_dirs(self.bench)
+        self.assertEqual(sorted(set(after) - set(before)), ["DAO"])
+        self.assertIn("DAO", self.bench.read_policy()["paths"])
+
+    def test_without_apply_it_only_says_what_would_change(self):
+        """The dry run the alias never had.
+
+        `tools/aliases.sh` said so in as many words — "There is no dry run
+        here" — and pointed at sync_policy.py for one. On the daemon that
+        meant the only preview of an exclusion was in the menu.
+        """
+        before = read_exclude_dirs(self.bench)
+        policy_before = self.bench.read_policy()
+        code, payload, restarts = self.add("/DAO", apply=False)
+        self.assertEqual(code, 0, payload)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(restarts, 0)
+        self.assertEqual(read_exclude_dirs(self.bench), before)
+        self.assertEqual(self.bench.read_policy(), policy_before)
+
+    def test_the_preview_names_the_change_it_would_make(self):
+        _code, payload, _restarts = self.add("/DAO", apply=False)
+        self.assertIn("DAO", payload["message"])
+        self.assertIn("exclude-dirs", payload["message"])
+
+    def test_a_refusal_is_reported_and_changes_nothing(self):
+        """Blocked adds must not be silent, and must not half-apply."""
+        before = read_exclude_dirs(self.bench)
+        policy_before = self.bench.read_policy()
+        code, payload, _restarts = self.add(
+            "/definitely-not-in-the-snapshot", mode="bidirectional"
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["message"])
+        self.assertEqual(read_exclude_dirs(self.bench), before)
+        self.assertEqual(self.bench.read_policy(), policy_before)
+
+    def test_the_rclone_backend_still_gets_its_filter_files(self):
+        """The step the alias dropped, which the backend was already doing.
+
+        `render-filters` was the second of the two commands, and on rclone it
+        is exactly what `RcloneBackend.apply_policy` does — so routing through
+        the shared path keeps it, rather than losing it.
+        """
+        import os
+
+        from tools.sync_policy import bisync_filter_path, download_filter_path
+
+        for path in (download_filter_path(self.bench.local_root),
+                     bisync_filter_path(self.bench.local_root)):
+            if os.path.exists(path):
+                os.remove(path)
+        code, payload, _restarts = self.add(
+            "/DAO", mode="download_only", backend="rclone"
+        )
+        self.assertEqual(code, 0, payload)
+        self.assertTrue(os.path.exists(download_filter_path(self.bench.local_root)))
+        self.assertTrue(os.path.exists(bisync_filter_path(self.bench.local_root)))
+
+
 if __name__ == "__main__":
     unittest.main()

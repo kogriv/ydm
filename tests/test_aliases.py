@@ -127,6 +127,23 @@ class AliasesTests(unittest.TestCase):
         for name in ("ydm-sync-add", "ydm-sync-rm", "ydm-bisync-run", "ydm-rename-apply"):
             self.assertIn(name, proc.stdout)
 
+    def test_adding_a_path_goes_through_the_shared_entry_point(self):
+        """One command, the same one the menu runs.
+
+        It used to be two — `sync_policy.py add --apply` and then
+        `render-filters --apply` — and both of those apply the whole policy to
+        the backend, so a single add stopped and started the daemon twice. The
+        second restart changed nothing and cost a re-index. Pinned here
+        because the shape is what regresses: a second policy command quietly
+        appended is exactly how it happened the first time.
+        """
+        proc = self.bash("type ydm-sync-add")
+        self.assertIn("ydm_menu.py", proc.stdout)
+        self.assertIn("add --path", proc.stdout)
+        body = proc.stdout
+        self.assertNotIn("sync_policy.py", body)
+        self.assertNotIn("render-filters", body)
+
 
 if __name__ == "__main__":
     unittest.main()
