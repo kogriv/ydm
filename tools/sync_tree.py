@@ -36,6 +36,7 @@ from tools.sync_policy import (  # noqa: E402
     policy_paths_by_mode,
 )
 from tools.sync_tree_cloud import (  # noqa: E402
+    ChildIndex,
     fetch_child_names,
     select_snapshot_for_tree,
 )
@@ -168,13 +169,17 @@ def build_tree(
     depth: int,
 ) -> TreeNode:
     storage = analyzer.storage
+    # Read each scan's folder structure once instead of once per node. The
+    # walk asked up to ten queries per node for the same facts; on the device
+    # that was 67% of the run. See ChildIndex.
+    index = ChildIndex(storage)
 
     def build_node(path: str, remaining_depth: int) -> TreeNode:
         normalized = normalize_path(path)
         name = "/" if normalized == "/" else normalized.rsplit("/", 1)[-1]
         node = TreeNode(path=normalized, name=name)
         scan_id = select_scan_id_for_path(normalized, snapshot)
-        children_names = fetch_child_names(storage, scan_id, normalized)
+        children_names = fetch_child_names(storage, scan_id, normalized, index=index)
         node.children_count = len(children_names)
 
         if remaining_depth > 0:

@@ -5,6 +5,43 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-28 — the tree asked the same questions once per node
+
+Phase 12.1 and 12.5. What the device's profile found once 9.3 turned out not
+to exist (issue #13): PR #4 and Phase 9 made a query cheap, and nobody had
+touched how many there were — 50 813 for 3 801 nodes, 13.4 per node, 67% of
+the run.
+
+- **Which folders a scan holds is a property of the scan, not of the node
+  asking.** `fetch_child_names` answered per node and cost up to ten queries
+  each: one for `type='dir'` rows, four inferring names from file paths under
+  both spellings of `parent_path`, and five more in the fallback loop when the
+  folder had neither. `ChildIndex` reads it whole in two queries per scan — the
+  dir rows, and the distinct `parent_path` of every file, since a folder named
+  in a path is a folder that exists. Built lazily per `scan_id`, so a walk that
+  never enters a subtree never pays for the scan behind it.
+- **Measured on the author's snapshot** (144 MB, 3 810 nodes at depth 5):
+  `sync_tree --depth 4` 19 882 queries → 84; `--depth 5` 27 707 → 84;
+  `ydm_menu orphans` 54 568 → 26 945. The remainder is the counting half,
+  which is 12.2 and 12.3.
+- **Output is unchanged**, verified byte for byte at depths 3, 4 and 5 against
+  the same snapshot, after the `folder_updates` key order is normalized — it
+  floats between runs, as Phase 9 already recorded.
+- **One difference, and it is the old code finding less.** Root was the one
+  folder inference did not answer with a range query: it used
+  `parent_path NOT LIKE '/%/%/%'`, so a top-level folder whose files all sit
+  three or more levels down was invisible at the root, and since the walk
+  descends into what it lists, the whole subtree went missing — which in
+  `orphans` reads as the local copy having no cloud counterpart. Reachable
+  only when the scan has no dir row for that folder at the root, which is why
+  the live snapshot renders identically either way. Kept as the better answer
+  rather than reproduced.
+- **`tests/query_count.py` is new.** Wall-clock cannot police a query count
+  from this machine — it is 5-15x faster than the device, so a real
+  improvement hides in the noise. A query count is the same number on both,
+  and it is the number the device pays for. Two tests fence the walk: it must
+  not cost per node, and depth 4 must cost what depth 3 does.
+
 ## 2026-08-28 — the rename guard was comparing whatever it found
 
 Found on the Android device while verifying that the guard still worked after

@@ -15,9 +15,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tools.sync_tree import count_cloud_files_for_path  # noqa: E402
-from tools.sync_tree_cloud import fetch_child_names, infer_dirs_from_files  # noqa: E402
+from query_count import counting_queries  # noqa: E402
+from tools.sync_common import CompositeSnapshot  # noqa: E402
+from tools.sync_tree import build_tree, count_cloud_files_for_path  # noqa: E402
+from tools.sync_tree_cloud import (  # noqa: E402
+    ChildIndex,
+    fetch_child_names,
+    infer_dirs_from_files,
+)
+from ydm import Analyzer, StorageManager  # noqa: E402
 from tools.sync_tree_policy import (  # noqa: E402
     display_marker,
     effective_policy_state,
@@ -27,6 +36,16 @@ from tools.sync_tree_policy import (  # noqa: E402
     policy_mode_for_path,
     policy_summary_line,
 )
+
+
+class _Storage:
+    """The narrow slice of StorageManager the cloud helpers actually use."""
+
+    def __init__(self, db_path):
+        self._db_path = db_path
+
+    def get_connection(self):
+        return sqlite3.connect(self._db_path)
 
 
 class BlacklistSemanticsTests(unittest.TestCase):
@@ -805,6 +824,250 @@ class SnapshotLookupTests(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path):
                 self.assertEqual(old(path, snap), select_scan_id_for_path(path, snap))
+
+
+class ChildIndexTests(unittest.TestCase):
+    """Reading each scan once must answer exactly what asking per node did.
+
+    `ChildIndex` replaces up to ten queries per node with two per scan
+    (Phase 12). The whole value of it depends on the answers being the same
+    ones, so most of what is checked here is equivalence against the
+    un-indexed path rather than against hand-written expectations: the old
+    code is the specification, including the parts of it that are quirks.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _db(self, rows, name="monitor.db"):
+        """`rows` are (scan_id, parent_path, name, type) as the scan wrote them."""
+        path = os.path.join(self.tmpdir, name)
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, modified TEXT, md5 TEXT, path TEXT
+            );
+            CREATE UNIQUE INDEX idx_files_unique ON files (scan_id, parent_path, name);
+            """
+        )
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size)"
+            " VALUES (?, ?, ?, ?, 1)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+        return _Storage(path)
+
+    def _assert_agrees(self, storage, scan_id, paths):
+        index = ChildIndex(storage)
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    fetch_child_names(storage, scan_id, path),
+                    fetch_child_names(storage, scan_id, path, index=index),
+                )
+
+    def test_it_agrees_when_the_scan_recorded_its_directories(self):
+        storage = self._db([
+            (1, "/Books", "Math", "dir"),
+            (1, "/Books", "Physics", "dir"),
+            (1, "/Books/Math", "book.pdf", "file"),
+            (1, "", "Books", "dir"),
+        ])
+        self._assert_agrees(storage, 1, ["/", "/Books", "/Books/Math", "/nope"])
+
+    def test_it_agrees_when_the_scan_recorded_no_directories_at_all(self):
+        """The device's shape: dir rows are sparse, so inference is the rule."""
+        storage = self._db([
+            (1, "/Books/Math/ЛинАл", "lay.pdf", "file"),
+            (1, "/Books/Math/АнГем", "notes.pdf", "file"),
+            (1, "/pro/agents", "main.py", "file"),
+        ])
+        self._assert_agrees(
+            storage, 1, ["/Books", "/Books/Math", "/Books/Math/ЛинАл", "/pro"]
+        )
+        index = ChildIndex(storage)
+        self.assertEqual(
+            index.children(1, "/Books/Math"), ["АнГем", "ЛинАл"]
+        )
+
+    def test_it_agrees_when_the_scan_wrote_paths_without_a_leading_slash(self):
+        """rclone scans spell `parent_path` one way, API scans the other."""
+        storage = self._db([
+            (1, "Books/Math", "book.pdf", "file"),
+            (1, "Books", "Math", "dir"),
+        ])
+        self._assert_agrees(storage, 1, ["/Books", "/Books/Math"])
+
+    def test_the_root_no_longer_goes_blind_below_two_levels(self):
+        """A difference from the old lookup, and the only one: it found less.
+
+        Root was the one folder inference did not answer with a range query.
+        It used `parent_path NOT LIKE '/%/%/%'`, so a top-level folder whose
+        files all sit three or more levels down was invisible at the root —
+        and since the walk descends into what it lists, the whole subtree
+        went missing. In `orphans` that reads as the local copy having no
+        cloud counterpart.
+
+        Only reachable when the scan has no dir row for that folder at the
+        root, which is why the live snapshot renders identically either way
+        (verified byte for byte at depths 3, 4 and 5 on 2026-08-28). Kept as
+        the better answer rather than reproduced.
+        """
+        storage = self._db([
+            (1, "/shallow", "a.pdf", "file"),
+            (1, "/mid/x", "b.pdf", "file"),
+            (1, "/deep/x/y", "c.pdf", "file"),
+            (1, "/deeper/x/y/z", "d.pdf", "file"),
+        ])
+        self.assertEqual(fetch_child_names(storage, 1, "/"), ["mid", "shallow"])
+        self.assertEqual(
+            ChildIndex(storage).children(1, "/"),
+            ["deep", "deeper", "mid", "shallow"],
+        )
+        # Below the root the two always agreed: that path used a range, which
+        # has no depth limit in it.
+        self._assert_agrees(storage, 1, ["/deep", "/deep/x", "/deeper/x/y"])
+
+    def test_a_prefix_sibling_is_not_swallowed(self):
+        """`/Books/Math-old` is not under `/Books/Math`; '-' sorts below '0'."""
+        storage = self._db([
+            (1, "/Books/Math/ЛинАл", "a.pdf", "file"),
+            (1, "/Books/Math-old/Ancient", "b.pdf", "file"),
+        ])
+        index = ChildIndex(storage)
+        self.assertEqual(index.children(1, "/Books/Math"), ["ЛинАл"])
+        self.assertEqual(index.children(1, "/Books/Math-old"), ["Ancient"])
+        self.assertEqual(index.children(1, "/Books"), ["Math", "Math-old"])
+
+    def test_recorded_directories_still_win_over_inferred_names(self):
+        """Precedence is the old one: dir rows answer alone when they exist.
+
+        `fetch_child_dirs` returned first and inference never ran, so a folder
+        holding both a dir row and files under an unrecorded child listed only
+        the recorded one. Preserved deliberately — this is a query-count
+        change, not a semantics change.
+        """
+        storage = self._db([
+            (1, "/Books", "Math", "dir"),
+            (1, "/Books/Physics", "quantum.pdf", "file"),
+        ])
+        self.assertEqual(fetch_child_names(storage, 1, "/Books"), ["Math"])
+        self.assertEqual(ChildIndex(storage).children(1, "/Books"), ["Math"])
+
+    def test_one_scan_does_not_answer_for_another(self):
+        storage = self._db([
+            (1, "/Books/Math", "a.pdf", "file"),
+            (2, "/pro/agents", "b.py", "file"),
+        ])
+        index = ChildIndex(storage)
+        self.assertEqual(index.children(1, "/"), ["Books"])
+        self.assertEqual(index.children(2, "/"), ["pro"])
+        self._assert_agrees(storage, 1, ["/", "/Books"])
+        self._assert_agrees(storage, 2, ["/", "/pro"])
+
+    def test_a_missing_scan_has_no_children_rather_than_raising(self):
+        storage = self._db([(1, "/Books/Math", "a.pdf", "file")])
+        self.assertEqual(ChildIndex(storage).children(99, "/"), [])
+
+
+class TreeQueryBudgetTests(unittest.TestCase):
+    """How many queries the walk costs, which is the cost that survived.
+
+    Phase 9 made a query cheap; on the Android device that helped less than it
+    reads, because proot bills every system call and a query still costs half a
+    millisecond. What is left to cut is the number of them — 50 813 for 3 801
+    nodes on 2026-08-28. Wall-clock cannot police that from this machine (it is
+    5-15x faster, so the win hides in the noise), but a query count is the same
+    number on both.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, modified TEXT, md5 TEXT, path TEXT
+            );
+            CREATE UNIQUE INDEX idx_files_unique ON files (scan_id, parent_path, name);
+            CREATE TABLE scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME,
+                scan_type TEXT NOT NULL, status TEXT NOT NULL, duration REAL,
+                scan_root TEXT, scan_depth INTEGER
+            );
+            INSERT INTO scans (id, scan_type, status, duration)
+                VALUES (1, 'cloud', 'success', 1);
+            """
+        )
+        # No dir rows anywhere: the shape the device actually has, and the one
+        # that used to cost the most, because every node fell through to
+        # inference and then to the fallback loop behind it.
+        rows = []
+        self.folders = 0
+
+        def grow(prefix, depth):
+            self.folders += 1
+            if depth == 0:
+                return
+            for index in range(4):
+                child = f"{prefix}/d{depth}_{index}"
+                rows.append((1, child, "file.bin", "file"))
+                grow(child, depth - 1)
+
+        grow("", 4)
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size)"
+            " VALUES (?, ?, ?, ?, 1)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _walk(self, depth):
+        storage = StorageManager(self.db_path, use_temp_storage=False)
+        analyzer = Analyzer(storage)
+        snapshot = CompositeSnapshot(base_scan_id=1, folder_updates={})
+        with counting_queries() as queries:
+            tree = build_tree(analyzer, snapshot, "/", depth)
+
+        def count(node):
+            return 1 + sum(count(child) for child in node.children)
+
+        return count(tree), queries
+
+    def test_the_walk_does_not_pay_per_node(self):
+        """The point of the change, stated as the thing that must not return.
+
+        Before Phase 12 this was 9.2 queries per node at depth 4 and rose with
+        depth, because every node asked its own questions. The bound is the
+        number of scans in the snapshot, not the number of nodes.
+        """
+        nodes, queries = self._walk(4)
+        self.assertGreater(nodes, 300, "the fixture must be big enough to matter")
+        self.assertLess(queries.count, 20, queries.report())
+
+    def test_a_deeper_walk_costs_the_same(self):
+        """Depth 3 visits a quarter of the nodes depth 4 does.
+
+        Under the old lookup that showed up directly in the query count. If it
+        does again, something has gone back to asking per node.
+        """
+        shallow_nodes, shallow = self._walk(3)
+        deep_nodes, deep = self._walk(4)
+        self.assertGreater(deep_nodes, shallow_nodes * 3)
+        self.assertEqual(deep.count, shallow.count, deep.report())
 
 
 if __name__ == "__main__":
