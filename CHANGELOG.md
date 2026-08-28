@@ -27,15 +27,21 @@ the run.
 - **Output is unchanged**, verified byte for byte at depths 3, 4 and 5 against
   the same snapshot, after the `folder_updates` key order is normalized — it
   floats between runs, as Phase 9 already recorded.
-- **One difference, and it is the old code finding less.** Root was the one
-  folder inference did not answer with a range query: it used
-  `parent_path NOT LIKE '/%/%/%'`, so a top-level folder whose files all sit
-  three or more levels down was invisible at the root, and since the walk
-  descends into what it lists, the whole subtree went missing — which in
-  `orphans` reads as the local copy having no cloud counterpart. Reachable
-  only when the scan has no dir row for that folder at the root, which is why
-  the live snapshot renders identically either way. Kept as the better answer
-  rather than reproduced.
+- **Two blind spots at the root, found by building the index and fixed on both
+  paths.** Root is the one folder answered by extracting a first segment
+  rather than by a range, and that query carried
+  `parent_path NOT LIKE '/%/%/%'` — so a top-level folder whose files all sit
+  three or more levels down was invisible there, and since the walk descends
+  into what it lists, the whole subtree went missing, which in `orphans` reads
+  as a local copy with no cloud counterpart. It also did `substr(parent_path,
+  2)`, assuming a leading slash, so a scan that wrote `Books/Math` produced no
+  root listing at all. Both are reachable only when the scan has no dir row at
+  the root, which is why the live snapshot renders identically either way.
+  Fixed in `infer_dirs_from_files` rather than reproduced in the index:
+  leaving them would have meant the tree and the menu's cloud listing
+  answering the same question differently, which is its own defect. Dropping
+  the depth bound costs nothing — LIKE is case-insensitive by default, so
+  neither form was ever an index range and both read every row of the scan.
 - **`tests/query_count.py` is new.** Wall-clock cannot police a query count
   from this machine — it is 5-15x faster than the device, so a real
   improvement hides in the noise. A query count is the same number on both,

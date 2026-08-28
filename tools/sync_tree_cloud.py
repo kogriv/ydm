@@ -61,21 +61,35 @@ def infer_dirs_from_files(storage, scan_id: int, parent_path: str) -> List[str]:
 
         for prefix in prefixes:
             if prefix == "":
-                pattern = "%/%"
+                # The root is the one folder answered by a first-segment
+                # extraction rather than a range, and it used to carry
+                # `AND parent_path NOT LIKE '/%/%/%'` as well — so a top-level
+                # folder whose files all sit three or more levels down was
+                # invisible here, and since the walk descends into what it
+                # lists, the whole subtree went missing. In `orphans` that
+                # reads as a local copy with no cloud counterpart. Dropping
+                # the bound costs nothing: LIKE is case-insensitive by
+                # default, so SQLite never turned either form into an index
+                # range and both read every row of the scan.
+                # `ltrim` rather than `substr(parent_path, 2)`: the second
+                # form assumes a leading slash, so a scan that wrote
+                # `Books/Math` produced no root listing at all — an empty
+                # tree, not a wrong one.
                 rows = conn.execute(
                     """
                     SELECT DISTINCT
                         CASE
-                            WHEN instr(substr(parent_path, 2), '/') > 0
-                            THEN substr(substr(parent_path, 2), 1,
-                                instr(substr(parent_path, 2), '/') - 1)
-                            ELSE substr(parent_path, 2)
+                            WHEN instr(relative, '/') > 0
+                            THEN substr(relative, 1, instr(relative, '/') - 1)
+                            ELSE relative
                         END AS child
-                    FROM files
-                    WHERE scan_id = ?
-                      AND type = 'file'
-                      AND parent_path LIKE '/%'
-                      AND parent_path NOT LIKE '/%/%/%'
+                    FROM (
+                        SELECT ltrim(parent_path, '/') AS relative
+                        FROM files
+                        WHERE scan_id = ?
+                          AND type = 'file'
+                          AND parent_path IS NOT NULL
+                    )
                     """,
                     (scan_id,),
                 ).fetchall()

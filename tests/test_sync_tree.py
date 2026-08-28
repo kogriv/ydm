@@ -890,7 +890,7 @@ class ChildIndexTests(unittest.TestCase):
             (1, "/pro/agents", "main.py", "file"),
         ])
         self._assert_agrees(
-            storage, 1, ["/Books", "/Books/Math", "/Books/Math/ЛинАл", "/pro"]
+            storage, 1, ["/", "/Books", "/Books/Math", "/Books/Math/ЛинАл", "/pro"]
         )
         index = ChildIndex(storage)
         self.assertEqual(
@@ -903,22 +903,25 @@ class ChildIndexTests(unittest.TestCase):
             (1, "Books/Math", "book.pdf", "file"),
             (1, "Books", "Math", "dir"),
         ])
-        self._assert_agrees(storage, 1, ["/Books", "/Books/Math"])
+        self._assert_agrees(storage, 1, ["/", "/Books", "/Books/Math"])
+        self.assertEqual(fetch_child_names(storage, 1, "/"), ["Books"])
 
-    def test_the_root_no_longer_goes_blind_below_two_levels(self):
-        """A difference from the old lookup, and the only one: it found less.
+    def test_the_root_does_not_go_blind_below_two_levels(self):
+        """Found while building the index, and fixed on both paths.
 
-        Root was the one folder inference did not answer with a range query.
-        It used `parent_path NOT LIKE '/%/%/%'`, so a top-level folder whose
-        files all sit three or more levels down was invisible at the root —
-        and since the walk descends into what it lists, the whole subtree
-        went missing. In `orphans` that reads as the local copy having no
-        cloud counterpart.
+        Root is the one folder answered by extracting a first segment rather
+        than by a range, and the query carried `parent_path NOT LIKE
+        '/%/%/%'`. A top-level folder whose files all sit three or more levels
+        down was therefore invisible at the root — and since the walk descends
+        into what it lists, the whole subtree went missing. In `orphans` that
+        reads as a local copy with no cloud counterpart.
 
-        Only reachable when the scan has no dir row for that folder at the
+        Reachable only when the scan has no dir row for that folder at the
         root, which is why the live snapshot renders identically either way
-        (verified byte for byte at depths 3, 4 and 5 on 2026-08-28). Kept as
-        the better answer rather than reproduced.
+        (verified byte for byte at depths 3, 4 and 5 on 2026-08-28). The bound
+        was dropped rather than reproduced in the index: leaving it would have
+        meant the tree and the menu's cloud listing answering the same
+        question differently, which is its own defect.
         """
         storage = self._db([
             (1, "/shallow", "a.pdf", "file"),
@@ -926,14 +929,10 @@ class ChildIndexTests(unittest.TestCase):
             (1, "/deep/x/y", "c.pdf", "file"),
             (1, "/deeper/x/y/z", "d.pdf", "file"),
         ])
-        self.assertEqual(fetch_child_names(storage, 1, "/"), ["mid", "shallow"])
-        self.assertEqual(
-            ChildIndex(storage).children(1, "/"),
-            ["deep", "deeper", "mid", "shallow"],
-        )
-        # Below the root the two always agreed: that path used a range, which
-        # has no depth limit in it.
-        self._assert_agrees(storage, 1, ["/deep", "/deep/x", "/deeper/x/y"])
+        expected = ["deep", "deeper", "mid", "shallow"]
+        self.assertEqual(fetch_child_names(storage, 1, "/"), expected)
+        self.assertEqual(ChildIndex(storage).children(1, "/"), expected)
+        self._assert_agrees(storage, 1, ["/", "/deep", "/deep/x", "/deeper/x/y"])
 
     def test_a_prefix_sibling_is_not_swallowed(self):
         """`/Books/Math-old` is not under `/Books/Math`; '-' sorts below '0'."""
