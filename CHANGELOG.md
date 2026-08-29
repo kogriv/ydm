@@ -5,6 +5,32 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-29 — the tree's freshness report was outside every scope
+
+Phase 13.3, found on the device while confirming Phase 13. The device saw the
+same win the author did on `orphans` (132 queries → 54), but the tree CLI only
+went 260 → 182 and still opened 35 connections. The scope Phase 13 added lives
+inside `select_snapshot_for_tree`; `snapshot_freshness()`, which `sync_tree.py`
+calls afterwards to date the composite, builds a second one and was left
+outside it.
+
+- **32 of those 35 connections came from that one call.** `sync_tree.py`
+  260 queries → 182 after Phase 13 → **98** now, and 35 connections → **4**.
+  Wall clock on the device: `--depth 3` 2.8-3.4 s → **1.8 s**, `--depth 4`
+  → **2.4 s**, `--depth 5` → **2.6-2.9 s**.
+- **It also silently disabled the Phase 13 cache.** No scope means nothing is
+  remembered, so `SELECT scan_root, scan_depth` came back five times per scan
+  in the tree while `orphans` was down to one.
+- **Pinned at the CLI, not at a helper.** The unit tests could not see this:
+  each one opens the scope itself, and the omission was in the caller. The
+  new tests run `main()` and assert connections do not grow with the number of
+  scans in the database — 10 scans and 40 must cost the same. Both fail on the
+  code before this change (168 connections at 40 scans).
+- **Output unchanged**, checked at depths 3, 4, 5 against `ca0b81b`. Note for
+  anyone repeating it: `folder_updates` key order already varies between two
+  runs of the *same* build, at `ca0b81b` too, so compare parsed JSON rather
+  than bytes.
+
 ## 2026-08-29 — choosing a snapshot stops opening 180 connections
 
 Phase 13, from an aside in the device's report ([issue

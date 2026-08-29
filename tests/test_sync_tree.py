@@ -2,6 +2,8 @@
 """Unit tests for sync_tree policy overlay and cloud helpers."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +30,7 @@ from tools.sync_tree import (  # noqa: E402
     apply_sync_percent,
     build_tree,
     count_cloud_files_for_path,
+    main as sync_tree_main,
 )
 from tools.sync_tree_cloud import (  # noqa: E402
     ChildIndex,
@@ -1297,6 +1301,112 @@ class SnapshotSelectionQueryBudgetTests(unittest.TestCase):
             if times > 1 and statement.startswith("SELECT scan_root, scan_depth")
         }
         self.assertEqual(repeated, {}, queries.report(limit=10))
+
+
+class CliConnectionBudgetTests(unittest.TestCase):
+    """What a whole `sync_tree.py` run opens, not what one helper does.
+
+    Phase 13 put a read scope inside `select_snapshot_for_tree`, which is
+    where the CLI chooses its snapshot. It does not cover the freshness
+    report the CLI asks for afterwards, and that report builds a second
+    composite: on the device, 32 of the 35 connections a `--depth 4` run
+    opened came from that one call, after Phase 13. The unit tests above
+    cannot see it, because each one is scoped to the helper it exercises —
+    the omission lives in the caller.
+
+    So the subject here is `main()`, and the invariant is the one a caller
+    can break by forgetting: connections must not grow with the number of
+    scans the database happens to hold.
+    """
+
+    def _run(self, scans):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        db_path = os.path.join(tmpdir, "monitor.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, modified TEXT, md5 TEXT, path TEXT
+            );
+            CREATE UNIQUE INDEX idx_files_unique ON files (scan_id, parent_path, name);
+            CREATE TABLE scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME,
+                scan_type TEXT NOT NULL, status TEXT NOT NULL, duration REAL,
+                scan_root TEXT, scan_depth INTEGER
+            );
+            CREATE TABLE scan_progress (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, path TEXT,
+                status TEXT, last_checked DATETIME
+            );
+            """
+        )
+        # One full scan and a history of partial ones on top — the shape that
+        # makes the selection, and the freshness report after it, walk the list.
+        conn.execute(
+            "INSERT INTO scans (id, scan_type, status, duration) VALUES (1, 'cloud', 'success', 1)"
+        )
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size) VALUES (1, ?, ?, ?, 1)",
+            [("", "A", "dir"), ("/A", "f.txt", "file")],
+        )
+        for scan_id in range(2, scans + 1):
+            conn.execute(
+                "INSERT INTO scans (id, scan_type, status, duration)"
+                " VALUES (?, 'cloud', 'success', 1)",
+                (scan_id,),
+            )
+            conn.execute(
+                "INSERT INTO files (scan_id, parent_path, name, type, size)"
+                " VALUES (?, '/A', ?, 'file', 1)",
+                (scan_id, f"f{scan_id}.txt"),
+            )
+        conn.commit()
+        conn.close()
+
+        argv = [
+            "sync_tree.py",
+            "--db-path", db_path,
+            "--depth", "2",
+            "--format", "json",
+            "--no-local-scan",
+            "--no-use-policy",
+            "--local-root", os.path.join(tmpdir, "mirror"),
+            "--exclude-config", os.path.join(tmpdir, "no-such-config.cfg"),
+        ]
+        buf = io.StringIO()
+        with counting_queries() as queries:
+            with contextlib.redirect_stdout(buf):
+                with mock.patch.object(sys, "argv", argv):
+                    sync_tree_main()
+        return queries
+
+    def test_a_run_does_not_open_a_connection_per_scan(self):
+        """`PRAGMA journal_mode=WAL` runs once per connection, so it counts them.
+
+        Ten scans and forty describe the same two-node tree; only the history
+        differs. If the answer differs with it, something outside a read scope
+        is asking the database one scan at a time.
+        """
+        few = self._run(10)
+        many = self._run(40)
+        opened = "PRAGMA journal_mode=WAL"
+        self.assertEqual(
+            many.by_statement.get(opened, 0),
+            few.by_statement.get(opened, 0),
+            many.report(limit=10),
+        )
+
+    def test_a_run_opens_a_handful_of_connections(self):
+        """A bound loose enough to survive refactoring, tight enough to fail.
+
+        The device measured 35 for a real database before this was fixed and 4
+        after. Anything in double digits means a scope was dropped again.
+        """
+        queries = self._run(40)
+        opened = queries.by_statement.get("PRAGMA journal_mode=WAL", 0)
+        self.assertLess(opened, 10, queries.report(limit=10))
 
 
 if __name__ == "__main__":

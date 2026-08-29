@@ -866,9 +866,17 @@ def main() -> None:
     # type, and this argument is the plain set. The one imported at the top of
     # this file is the other one.
     from ydm import load_exclude_dirs as daemon_exclude_dirs
-    freshness = analyzer.snapshot_freshness(
-        exclude_dirs=daemon_exclude_dirs(args.exclude_config)
-    )
+    # In a scope of its own, because this builds a second composite. Phase 13
+    # put one inside `select_snapshot_for_tree`, which is where the snapshot is
+    # chosen; this call happens after it and was left outside every scope. On
+    # the device it accounted for 32 of the 35 connections a `--depth 4` run
+    # opened after Phase 13, and it also disabled the scan-metadata cache — no
+    # scope, nothing remembered — so the row came back five times per scan
+    # instead of once. Nothing below writes; see StorageManager.read_scope.
+    with storage.reuse_connection():
+        freshness = analyzer.snapshot_freshness(
+            exclude_dirs=daemon_exclude_dirs(args.exclude_config)
+        )
 
     if args.format == "json":
         if schema == SCHEMA_V2:
