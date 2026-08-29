@@ -231,12 +231,42 @@ as two pairs:
 
 - `skip_bisync` — the guard had nothing to compare. `no_comparable_baseline`
   means no scan of *this* mirror was recorded, so check `--local-root`;
-  `baseline_unreadable` means the database would not answer, so check the
-  database. Both cost one cycle and clear on their own.
+  `baseline_unreadable` means the database would not answer — see below for
+  what actually does that. Both cost one cycle and clear on their own.
 - `allow_bisync (error)` — bisync **ran without the guard**. The preflight
   reports its errors inside the JSON envelope and still exits 0, so this is not
   covered by the `FAILED rc=` line above. It is the one to chase: a run of these
   is issue #5 repeating.
+
+**`baseline_unreadable` means VACUUM, not "someone was writing".** `monitor.db`
+runs in WAL mode, where a writer does not block readers: a transaction held
+across the whole preflight goes unnoticed (measured — 5.5 s of
+`BEGIN EXCLUSIVE`, longer than the 5 s connect timeout, and the baseline still
+read fine). What does block a reader is `VACUUM` or a checkpoint, and step 3 of
+this same job is `report prune --apply --vacuum`. So the realistic cause is a
+prune overlapping a preflight — a hand-run one, or two job cycles overlapping
+because the vacuum took longer than the gap. Looking for a stray writer instead
+is the wrong place, which is why this paragraph exists.
+
+**All five lines were forced and confirmed on the device on 2026-08-29**
+(issue #18), against this `job_run.sh`, with a scratch `YDM_VAR_DIR`, database
+and mirror. Worth repeating after any change to the preflight, because none of
+it is exercised by an ordinary run:
+
+| Line | How to provoke it |
+|---|---|
+| `skip_bisync (no_comparable_baseline)` | a fresh database |
+| `block_bisync (ambiguous_candidates)` | two files removed and two added at matching sizes, under a policy-covered directory |
+| `allow_bisync (error)` | `--local-root` pointing at a directory that does not exist |
+| `rename preflight FAILED rc=1` | a bad `schema` value in `var/rename_policy.json` |
+| `skip_bisync (baseline_unreadable)` | another connection holding `PRAGMA locking_mode=EXCLUSIVE` |
+
+Check `var/rename_policy.json` first: under `default_mode: observe` every
+decision is `allow_bisync (observe_mode)` and no line is ever written, so an
+empty log would prove nothing. The device runs `guard`.
+
+An ordinary run — a baseline present, nothing renamed — writes no guard line at
+all. That is the sixth case, and it is the one you should normally see.
 
 **Prune is what keeps the database from growing without limit.** One local
 scan per run is ~589 rows here; left alone that reached 3865 scans and 2.14

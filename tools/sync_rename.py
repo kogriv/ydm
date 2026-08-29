@@ -868,7 +868,11 @@ def cmd_detect(args: argparse.Namespace) -> dict:
     # exactly as an unscanned mirror does, and gets the same skip. It does not
     # get the same name: `no_comparable_baseline` reads as "wrong --local-root"
     # and would send the operator looking for a fault that is not there. The
-    # scan below still runs — a lock during this query is usually gone by then.
+    # scan below still runs, and normally succeeds: the database is WAL, so an
+    # ordinary writer never gets here at all — reads are not blocked by one, as
+    # 5.5 s of `BEGIN EXCLUSIVE` confirmed on the device (issue #18). Reaching
+    # this branch takes VACUUM or a checkpoint, and by the time the scan writes
+    # that is usually over.
     baseline_error = None
     try:
         previous_scan_id = latest_successful_local_scan_id(args.db_path, args.local_root)

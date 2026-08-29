@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-29 — the guard's log lines, provoked rather than awaited
+
+Documentation and one comment. The guard writes five kinds of line to
+`var/bisync.log` and an ordinary run produces none of them, so on the device
+they had only ever been *not seen* — eight `run OK` in a row proved the code
+had arrived, not that it worked. Waiting for a real failure to find out is the
+wrong order: that failure is issue #5, which cost hours of `run OK`. All five
+were forced instead ([issue #18](https://github.com/kogriv/ydm/issues/18)),
+and `docs/ANDROID_SETUP.md` now carries the recipe for each.
+
+- **`baseline_unreadable` means VACUUM, not a stray writer.** `monitor.db` is
+  WAL, where a writer does not block readers: 5.5 s of `BEGIN EXCLUSIVE`, past
+  the 5 s connect timeout, went unnoticed. Only `PRAGMA locking_mode=EXCLUSIVE`
+  produced the line — which in production means `VACUUM` or a checkpoint, i.e.
+  `report prune --apply --vacuum`, step 3 of this same job. The comment in
+  `sync_rename.py` said the opposite and would have sent a reader looking for
+  the wrong thing.
+- **Check the mode before reading the log.** Under `default_mode: observe`
+  every decision is `allow_bisync (observe_mode)` and nothing is ever written,
+  so an empty log proves nothing. The device runs `guard`.
+- **The sixth case is the silent one**, now stated as such: a baseline present
+  and nothing renamed writes no guard line at all.
+
 ## 2026-08-29 — the tree's freshness report was outside every scope
 
 Phase 13.3, found on the device while confirming Phase 13. The device saw the
