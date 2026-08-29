@@ -1582,5 +1582,80 @@ class TestTmpfsSchemaRecovery(unittest.TestCase):
         self.assertNotIn("CRITICAL", stderr.getvalue())
 
 
+class TestAnswersRememberedOnlyForOneRead(AnalyzerTestCase):
+    """The read scope is the boundary of what may be remembered.
+
+    Choosing a snapshot asks whether a scan covers the root, and three
+    unrelated readers ask it about the same scans — four times each on the
+    author's database. Inside `reuse_connection()` the answer is remembered,
+    because that scope is the caller's promise that nothing writes in it.
+
+    These tests are about the promise expiring. A cache that outlived its
+    scope would be a correctness bug rather than a slow path: the next scope
+    would answer from rows that no longer exist.
+    """
+
+    def _partial(self, scan_id):
+        """A scan with rows under /A and nothing at the root."""
+        self.insert_scan(scan_id, "cloud", "success")
+        self.insert_files(scan_id, [("/A", "f.txt", "file", 1, None)])
+
+    def test_a_new_scope_does_not_trust_the_last_one(self):
+        self._partial(1)
+        with self.storage.reuse_connection():
+            self.assertFalse(self.analyzer.scan_covers_root(1))
+
+        # Between the scopes, the scan gains the root row that changes the
+        # answer. This is the write the scope promised would not happen
+        # *inside* it — outside, it is ordinary.
+        self.insert_files(1, [("", "A", "dir", 0, None)])
+
+        with self.storage.reuse_connection():
+            self.assertTrue(self.analyzer.scan_covers_root(1))
+
+    def test_nothing_is_remembered_outside_a_scope(self):
+        self._partial(1)
+        self.assertFalse(self.analyzer.scan_covers_root(1))
+        self.insert_files(1, [("", "A", "dir", 0, None)])
+        self.assertTrue(self.analyzer.scan_covers_root(1))
+
+    def test_the_recorded_scope_expires_with_the_scope_too(self):
+        """The other cached row, which three readers share."""
+        self.insert_scan(1, "cloud", "success")
+        with self.storage.reuse_connection():
+            conn = self.storage.get_connection()
+            self.assertEqual(self.analyzer._recorded_scope(conn, 1), (None, None))
+
+        self.conn.execute("UPDATE scans SET scan_root = '/Books' WHERE id = 1")
+        self.conn.commit()
+
+        with self.storage.reuse_connection():
+            conn = self.storage.get_connection()
+            self.assertEqual(self.analyzer._recorded_scope(conn, 1), ("/Books", None))
+
+    def test_a_nested_scope_is_the_same_read(self):
+        """Nesting must not reset the cache: it is one read, not two.
+
+        `select_snapshot_for_tree` opens a scope of its own and is called
+        from inside the walk's scope. If the inner one counted as new, the
+        outer one's answers would be thrown away at the point they start
+        paying off.
+        """
+        self._partial(1)
+        with self.storage.reuse_connection():
+            outer = self.storage.read_scope
+            with self.storage.reuse_connection():
+                self.assertEqual(self.storage.read_scope, outer)
+            self.assertEqual(self.storage.read_scope, outer)
+        self.assertIsNone(self.storage.read_scope)
+
+    def test_each_scope_gets_its_own_id(self):
+        with self.storage.reuse_connection():
+            first = self.storage.read_scope
+        with self.storage.reuse_connection():
+            second = self.storage.read_scope
+        self.assertNotEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main()

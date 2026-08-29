@@ -32,6 +32,7 @@ from tools.sync_tree_cloud import (  # noqa: E402
     ChildIndex,
     fetch_child_names,
     infer_dirs_from_files,
+    select_snapshot_for_tree,
 )
 from ydm import Analyzer, StorageManager  # noqa: E402
 from tools.sync_tree_policy import (  # noqa: E402
@@ -1201,6 +1202,101 @@ class TreeQueryBudgetTests(unittest.TestCase):
         _shallow_nodes, shallow = self._walk(3, with_percent=True)
         _deep_nodes, deep = self._walk(4, with_percent=True)
         self.assertEqual(deep.count, shallow.count, deep.report())
+
+
+class SnapshotSelectionQueryBudgetTests(unittest.TestCase):
+    """What choosing a snapshot costs, which is what Phase 12 left behind.
+
+    Phase 12 stopped the walk paying per node. The cost that remained does
+    not scale with nodes at all — it scales with how many scans the database
+    holds, and it was invisible next to the walk until the walk got cheap.
+    On the author's database an `orphans` run spent 872 queries, 360 of them
+    opening 180 connections to ask questions that had already been answered;
+    the device reported the same shape at its own scale. See
+    `tasks/ydm_menu/BACKLOG.md`, Phase 13.
+    """
+
+    SCANS = 40
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, modified TEXT, md5 TEXT, path TEXT
+            );
+            CREATE UNIQUE INDEX idx_files_unique ON files (scan_id, parent_path, name);
+            CREATE TABLE scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME,
+                scan_type TEXT NOT NULL, status TEXT NOT NULL, duration REAL,
+                scan_root TEXT, scan_depth INTEGER
+            );
+            CREATE TABLE scan_progress (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, path TEXT,
+                status TEXT, last_checked DATETIME
+            );
+            """
+        )
+        # One full scan, then a history of partial ones on top: the shape a
+        # database grows into, and the one that makes the selection walk the
+        # list. Every partial scan is asked about, repeatedly.
+        conn.execute(
+            "INSERT INTO scans (id, scan_type, status, duration) VALUES (1, 'cloud', 'success', 1)"
+        )
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size) VALUES (1, ?, ?, ?, 1)",
+            [("", "A", "dir"), ("/A", "f.txt", "file")],
+        )
+        for scan_id in range(2, self.SCANS + 1):
+            conn.execute(
+                "INSERT INTO scans (id, scan_type, status, duration) VALUES (?, 'cloud', 'success', 1)",
+                (scan_id,),
+            )
+            conn.execute(
+                "INSERT INTO files (scan_id, parent_path, name, type, size)"
+                " VALUES (?, '/A', ?, 'file', 1)",
+                (scan_id, f"f{scan_id}.txt"),
+            )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _select(self):
+        storage = StorageManager(self.db_path, use_temp_storage=False)
+        analyzer = Analyzer(storage)
+        with counting_queries() as queries:
+            select_snapshot_for_tree(analyzer, "/")
+        return queries
+
+    def test_choosing_a_snapshot_opens_one_connection(self):
+        """Not one per question asked along the way.
+
+        `PRAGMA journal_mode=WAL` runs once per connection, so counting it
+        counts connections — the 41% of the run that was pure overhead.
+        """
+        queries = self._select()
+        opened = queries.by_statement.get("PRAGMA journal_mode=WAL", 0)
+        self.assertEqual(opened, 1, queries.report())
+
+    def test_no_scan_is_asked_the_same_question_twice(self):
+        """Three readers wanted the same row; they used to fetch it each.
+
+        The bound is per statement rather than a total, because the total
+        legitimately grows with the number of scans. What must not come back
+        is the same question about the same scan, repeated.
+        """
+        queries = self._select()
+        repeated = {
+            statement: times
+            for statement, times in queries.by_statement.items()
+            if times > 1 and statement.startswith("SELECT scan_root, scan_depth")
+        }
+        self.assertEqual(repeated, {}, queries.report(limit=10))
 
 
 if __name__ == "__main__":

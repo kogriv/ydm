@@ -5,6 +5,39 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-29 — choosing a snapshot stops opening 180 connections
+
+Phase 13, from an aside in the device's report ([issue
+#16](https://github.com/kogriv/ydm/issues/16)) that reproduced here at the
+author's scale. Phase 12 stopped the tree walk paying per node; what remained
+does not scale with nodes at all — it scales with how many scans the database
+holds, and was invisible next to the walk until the walk got cheap.
+
+- **41% of an `orphans` run was opening connections.** 360 statements of 872,
+  180 connections, all before the read scope the walk enters. Now 4 and 2.
+  `orphans` costs 872 queries → **346**, the tree read path 872 → **346** at
+  depth 4 and 5, 862 → **336** at depth 3. Output byte-identical against
+  `ca0b81b` on all of them.
+- **The same row, fetched by three readers.** `scan_covers_root()`,
+  `scan_root_path()` and the retirement pass all want
+  `SELECT scan_root, scan_depth FROM scans WHERE id = ?`; the device's report
+  showed it four times per scan id. Fetched once per scan now.
+- **The read scope lives inside `select_snapshot_for_tree`**, not in its four
+  callers, so they cannot disagree about whether it is needed. It nests
+  harmlessly in the scope the walk already opens.
+- **The cache is keyed to the scope, not to the `Analyzer`.** The first
+  version remembered for the object's lifetime, which would have been a wrong
+  answer rather than a slow one: a write between two reads would have gone
+  unseen. `StorageManager.read_scope` hands out a scope *number* rather than a
+  flag, so a cache filled in one scope is never trusted in the next; nested
+  scopes share the outermost number, because they are one read. Pinned by a
+  test where a scan gains its root row between two scopes and has to change
+  its answer.
+- **Stopped short of the next one deliberately.** The top of the report is now
+  `SELECT DISTINCT parent_path … type='file'`, twice per scan. The gain
+  shrinks from here and the work grows, and it is worth measuring on the
+  device before touching.
+
 ## 2026-08-28 — one add, one daemon restart
 
 Phase 5.1: `ydm-sync-add` was a second implementation of "add this path", and

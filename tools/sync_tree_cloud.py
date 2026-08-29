@@ -319,7 +319,21 @@ def _scan_covers_path(storage, scan_id: int, root_path: str) -> bool:
 
 
 def select_snapshot_for_tree(analyzer: Analyzer, root_path: str) -> SnapshotSelection:
-    """Pick composite snapshot; warn when cloud data may not cover root_path."""
+    """Pick composite snapshot; warn when cloud data may not cover root_path.
+
+    Reads under one connection. Choosing a snapshot walks the scan list
+    several times over — building the composite, then testing coverage — and
+    each of those questions used to open its own connection: 180 of them on
+    the author's database, 360 statements of the 872 an `orphans` run spent.
+    The scope lives here rather than in the four callers so that they cannot
+    disagree about it, and nests harmlessly inside the ones that already open
+    a scope for the walk that follows. Nothing below writes.
+    """
+    with analyzer.storage.reuse_connection():
+        return _select_snapshot_for_tree(analyzer, root_path)
+
+
+def _select_snapshot_for_tree(analyzer: Analyzer, root_path: str) -> SnapshotSelection:
     from tools.sync_common import build_composite_snapshot
 
     warnings: List[str] = []

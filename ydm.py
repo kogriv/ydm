@@ -268,6 +268,9 @@ class StorageManager:
 
         #: Set while inside reuse_connection(); see that method.
         self._shared_connection = None
+        #: Incremented on entering each outermost read scope, so that a cache
+        #: filled in one scope is never mistaken for one filled in the next.
+        self._read_scope_id = 0
 
     @contextlib.contextmanager
     def reuse_connection(self):
@@ -297,12 +300,29 @@ class StorageManager:
             yield  # already inside one; the outermost scope owns the handle
             return
         conn = self.get_connection()
+        self._read_scope_id += 1
         self._shared_connection = _SharedConnection(conn)
         try:
             yield
         finally:
             self._shared_connection = None
             conn.close()
+
+    @property
+    def read_scope(self):
+        """An id for the current reuse_connection() scope, or None outside one.
+
+        Callers use this to cache an answer for the length of the scope. The
+        scope is the caller's promise that nothing writes inside it, which is
+        exactly the condition under which a read may be remembered — so a
+        cache guarded by it cannot outlive the promise that makes it safe.
+
+        It is an id rather than a bool because a cache filled in one scope
+        must not be trusted in the next: between the two, anything may have
+        written. Nested scopes share the outermost one's id, which is correct
+        — they are one read.
+        """
+        return self._read_scope_id if self._shared_connection is not None else None
 
     def get_connection(self):
         """A connection to this manager's database, configured for its mode.
@@ -1363,9 +1383,13 @@ class Analyzer:
         # Cache for composite scans: {cache_key: (composite_data, timestamp)}
         self._composite_cache = {}
         self._cache_ttl = 300  # 5 minutes TTL for cache
-        # Cache for composite scans: {cache_key: (composite_data, timestamp)}
-        self._composite_cache = {}
-        self._cache_ttl = 300  # 5 minutes TTL for cache
+        #: {scan_id: bool} filled during one read scope, and the id of the
+        #: scope that filled it. See scan_covers_root().
+        self._root_coverage = {}
+        self._root_coverage_scope = None
+        #: {scan_id: (scan_root, scan_depth)}, same rule. See _recorded_scope().
+        self._recorded_scopes = {}
+        self._recorded_scope_scope = None
 
     def get_status(self):
         """Returns summary of recent scans."""
@@ -1405,20 +1429,34 @@ class Analyzer:
             ref_id = config.get("reference_full_scan_id", None)
         return ref_id
 
-    @staticmethod
-    def _recorded_scope(conn, scan_id):
+    def _recorded_scope(self, conn, scan_id):
         """`(scan_root, scan_depth)` as the scan recorded them, or None.
 
         None means the question cannot be answered from the scans table — the
         row is missing, or the database predates the columns and was never
         opened for writing since. Callers fall back to inferring from rows.
+
+        Three unrelated readers want this same row — scan_covers_root(),
+        scan_root_path() and the retirement pass — so inside a read scope it
+        is fetched once per scan and remembered. Outside one it is fetched
+        every time; see StorageManager.read_scope.
         """
+        scope = self.storage.read_scope
+        if scope is not None:
+            if self._recorded_scope_scope != scope:
+                self._recorded_scope_scope = scope
+                self._recorded_scopes = {}
+            if scan_id in self._recorded_scopes:
+                return self._recorded_scopes[scan_id]
         try:
-            return conn.execute(
+            row = conn.execute(
                 "SELECT scan_root, scan_depth FROM scans WHERE id = ?", (scan_id,)
             ).fetchone()
         except sqlite3.OperationalError:
             return None
+        if scope is not None:
+            self._recorded_scopes[scan_id] = row
+        return row
 
     def scan_covers_root(self, scan_id):
         """True if the scan walked the whole disk, i.e. it can serve as a base.
@@ -1436,7 +1474,30 @@ class Analyzer:
         other than the disk root does too. Scans written before those columns
         existed carry NULL in both and fall back to the row test, which is the
         behaviour they were built under.
+
+        Answered from a cache while the storage is sharing a connection. Three
+        callers walk the scan list looking for a base, and building one
+        composite snapshot asked this about the same scan id four times over:
+        41% of the queries in `ydm_menu orphans` were connections opened to
+        re-answer questions already answered. The cache is keyed by scan id
+        and discarded when the scope ends — see StorageManager.read_scope for
+        why that boundary is the safe one, and `tasks/ydm_menu/BACKLOG.md`,
+        Phase 13. Outside a scope nothing is remembered.
         """
+        scope = self.storage.read_scope
+        if scope is not None:
+            if self._root_coverage_scope != scope:
+                self._root_coverage_scope = scope
+                self._root_coverage = {}
+            if scan_id in self._root_coverage:
+                return self._root_coverage[scan_id]
+        answer = self._read_root_coverage(scan_id)
+        if scope is not None:
+            self._root_coverage[scan_id] = answer
+        return answer
+
+    def _read_root_coverage(self, scan_id):
+        """scan_covers_root() without the cache; see there for the rules."""
         conn = self.storage.get_connection()
         try:
             scope = self._recorded_scope(conn, scan_id)
