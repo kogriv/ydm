@@ -5,6 +5,27 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-08-29 — the guard points down, not up
+
+`docs/ANDROID_SETUP.md` described the rename preflight as settling a
+**cloud-side** rename. It is the other direction, and the doc had already
+misled someone: issue #18 repeated the wrong framing as its own understanding
+while noting, fairly, that the cloud path had not been exercised.
+
+- **Nothing was left untested.** `find_candidates` diffs two local scans and
+  never asks the cloud, so the code cannot tell where a rename came from — a
+  test for the cloud path would be letter-for-letter the one that exists.
+- **Three things in the code say local**: `bisync treats a local rename as
+  delete+upload` at the top of `sync_rename.py`; on a match the guard runs
+  `rclone moveto` *on the remote*, carrying the local rename upward; and
+  `validate_auto_candidates` requires the old name to still exist in the cloud
+  and the new one not to — the state right after a rename below.
+- **What a cloud rename actually does** is now written down instead of
+  implied: nothing locally, so the preflight is silent and bisync brings the
+  new name down; on the next run that arrival looks like a local rename, where
+  `auto` stops at `Remote target already exists` and `guard` calls it `high`
+  and lets bisync through. Neither can lose data.
+
 ## 2026-08-29 — the guard's log lines, provoked rather than awaited
 
 Documentation and one comment. The guard writes five kinds of line to

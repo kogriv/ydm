@@ -187,11 +187,29 @@ export YDM_BINDS="--bind /storage/emulated/0/Documents:/root/notes"
 
 `tools/termux/job_run.sh`, inside the container:
 
-1. **Rename preflight** (`sync_rename.py preflight`). A cloud-side rename must
+1. **Rename preflight** (`sync_rename.py preflight`). A **local** rename must
    be settled before bisync sees a missing file and a new one and concludes
-   delete-then-upload. The preflight makes its own local scan, which is why
-   the database grows by one scan per run — and that scan is also the baseline
-   the *next* run compares against.
+   delete-then-upload — on a phone that re-uploads the whole file over mobile
+   data to land where it already is. The preflight makes its own local scan,
+   which is why the database grows by one scan per run — and that scan is also
+   the baseline the *next* run compares against.
+
+   The direction matters, and this line used to say "cloud-side", which sent a
+   reader to the opposite model of what the guard does (it did — see issue
+   #18). Three things say local: `rclone bisync treats a local rename as
+   delete+upload` at the top of `sync_rename.py`; on a match the guard runs
+   `rclone moveto` **on the remote**, carrying your local rename upward; and
+   `validate_auto_candidates` refuses unless the old name still exists in the
+   cloud and the new one does not — which is the state right after a rename
+   below and before anything reached the cloud.
+
+   A rename made *in* the cloud is not this guard's business. Nothing changes
+   locally, so two consecutive scans match and the preflight has nothing to
+   say; bisync then brings the new name down. On the *next* run that arrival
+   does look like a local rename, and both modes handle it: `auto` stops at
+   `Remote target already exists`, `guard` calls it `high` and lets bisync
+   through. Neither can lose data; the worst case is two files of one size
+   turning into `block_bisync` and a notification.
 2. **Bisync** (`sync_bisync.py run --apply`) with `--check-access`,
    `--max-delete 20` and a lock, using the **bidirectional** filter.
 3. **Prune, once a day** (`ydm.py report prune --apply --vacuum`), gated by
