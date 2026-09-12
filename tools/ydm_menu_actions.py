@@ -906,6 +906,64 @@ def print_database_line(cfg: MenuConfig) -> None:
           f" -> python3 ydm.py report prune")
 
 
+def policy_path_markers(cfg: MenuConfig) -> dict:
+    """The real marker for each path in the policy, keyed by relative path.
+
+    The detailed-status screen printed a literal `[B]` beside every
+    bidirectional entry, so a folder added and never uploaded was listed exactly
+    like a folder fully in sync — on the screen a person opens to ask precisely
+    that. `[B^]` exists to say the difference; it has to reach here too.
+
+    Derived through the same `local_state()` and `display_marker()` the tree
+    uses, not by restating their rules. Two independent derivations of one answer
+    is what G11 was: the tree and the menu drifted, and the menu spent weeks
+    offering folders that were already syncing. `test_the_status_screen_agrees_with_the_tree`
+    keeps this one honest the same way.
+    """
+    from tools.sync_common import create_storage, get_latest_successful_scan_id
+    from tools.sync_tree import count_cloud_files_for_path, count_local_files_for_path
+    from tools.sync_tree import FolderFileCounts
+    from tools.sync_tree_cloud import select_snapshot_for_tree
+    from tools.sync_tree_policy import (
+        display_marker,
+        effective_policy_state,
+        load_policy_context,
+        local_state,
+    )
+    from ydm import Analyzer
+
+    is_daemon = cfg.backend_kind == "daemon"
+    ctx = load_policy_context(cfg.policy_path, cfg.local_root, blacklist_semantics=is_daemon)
+    if not ctx.policy:
+        return {}
+    storage = create_storage(cfg.db_path)
+    analyzer = Analyzer(storage)
+    snapshot = select_snapshot_for_tree(analyzer, "/").snapshot
+    local_scan_id = get_latest_successful_scan_id(storage, "local")
+    counts = FolderFileCounts()
+    markers = {}
+    with storage.reuse_connection():
+        for rel in list(ctx.policy.get("paths") or {}):
+            path = f"/{rel}"
+            cloud_count = count_cloud_files_for_path(analyzer, snapshot, path, counts=counts)
+            local_count = (
+                count_local_files_for_path(storage, local_scan_id, path, counts=counts)
+                if local_scan_id else 0
+            )
+            mode, covered = effective_policy_state(path, ctx)
+            state = local_state(
+                policy_mode=mode, in_policy=covered,
+                cloud_count=cloud_count, local_count=local_count,
+                local_root=cfg.local_root, path=path,
+            )
+            markers[rel] = display_marker(
+                policy_mode=mode, in_policy=covered, local_state_value=state,
+                has_synced_descendant=False,
+                v1_sync_status="full" if covered else "excluded",
+            )
+    return markers
+
+
 def print_detailed_status(cfg: MenuConfig) -> None:
     from tools.sync_bisync import cmd_status
 
@@ -918,12 +976,13 @@ def print_detailed_status(cfg: MenuConfig) -> None:
         print(f"Last run: {status.last_run_at} ({status.last_status})")
         print(f"Lock: {status.lock_held} pid={status.lock_pid}")
         print(f"Resync needed: {status.resync_needed}")
+    markers = policy_path_markers(cfg)
     print("Bidirectional:")
     for p in status.bidirectional:
-        print(f"  [B] {p}")
+        print(f"  {markers.get(p, '[B]')} {p}")
     print("Download-only:")
     for p in status.download_only:
-        print(f"  [D] {p}")
+        print(f"  {markers.get(p, '[D]')} {p}")
     if status.disabled:
         print("Disabled:")
         for p in status.disabled:

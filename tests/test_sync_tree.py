@@ -25,6 +25,7 @@ from query_count import counting_queries  # noqa: E402
 from tools.sync_common import CompositeSnapshot  # noqa: E402
 from tools.sync_tree import (  # noqa: E402
     FolderFileCounts,
+    TreeNode,
     LocalDirIndex,
     _count_files_for_prefix,
     _folder_file_counts,
@@ -205,6 +206,11 @@ class SyncTreePolicyTests(unittest.TestCase):
         ("[B~]", dict(policy_mode="bidirectional", in_policy=True,
                       local_state_value="partial",
                       has_synced_descendant=False, v1_sync_status="full")),
+        # On disk, in the policy, absent from the cloud. Rendered [B] until
+        # 2026-09-12, i.e. "fully synced" about a folder with one copy.
+        ("[B^]", dict(policy_mode="bidirectional", in_policy=True,
+                      local_state_value="not_uploaded",
+                      has_synced_descendant=False, v1_sync_status="full")),
         ("[D]", dict(policy_mode="download_only", in_policy=True,
                      local_state_value="materialized",
                      has_synced_descendant=False, v1_sync_status="excluded")),
@@ -250,7 +256,7 @@ class SyncTreePolicyTests(unittest.TestCase):
         """A truth table that quietly stops being exhaustive is worse than none."""
         self.assertEqual(
             {expected for expected, _ in self.MARKER_TABLE},
-            {"[B]", "[B?]", "[B~]", "[D]", "[D?]", "[X]", "[P]", "[L]", "[.]"},
+            {"[B]", "[B^]", "[B?]", "[B~]", "[D]", "[D?]", "[X]", "[P]", "[L]", "[.]"},
         )
 
     def test_disabled_wins_over_everything_else(self):
@@ -1337,6 +1343,46 @@ class SnapshotSelectionQueryBudgetTests(unittest.TestCase):
             if times > 1 and statement.startswith("SELECT scan_root, scan_depth")
         }
         self.assertEqual(repeated, {}, queries.report(limit=10))
+
+
+class SyncPercentTests(unittest.TestCase):
+    """What the number may claim, and the one claim that could cost data.
+
+    `sync_percent` is local/cloud — how much of the cloud is on the disk. With an
+    empty cloud it answered 100.0, which reads as "fully synced" and was printed
+    next to `[B]` for a folder whose only copy was the phone's. The owner found
+    it on 1.6 GB that had never been uploaded.
+    """
+
+    def _percent(self, cloud_count, local_count):
+        node = TreeNode(path="/x", name="x")
+        counts = FolderFileCounts()
+        analyzer = mock.Mock()
+        analyzer.storage = mock.Mock()
+        with mock.patch("tools.sync_tree.count_cloud_files_for_path", return_value=cloud_count), \
+             mock.patch("tools.sync_tree.count_local_files_for_path", return_value=local_count):
+            apply_sync_percent(node, analyzer, object(), 1, "/nowhere", counts=counts)
+        return node.sync_percent
+
+    def test_an_empty_cloud_with_files_on_disk_claims_nothing(self):
+        self.assertIsNone(self._percent(cloud_count=0, local_count=166))
+
+    def test_an_empty_folder_is_still_zero(self):
+        """Nothing anywhere is a real 0, not an unanswerable question."""
+        self.assertEqual(self._percent(cloud_count=0, local_count=0), 0.0)
+
+    def test_the_ordinary_ratio_is_unchanged(self):
+        self.assertEqual(self._percent(cloud_count=27, local_count=27), 100.0)
+        self.assertEqual(self._percent(cloud_count=4, local_count=1), 25.0)
+
+    def test_no_local_scan_still_means_no_answer(self):
+        node = TreeNode(path="/x", name="x")
+        analyzer = mock.Mock()
+        analyzer.storage = mock.Mock()
+        with mock.patch("tools.sync_tree.count_cloud_files_for_path", return_value=3):
+            apply_sync_percent(node, analyzer, object(), None, "/nowhere",
+                               counts=FolderFileCounts())
+        self.assertIsNone(node.sync_percent)
 
 
 class LocalOnlyFoldersTests(unittest.TestCase):

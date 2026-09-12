@@ -20,6 +20,7 @@ SCHEMA_V2 = "sync_tree:v2"
 
 LEGEND_LINES = [
     "[B] bidirectional (bisync)",
+    "[B^] bidirectional, nothing in the cloud yet (not uploaded)",
     "[D] download-only",
     "[L] local orphan (on disk, not in policy)",
     "[.] cloud only",
@@ -175,6 +176,18 @@ def local_state(
             return "missing"
         if cloud_count > 0 and local_count < cloud_count:
             return "partial"
+        if policy_mode == "bidirectional" and cloud_count == 0 and local_count > 0:
+            # On disk, in the policy, and the cloud has none of it. Reported as
+            # `materialized` until 2026-09-12, which rendered `[B] 100%` — the
+            # tree asserting "fully synced" about data that exists in exactly one
+            # place. The owner caught it on 1.6 GB that had never been uploaded
+            # because the resync after the add had not run. Anyone trusting that
+            # and clearing local space would have lost the only copy.
+            #
+            # Not an error by itself: it is also what every folder looks like
+            # between being added and being synced for the first time. It is a
+            # state, and it needed a name.
+            return "not_uploaded"
         return "materialized"
     if materialized and not in_policy:
         return "orphan"
@@ -200,6 +213,10 @@ def display_marker(
             return "[B?]"
         if local_state_value == "partial":
             return "[B~]"
+        if local_state_value == "not_uploaded":
+            # The mirror image of [B?]: there, the cloud has it and the disk does
+            # not. See local_state() for why claiming [B] here was dangerous.
+            return "[B^]"
         return "[B]"
     if in_policy and policy_mode == "download_only":
         if local_state_value in {"missing", "cloud_only"}:

@@ -101,7 +101,7 @@ class TestBenchIsolation(BenchTestCase):
         produced = set(expectations("rclone").values()) | set(expectations("daemon").values())
         self.assertEqual(
             produced,
-            {"[B]", "[B?]", "[B~]", "[D]", "[D?]", "[X]", "[P]", "[L]", "[.]"},
+            {"[B]", "[B^]", "[B?]", "[B~]", "[D]", "[D?]", "[X]", "[P]", "[L]", "[.]"},
         )
 
 
@@ -379,6 +379,72 @@ class TestMenuOnBench(BenchTestCase):
         listed = {e["cloud_path"] for e in json.loads(self.menu("orphans").stdout)["orphans"]}
         self.assertIn("/Books/Keep", listed)
         self.assertIn("/Books/Math", listed)
+
+    def test_the_status_screen_agrees_with_the_tree(self):
+        """A third place deriving markers, pinned before it can drift.
+
+        The detailed-status screen printed a literal `[B]` next to every
+        bidirectional entry, so a folder added and never uploaded looked exactly
+        like one fully in sync — on the screen a person opens to ask that very
+        question. It reads the real marker now, and this keeps the two answers
+        the same: G11 was two derivations of one answer drifting apart, and it
+        cost weeks of the menu offering folders that were already syncing.
+        """
+        from unittest import mock
+
+        from tools.ydm_menu_actions import policy_path_markers
+        from tools.ydm_menu_config import MenuConfig
+
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            cfg = MenuConfig.from_env_and_args(
+                db_path=self.bench.db_path,
+                local_root=self.bench.local_root,
+                policy_path=self.bench.policy_path,
+                exclude_config=self.bench.exclude_config,
+                backend="rclone",
+                plain=True,
+            )
+            from_status = policy_path_markers(cfg)
+        from_tree = render_markers(self.bench, "rclone", depth=4)
+        mismatches = {
+            rel: (marker, from_tree.get(f"/{rel}"))
+            for rel, marker in from_status.items()
+            if f"/{rel}" in from_tree and from_tree[f"/{rel}"] != marker
+        }
+        self.assertEqual(mismatches, {}, "status screen vs tree")
+        self.assertIn("pending", from_status, from_status)
+        self.assertEqual(from_status["pending"], "[B^]", from_status)
+
+    def test_the_status_screen_prints_what_it_derived(self):
+        """The helper being right is not the screen being right.
+
+        The first version of the check above tested `policy_path_markers` alone,
+        and putting the hard-coded `[B]` back into the screen left it passing —
+        the same shape of gap as the resync crash: a test next to the code rather
+        than on the path a person walks. So this one reads the output.
+        """
+        import contextlib
+        import io
+        from unittest import mock
+
+        from tools.ydm_menu_actions import print_detailed_status
+        from tools.ydm_menu_config import MenuConfig
+
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            cfg = MenuConfig.from_env_and_args(
+                db_path=self.bench.db_path,
+                local_root=self.bench.local_root,
+                policy_path=self.bench.policy_path,
+                exclude_config=self.bench.exclude_config,
+                backend="rclone",
+                plain=True,
+            )
+            with contextlib.redirect_stdout(buffer):
+                print_detailed_status(cfg)
+        text = buffer.getvalue()
+        self.assertIn("[B^] pending", text, text)
+        self.assertNotIn("[B] pending", text, text)
 
     def test_the_orphan_list_agrees_with_the_tree(self):
         """Two ways of asking the same question must not diverge.

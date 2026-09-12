@@ -5,6 +5,41 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-12 — the tree called 1.6 GB "100% synced" with nothing in the cloud
+
+Phase 16, reported by the owner: "в дереве как будто она синкнута на 100%, но в
+облаке по факту её нет". Of everything found today this is the one that could
+cost data — `rclone lsf` showed only `База/`, so the 1.6 GB the tree called fully
+synced existed in exactly one place. See `tasks/ydm_menu/GAP.md` G13.
+
+- **Two independent causes, both lying the same way.** `sync_percent` is
+  local/cloud — how much of the cloud is on the disk — and with an empty cloud it
+  answered `100.0`. Consistent with the metric's definition; read as "all
+  synced". And `local_state()` had no value for "in the policy, on disk, cloud
+  has none of it", so it returned `materialized` and the marker came out `[B]`.
+- **`[B^]`, a tenth marker, and this time it earns its place.** Phase 14
+  deliberately refused one because that case was already described correctly.
+  This one was described *wrongly*: it passed for finished. `[B?]` — cloud has
+  it, disk does not — has a name; the opposite direction had none.
+- **Not an error state.** It is what every folder looks like between being added
+  and its first sync. Which is exactly why it needed a name instead of passing as
+  complete.
+- **The percentage now says nothing** rather than 100: with an empty cloud it is
+  the question that is missing, not the answer. An empty folder is still `0.0`.
+- **Mutation-checked from both ends**: restoring `materialized` + `100.0` fails
+  four tests, and dropping the `[B^]` branch from `display_marker` fails the
+  marker table.
+- **The detailed-status screen said `[B]` as a literal**, so the one screen
+  someone opens to ask "what happened to the folder I added" answered "synced"
+  about a folder with nothing in the cloud. It derives the real marker now,
+  through the same two functions the tree uses, with an invariant pinning the two
+  together — a third independent derivation of one answer is what G11 was.
+- **A note on a test of mine that did not test anything**: the first version of
+  that invariant called the helper directly, and putting the literal `[B]` back
+  into the screen left it green. Same shape as the resync crash — a check beside
+  the code instead of on the path a person walks. The screen's output is asserted
+  now, and the mutation fails it.
+
 ## 2026-09-12 — 51 of the 52 folders offered as "not in sync" were syncing
 
 Phase 15, found while the owner tried the Phase 14 navigation. Two defects, one

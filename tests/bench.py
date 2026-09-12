@@ -182,6 +182,18 @@ SAMPLE_TREE: List[BenchPath] = [
             "no orphans — nothing is outside it",
     ),
     BenchPath(
+        "/pending", "bidirectional", cloud_files=0, local_files=1, local_dir=True,
+        expect_rclone="[B^]", expect_daemon="[B^]",
+        in_cloud=False,
+        why="added to the policy and never uploaded: on disk, and the cloud has "
+            "none of it. Rendered [B] with sync_percent 100.0 until 2026-09-12 — "
+            "the tree calling 1.6 GB fully synced when the only copy was on the "
+            "phone, which is the one wrong answer here that can cost data. It is "
+            "also the normal state between adding a folder and the first sync, so "
+            "it is a state and not an error. The mirror image of [B?], where the "
+            "cloud has it and the disk does not",
+    ),
+    BenchPath(
         "/pro/inherited", None, cloud_files=1, local_files=1, local_dir=True,
         expect_rclone="[B]", expect_daemon="[B]",
         why="inside a bidirectional folder with no entry of its own — the case "

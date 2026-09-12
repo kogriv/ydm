@@ -496,8 +496,15 @@ def apply_sync_percent(
 
     if local_scan_id is None:
         node.sync_percent = None
+    elif cloud_count == 0 and local_count > 0:
+        # The metric is local/cloud — how much of the cloud is here — so with an
+        # empty cloud it has nothing to measure. It used to answer 100.0, which
+        # read as "fully synced" next to a folder whose only copy was on the
+        # phone; `[B^]` says what is actually going on. None rather than 0.0
+        # because the question, not the answer, is the thing that is missing.
+        node.sync_percent = None
     elif cloud_count == 0:
-        node.sync_percent = 100.0 if local_count > 0 else 0.0
+        node.sync_percent = 0.0
     else:
         node.sync_percent = round((local_count / cloud_count) * 100.0, 1)
 
