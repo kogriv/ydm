@@ -51,6 +51,17 @@ class JobRunTestCase(unittest.TestCase):
         self.mirror = os.path.join(self.tmpdir, "mirror")
         os.makedirs(self.mirror)
 
+        # A recorder in place of termux-notification. Without it the script
+        # reaches Termux's own binary by absolute path — PATH cannot intercept
+        # that — and a suite run on the device sent a real "bisync blocked"
+        # notification to the phone, indistinguishable from the guard stopping
+        # a live sync. It happened, on 2026-09-09.
+        self.notify_log = os.path.join(self.tmpdir, "notifications")
+        self.notify_bin = os.path.join(self.tmpdir, "notify-stub")
+        with open(self.notify_bin, "w", encoding="utf-8") as handle:
+            handle.write('#!/bin/sh\nprintf "%s\\n" "$*" >> "$NOTIFY_LOG"\n')
+        os.chmod(self.notify_bin, 0o755)
+
         bindir = os.path.join(self.tmpdir, "bin")
         os.makedirs(bindir)
         stub = os.path.join(bindir, "python3")
@@ -78,6 +89,8 @@ class JobRunTestCase(unittest.TestCase):
             "STUB_PREFLIGHT_RC": str(rc),
             "STUB_TRACE": self.trace,
             "YDM_VAR_DIR": self.var_dir,
+            "YDM_NOTIFY_BIN": self.notify_bin,
+            "NOTIFY_LOG": self.notify_log,
         })
         result = subprocess.run(
             ["bash", str(JOB_RUN), "--local-root", self.mirror,
@@ -96,6 +109,12 @@ class JobRunTestCase(unittest.TestCase):
     def bisync_ran(self):
         return os.path.exists(self.trace)
 
+    def notifications(self):
+        if not os.path.exists(self.notify_log):
+            return []
+        with open(self.notify_log, encoding="utf-8") as handle:
+            return [line for line in handle.read().splitlines() if line]
+
 
 class GuardDecisionsReachTheLog(JobRunTestCase):
     """A stopped sync must not look like a job that never fired."""
@@ -109,6 +128,36 @@ class GuardDecisionsReachTheLog(JobRunTestCase):
         self.run_job("block_bisync", "ambiguous_candidates")
         self.assertIn("block_bisync (ambiguous_candidates)", self.log())
         self.assertFalse(self.bisync_ran())
+
+    def test_a_block_is_the_only_decision_that_notifies(self):
+        """The log is the record; the notification is the interruption.
+
+        A block is the one verdict a person has to act on, so it is the one
+        that reaches the phone. The rest resolve themselves in a cycle and must
+        stay quiet — a notification per skip would train the operator to swipe
+        the important one away too.
+
+        This is also the assertion that keeps a test suite from notifying the
+        device it runs on: it can only pass while the binary is reached through
+        `YDM_NOTIFY_BIN`, which is what stops the real one from being called.
+        """
+        self.run_job("block_bisync", "ambiguous_candidates")
+        self.assertEqual(len(self.notifications()), 1, self.notifications())
+        self.assertIn("bisync blocked", self.notifications()[0])
+
+    def test_a_skip_does_not_reach_the_phone(self):
+        self.run_job("skip_bisync", "no_comparable_baseline")
+        self.assertEqual(self.notifications(), [])
+
+    def test_a_guardless_run_does_not_reach_the_phone_either(self):
+        """`allow_bisync (error)` is issue #5, and it goes to the log only.
+
+        It is the line worth chasing, but it is not actionable in the moment:
+        bisync already ran, and the next run either repeats it or does not.
+        """
+        self.run_job("allow_bisync", "error")
+        self.assertIn("allow_bisync (error)", self.log())
+        self.assertEqual(self.notifications(), [])
 
     def test_the_reason_is_the_one_the_preflight_gave(self):
         """`baseline_unreadable` and `no_comparable_baseline` both skip.

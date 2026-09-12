@@ -54,10 +54,17 @@ cd "$PROJECT_DIR" || exit 2
 [ -n "$FILTER_PATH" ] || FILTER_PATH="${LOCAL_ROOT%/}.bisync.filters"
 [ -n "$DB_PATH" ] || DB_PATH="$PROJECT_DIR/monitor.db"
 
+# The absolute path is deliberate — Termux's bin is not on the container's PATH
+# — but it made the notification the one thing here a test could not reach or
+# stub, so `tests/test_job_run.py` sent a real one to the phone every time it
+# exercised the block branch. Invisible on CI, where the binary does not exist;
+# on the device it looked exactly like the guard stopping a live sync. Named
+# through a variable so a test can point it at a recorder and assert on it.
+NOTIFY_BIN="${YDM_NOTIFY_BIN:-/data/data/com.termux/files/usr/bin/termux-notification}"
+
 notify() {
-    local binary=/data/data/com.termux/files/usr/bin/termux-notification
-    [ -x "$binary" ] || return 0
-    "$binary" --title "$1" --content "$2" >/dev/null 2>&1 || true
+    [ -x "$NOTIFY_BIN" ] || return 0
+    "$NOTIFY_BIN" --title "$1" --content "$2" >/dev/null 2>&1 || true
 }
 
 # The same file sync_bisync.py appends to. It resolves this through

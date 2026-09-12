@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-09 — the test suite was notifying the phone
+
+Running `python3 -m unittest discover -s tests` on the device sent a real
+Android notification reading *"bisync blocked; run sync_rename.py status"* —
+the guard's one actionable alarm, from a test. The owner saw it and reasonably
+took it for a stopped sync. It was not: `var/bisync.log` said `run OK` on every
+cycle and the live guard answered `allow_bisync (no_candidates)` all day.
+
+- **PATH could not reach it.** `job_run.sh` calls Termux's binary by absolute
+  path, which is right — Termux's bin is not on the container's PATH — but it
+  left the notification the one effect in the script no test could stub. The
+  binary is now named through `YDM_NOTIFY_BIN`.
+- **Invisible on CI, by construction.** GitHub Actions has no
+  `termux-notification`, so `[ -x ]` fails and the call is silently skipped.
+  Only a device run can show this, which is the same blind spot as the eight
+  rclone checks CI skips.
+- **The stub turned a side effect into coverage.** Three new assertions say
+  which verdicts reach the phone: a block does, and `skip_bisync` and
+  `allow_bisync (error)` do not. A notification per skip would train the
+  operator to swipe away the one that matters. None of this was tested before,
+  and the block assertion can only pass while the override is in place — so it
+  is also what keeps the suite quiet.
+
 ## 2026-08-29 — the guard points down, not up
 
 `docs/ANDROID_SETUP.md` described the rename preflight as settling a
