@@ -34,6 +34,13 @@ synced existed in exactly one place. See `tasks/ydm_menu/GAP.md` G13.
   about a folder with nothing in the cloud. It derives the real marker now,
   through the same two functions the tree uses, with an invariant pinning the two
   together — a third independent derivation of one answer is what G11 was.
+- **The resync screen now names what will go up.** It listed all eight folders
+  in scope identically and then warned "Path1 may overwrite Path2" — alarming and
+  uninformative, with the folder holding 1.6 GB the cloud has never seen looking
+  exactly like seven already in sync. The pending one is marked, from the same
+  `[B^]` rather than a rule of its own. (The owner's "мой шаг — длинная
+  команда?" was a fair hit on the reply, not the code: menu 6 already previews
+  and confirms, and leading with the rclone line was the mistake.)
 - **A note on a test of mine that did not test anything**: the first version of
   that invariant called the helper directly, and putting the literal `[B]` back
   into the screen left it green. Same shape as the resync crash — a check beside

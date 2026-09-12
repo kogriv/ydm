@@ -415,6 +415,40 @@ class TestMenuOnBench(BenchTestCase):
         self.assertIn("pending", from_status, from_status)
         self.assertEqual(from_status["pending"], "[B^]", from_status)
 
+    def test_the_resync_scope_names_what_will_be_uploaded(self):
+        """The one thing a person needs before answering yes to a resync.
+
+        The screen listed every folder in scope identically and then warned that
+        "Path1 may overwrite Path2", which is alarming and uninformative: the
+        folder the cloud has never seen looked exactly like the ones already in
+        sync. Nothing else on the way to that prompt distinguishes them.
+        """
+        from unittest import mock
+
+        from tools.ydm_menu_actions import bisync_scope_lines, render_filters_apply
+        from tools.ydm_menu_config import MenuConfig
+
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            cfg = MenuConfig.from_env_and_args(
+                db_path=self.bench.db_path,
+                local_root=self.bench.local_root,
+                policy_path=self.bench.policy_path,
+                exclude_config=self.bench.exclude_config,
+                backend="rclone",
+                plain=True,
+            )
+            # The scope is read from the rendered filter, which the bench has no
+            # reason to write until something asks for it.
+            self.assertTrue(render_filters_apply(cfg).ok)
+            lines = bisync_scope_lines(cfg)
+        text = "\n".join(lines)
+        pending = [line for line in lines if "will be uploaded" in line]
+        self.assertEqual(len(pending), 1, text)
+        self.assertIn("/pending/", pending[0], text)
+        self.assertIn("nothing in the cloud yet", text)
+        # And the folders that are in sync must not be tarred with it.
+        self.assertNotIn("/pro/   <- not in the cloud", text)
+
     def test_the_status_screen_prints_what_it_derived(self):
         """The helper being right is not the screen being right.
 

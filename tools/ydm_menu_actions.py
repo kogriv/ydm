@@ -101,13 +101,28 @@ def _bisync_ns(cfg: MenuConfig, command: str = "run", **extra) -> argparse.Names
 def bisync_scope_lines(cfg: MenuConfig) -> List[str]:
     filters = load_sync_filters(cfg.bisync_filter_path)
     paths = sorted(set(filters.include_dirs))
+    # Which of these is about to be *uploaded* rather than compared. The screen
+    # listed all eight identically and then warned that "Path1 may overwrite
+    # Path2", which is alarming and says nothing: the folder holding 1.6 GB that
+    # the cloud has never seen looked exactly like seven folders already in sync.
+    markers = policy_path_markers(cfg)
     lines = [
         "",
         "Bisync scope (only these folders — NOT the whole disk):",
     ]
+    pending = []
     for path in paths:
-        lines.append(f"  + /{path}/")
+        if markers.get(path) == "[B^]":
+            pending.append(path)
+            lines.append(f"  + /{path}/   <- not in the cloud yet, will be uploaded")
+        else:
+            lines.append(f"  + /{path}/")
     lines.append(f"  ({len(paths)} folders, filter: {cfg.bisync_filter_path})")
+    if pending:
+        lines.append(
+            f"  {len(pending)} of them {'has' if len(pending) == 1 else 'have'} "
+            "nothing in the cloud yet — this run is what sends it up."
+        )
     lines.append(
         "Resync scans all listed folders to rebuild baseline — may take several minutes."
     )
