@@ -1771,6 +1771,42 @@ class TestAddScreensConfirm(BenchTestCase):
             f"policy and filters changed but no baseline was recorded:\n{text[-2000:]}",
         )
 
+    def test_menu_six_applies_the_resync_it_offers(self):
+        """Menu 6 answered yes, which is the path the owner was told to use.
+
+        Twice now the crash has been on an apply branch no test walked. The first
+        was `Namespace has no attribute 'force_filter'`, reached through
+        `screen_add_orphans`; the test written for it covered that screen, and
+        menu 6 is a *different* screen whose own yes-branch called a name it had
+        never imported — `NameError: print_bisync_scope`. Covering one entrance
+        to a room is not covering the room.
+
+        Runs a real `rclone bisync --resync` against the bench's fake cloud.
+        """
+        self._require_rclone()
+        import contextlib
+        import io
+        from unittest import mock
+
+        from tools.ydm_menu_actions import render_filters_apply
+
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            cfg = self._cfg_against_the_fake_cloud()
+            self.assertTrue(render_filters_apply(cfg).ok)
+            from tools.ydm_menu_prompts import scripted_reader
+
+            with contextlib.redirect_stdout(buffer):
+                __import__("tools.ydm_menu", fromlist=["x"]).screen_resync(
+                    cfg, scripted_reader(["y"])
+                )
+        text = buffer.getvalue()
+        self.assertIn("Bisync resync completed", text, text)
+        self.assertTrue(
+            self._resync_is_recorded_for_the_current_filter(),
+            f"menu 6 said yes and no baseline was written:\n{text[-2000:]}",
+        )
+
     def test_forcing_a_local_only_folder_resyncs_too(self):
         """G9 and the resync path in one pass, since that is how it arrived.
 

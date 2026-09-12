@@ -18,6 +18,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -616,6 +617,41 @@ class OrphanBrowsingTests(unittest.TestCase):
         self.assertTrue(label.startswith("pro/"), label)
         addable = format_browse_row(self._rows(entries, "pro")[0])
         self.assertIn("cloud files: 3", addable, addable)
+
+
+class NoUndefinedNamesTests(unittest.TestCase):
+    """A name the module never imported compiles fine and raises when reached.
+
+    CI compiles every file, which catches syntax and nothing else. Twice the
+    crash on the device was on a branch no test walked, and the second one —
+    `NameError: print_bisync_scope` from menu 6 — was visible to a static check
+    all along. One sweep over the tree answers it for every file at once, which
+    no amount of per-branch testing can promise.
+
+    Only undefined names are asserted. The rest of what pyflakes reports here is
+    style, and failing on it would mean a cleanup pass before any unrelated fix.
+    """
+
+    def test_no_file_calls_a_name_it_never_defined(self):
+        if shutil.which("python3") is None:  # pragma: no cover
+            self.skipTest("no interpreter to run the checker with")
+        try:
+            import pyflakes  # noqa: F401
+        except ImportError:
+            self.skipTest("pyflakes is not installed here (CI installs it)")
+        files = subprocess.run(
+            ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True,
+            check=True,
+        ).stdout.split()
+        self.assertTrue(files, "git listed no python files")
+        proc = subprocess.run(
+            [sys.executable, "-m", "pyflakes", *files],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        undefined = [
+            line for line in proc.stdout.splitlines() if "undefined name" in line
+        ]
+        self.assertEqual(undefined, [], "\n".join(undefined))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from tools.ydm_menu_actions import (  # noqa: E402
     policy_children_of,
     offer_resync_if_needed,
     preview_add,
+    print_bisync_scope,
     print_cloud_local_diff,
     print_detailed_status,
     print_trash_overview,

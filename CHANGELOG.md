@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-12 — menu 6 crashed on a name it never imported
+
+Third crash in a row on an "apply" branch, reported from the device:
+`NameError: name 'print_bisync_scope' is not defined`, on menu 6 answered yes —
+the path this session had just told the owner to use.
+
+- **One line, and it was visible to a static check all along.**
+  `screen_resync` called a helper `ydm_menu.py` never imported. CI compiles every
+  file, and an unimported name compiles fine — it raises only when someone
+  reaches that line. A sweep over the tree found exactly one such name in the
+  whole project: this one.
+- **CI now gates undefined names**, and a test does the same locally (skipped
+  where pyflakes is absent). Only undefined names: the rest of what pyflakes
+  reports here is style, and failing the build on it would block unrelated work
+  without preventing a crash.
+- **Covering one entrance is not covering the room.** The previous fix added a
+  test for the resync accepted through `screen_add_orphans`; menu 6 is a
+  different screen with its own yes-branch, and no test walked it. It does now,
+  against the bench's fake cloud, asserting the recorded baseline.
+- **And the test for undefined names first failed on an undefined name** of its
+  own — the import landed in the wrong file's import block. Fixed before commit,
+  noted because it is the same mistake one layer up.
+
 ## 2026-09-12 — the tree called 1.6 GB "100% synced" with nothing in the cloud
 
 Phase 16, reported by the owner: "в дереве как будто она синкнута на 100%, но в

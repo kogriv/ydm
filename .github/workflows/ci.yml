@@ -25,6 +25,18 @@ jobs:
       - name: Compile every .py file (syntax check)
         run: find . -name "*.py" -not -path "./.git/*" -print0 | xargs -0 python -m py_compile
 
+      # py_compile cannot see this: an unimported name is a runtime error, so a
+      # file that calls one compiles cleanly and crashes when a person reaches
+      # that line. It happened on the device — `NameError: print_bisync_scope`
+      # from menu 6, on the branch that applies a resync. Only undefined names
+      # are gated: the other pyflakes warnings here are style, and failing the
+      # build on them would block unrelated work without preventing a crash.
+      - name: No undefined names
+        run: |
+          pip install pyflakes
+          found=$(python -m pyflakes $(git ls-files '*.py') | grep 'undefined name' || true)
+          if [ -n "$found" ]; then echo "$found"; exit 1; fi
+
       - name: --help smoke test (catches broken argparse config)
         run: |
           python ydm.py --help
