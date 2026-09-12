@@ -33,6 +33,7 @@ from tests.bench import (  # noqa: E402
     expectations,
     make_daemon_policy,
     read_exclude_dirs,
+    expected_listing,
     render_markers,
 )
 
@@ -517,12 +518,7 @@ class TestRcloneOnTheBench(BenchTestCase):
         self.assertEqual(payload["materialize"]["returncode"], 0, payload["materialize"])
 
         copied = sorted(os.listdir(os.path.join(target, "pro")))
-        expected = sorted(
-            f"f{i}.txt" for i in range(
-                next(e.cloud_files for e in SAMPLE_TREE if e.path == "/pro")
-            )
-        )
-        self.assertEqual(copied, expected)
+        self.assertEqual(copied, expected_listing("/pro"))
         with open(filter_path, encoding="utf-8") as handle:
             self.assertIn("pro", handle.read())
 
@@ -586,7 +582,9 @@ class TestRcloneOnTheBench(BenchTestCase):
         baseline = bisync("resync", "--apply")
         self.assertIsNone(baseline.get("error"), baseline)
         self.assertFalse(baseline["dry_run"])
-        self.assertEqual(sorted(os.listdir(os.path.join(target, "pro"))), ["f0.txt", "f1.txt"])
+        self.assertEqual(
+            sorted(os.listdir(os.path.join(target, "pro"))), expected_listing("/pro")
+        )
 
         following = bisync("run")
         self.assertIsNone(following.get("error"), following)

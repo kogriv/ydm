@@ -120,13 +120,28 @@ def effective_policy_state(path: str, ctx: PolicyContext) -> Tuple[Optional[str]
     """Return (mode, covered) for a path under the context's semantics.
 
     Under blacklist semantics every path is covered: it inherits `disabled`
-    from the nearest matching entry, and is bidirectional otherwise. Under
-    whitelist semantics only an exact policy entry counts as covered, which is
-    what `[L]` (local orphan, not in policy) is built on.
+    from the nearest matching entry, and is bidirectional otherwise.
+
+    Under whitelist semantics coverage is inherited from a **synced** ancestor
+    and from nothing else. An exact entry counts, obviously; so does sitting
+    inside a `bidirectional` or `download_only` folder, because that is what the
+    rendered filter says — one `+ <entry>/**` line, which matches every path
+    below it. Until 2026-09-12 only an exact entry counted, so every folder
+    inside a synced folder reported as `[L]`, "local, not in sync", while rclone
+    was syncing it. On the device that was 51 of the 52 folders the menu offered
+    to add; `rclone lsf --filter-from` admitted 40 of them under one entry.
+
+    A `disabled` ancestor confers nothing, and that asymmetry is the filter's
+    too: a disabled entry renders no include line at all, so what sits below it
+    is excluded by the trailing `- **` unless it was included in its own right.
+    That is why a folder on disk inside a disabled tree is still `[L]` — it
+    really is local and really is not syncing.
     """
     mode = policy_mode_for_path(path, ctx.policy)
     if not ctx.blacklist_semantics:
-        return mode, path_in_policy(path, ctx.policy)
+        if path_in_policy(path, ctx.policy):
+            return mode, True
+        return mode, mode in {"bidirectional", "download_only"}
     if ctx.policy is None:
         return mode, path_in_policy(path, ctx.policy)
     if rel_path_from_cloud(path) == "":

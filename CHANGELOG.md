@@ -5,6 +5,35 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-12 — 51 of the 52 folders offered as "not in sync" were syncing
+
+Phase 15, found while the owner tried the Phase 14 navigation. Two defects, one
+of them the real cause of the flat list that started all this — see
+`tasks/ydm_menu/GAP.md` G11 and G12.
+
+- **Whitelist coverage was exact-match, and the filter is not.** A policy entry
+  renders as one `+ <entry>/**` line, which matches the whole subtree, so every
+  folder inside a synced folder reported `[L]` — "local, not in sync" — while
+  rclone synced it. Checked with the filter rather than by reasoning:
+  `rclone lsf --filter-from` admits 40 directories under the single entry
+  `pro/mathcoach`, and all 40 sat in the list of folders to add. On the device
+  the list went **52 rows to 1**, and that one really is outside the policy.
+- **Which also explains G10.** The 24 `pro/mathcoach/*` rows in the original
+  32-row screen were not a navigation problem; they should not have been there.
+- **`disabled` still covers nothing, and that asymmetry is the filter's too**: a
+  disabled entry renders no include line, so what is under it falls to the
+  trailing `- **`. A folder on disk inside a disabled tree is genuinely local and
+  genuinely unsynced, which is why `/Books/Math/АнГем` stays `[L]`.
+- **The bench had no row for "child of a synced folder"**, which is how this
+  survived. Added as `/pro/inherited`. Two of its checks also listed a copied
+  folder's contents from `cloud_files` alone — the same assumption that an entry
+  has no children — and now derive files *and* child folders.
+- **Adding and descending are separate keystrokes** (G12). Phase 14's rule left
+  a row that is both with no way in: `База2` was addable and held 39 folders, so
+  a number added it and nothing opened it. Now `2` adds, `2/` opens — spelled the
+  way the rows already print containers — and a bare number still opens a row
+  there is no point adding, so plain navigation stays one keypress.
+
 ## 2026-09-12 — accepting the resync the menu offers used to crash
 
 Found by the device's owner walking the Phase 14 screen end to end, which is

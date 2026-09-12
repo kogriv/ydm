@@ -109,6 +109,41 @@ class BlacklistSemanticsTests(unittest.TestCase):
         self.assertEqual(effective_policy_state("/pro", ctx), (None, False))
         self.assertEqual(effective_policy_state("/Books", ctx), ("disabled", True))
 
+    def test_a_synced_folder_covers_what_is_inside_it(self):
+        """The rendered filter is one `+ entry/**` line, so it covers the subtree.
+
+        Until 2026-09-12 only an exact entry counted as covered, so every folder
+        inside a synced folder reported `[L]` — "local, not in sync" — while
+        rclone was syncing it, and the menu offered to add what was already
+        added. On the device that was 51 of the 52 folders it listed, and
+        `rclone lsf --filter-from` admitted 40 of them under a single entry.
+        """
+        policy = {
+            "schema": "ydm_sync_policy:v1",
+            "paths": {"pro": {"mode": "bidirectional"}, "Docs": {"mode": "download_only"}},
+        }
+        with open(self.policy_path, "w", encoding="utf-8") as handle:
+            json.dump(policy, handle, ensure_ascii=False)
+        ctx = self._ctx(False)
+        self.assertEqual(effective_policy_state("/pro/deep/deeper", ctx),
+                         ("bidirectional", True))
+        self.assertEqual(effective_policy_state("/Docs/inside", ctx),
+                         ("download_only", True))
+
+    def test_a_disabled_folder_covers_nothing_inside_it(self):
+        """The asymmetry, and it is the filter's asymmetry too.
+
+        A `disabled` entry renders no include line, so what sits below it is
+        excluded by the trailing `- **` unless included in its own right. A
+        folder on disk in there really is local and really is not syncing, which
+        is why `/Books/Math/АнГем` is `[L]` on purpose.
+        """
+        ctx = self._ctx(False)
+        _mode, covered = effective_policy_state("/Books/Math/АнГем", ctx)
+        self.assertFalse(covered)
+        _mode, covered = effective_policy_state("/video/Обучение/x", ctx)
+        self.assertFalse(covered)
+
     def test_markers_follow_from_the_state(self):
         ctx = self._ctx(True)
         mode, covered = effective_policy_state("/pro", ctx)

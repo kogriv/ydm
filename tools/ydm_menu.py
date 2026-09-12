@@ -47,6 +47,7 @@ from tools.ydm_menu_orphans import (  # noqa: E402
     format_browse_row,
     list_orphan_paths,
     orphans_to_json,
+    parse_level_input,
 )
 from tools.ydm_menu_prompts import (  # noqa: E402
     default_reader,
@@ -180,29 +181,25 @@ def _pick_orphans(orphans, reader: Reader) -> List[OrphanEntry]:
         for i, row in enumerate(rows, start=1):
             print(f" {i:2d}  {format_browse_row(row)}")
         print("  0  " + ("Up" if prefix else "Back"))
-        picks = prompt_ints(
-            "Open a folder, or choose what to add (1 or 1,2 or all)",
-            max_n=len(rows),
-            reader=reader,
-        )
-        if not picks:
+        print("Add: 1  or 1,2  or all      Open a folder: 1/")
+        choice = parse_level_input(prompt_line("> ", reader=reader), rows)
+        if choice.message:
+            print(choice.message)
+        if choice.action == "retry":
+            continue
+        if choice.action == "up":
             if not prefix:
                 return []
             prefix = prefix.rpartition("/")[0]
             continue
-        chosen = [rows[index - 1] for index in picks]
-        if len(chosen) == 1 and not chosen[0].addable:
-            prefix = chosen[0].prefix
+        if choice.action == "open":
+            prefix = choice.open_row.prefix
             continue
         # `all` on a level that mixes the two is the common way to get here, so
         # the containers are skipped with a word rather than refused.
-        skipped = [row.name for row in chosen if not row.addable]
-        addable = [row.entry for row in chosen if row.addable]
-        if skipped:
-            print(f"Not added (open them to choose inside): {', '.join(skipped)}")
-        if not addable:
-            continue
-        return addable
+        if choice.skipped:
+            print(f"Not added (open with a slash to choose inside): {', '.join(choice.skipped)}")
+        return [row.entry for row in choice.add]
 
 
 def screen_add_orphans(cfg: MenuConfig, reader: Reader) -> None:

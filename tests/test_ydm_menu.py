@@ -546,6 +546,66 @@ class OrphanBrowsingTests(unittest.TestCase):
         rows = self._rows(entries, "pro")
         self.assertEqual([row.name for row in rows], ["a"])
 
+    def _parse(self, raw, entries, prefix=""):
+        from tools.ydm_menu_orphans import parse_level_input
+
+        return parse_level_input(raw, self._rows(entries, prefix))
+
+    #: A level holding one of each: a folder that can only be opened, one that
+    #: can only be added, and one that is both — which is the case that had no
+    #: way in at all.
+    MIXED = (("Books/x", 10, 1), ("tst", 5, 2), ("both", 7, 0), ("both/deep", 3, 0))
+
+    def test_a_bare_number_adds(self):
+        choice = self._parse("2", self._entries(*self.MIXED))
+        self.assertEqual(choice.action, "add")
+        self.assertEqual([row.name for row in choice.add], ["both"])
+
+    def test_a_trailing_slash_opens_the_same_row(self):
+        """The capability that was missing: a row that is both, opened.
+
+        `Books/Math/База2` was addable and held 39 folders, and a bare number
+        added it, so there was no way to look inside.
+        """
+        choice = self._parse("2/", self._entries(*self.MIXED))
+        self.assertEqual(choice.action, "open")
+        self.assertEqual(choice.open_row.name, "both")
+
+    def test_a_leading_slash_works_too(self):
+        self.assertEqual(self._parse("/2", self._entries(*self.MIXED)).action, "open")
+
+    def test_a_bare_number_still_opens_what_cannot_be_added(self):
+        """Plain navigation stays one keypress; there is nothing else it means."""
+        choice = self._parse("1", self._entries(*self.MIXED))
+        self.assertEqual(choice.action, "open")
+        self.assertEqual(choice.open_row.name, "Books")
+
+    def test_several_numbers_add_several(self):
+        choice = self._parse("2,3", self._entries(*self.MIXED))
+        self.assertEqual(choice.action, "add")
+        self.assertEqual(sorted(row.name for row in choice.add), ["both", "tst"])
+
+    def test_all_adds_what_can_be_added_and_names_the_rest(self):
+        choice = self._parse("all", self._entries(*self.MIXED))
+        self.assertEqual(choice.action, "add")
+        self.assertEqual(sorted(row.name for row in choice.add), ["both", "tst"])
+        self.assertEqual(choice.skipped, ["Books"])
+
+    def test_opening_something_with_nothing_inside_says_so(self):
+        choice = self._parse("2/", self._entries(("tst", 5, 2), ("x", 1, 1)))
+        self.assertEqual(choice.action, "retry")
+        self.assertIn("nothing inside", choice.message)
+
+    def test_a_number_out_of_range_does_not_raise(self):
+        for raw in ("9", "9/", "1,9", "x"):
+            with self.subTest(raw=raw):
+                self.assertEqual(self._parse(raw, self._entries(*self.MIXED)).action, "retry")
+
+    def test_empty_and_zero_go_back(self):
+        for raw in ("", "0", "q", "  "):
+            with self.subTest(raw=raw):
+                self.assertEqual(self._parse(raw, self._entries(*self.MIXED)).action, "up")
+
     def test_labels_say_which_rows_can_be_added(self):
         from tools.ydm_menu_orphans import format_browse_row
 

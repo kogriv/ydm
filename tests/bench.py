@@ -182,6 +182,17 @@ SAMPLE_TREE: List[BenchPath] = [
             "no orphans — nothing is outside it",
     ),
     BenchPath(
+        "/pro/inherited", None, cloud_files=1, local_files=1, local_dir=True,
+        expect_rclone="[B]", expect_daemon="[B]",
+        why="inside a bidirectional folder with no entry of its own — the case "
+            "the table had no row for until 2026-09-12, which is how the bug "
+            "survived. The rendered filter is `+ pro/**`, one line matching "
+            "everything below, so this folder *is* syncing; the menu reported it "
+            "as [L], 'local, not in sync', and offered to add what was already "
+            "added. On the device 51 of the 52 offered folders were this. Under "
+            "a blacklist nothing distinguishes it either way",
+    ),
+    BenchPath(
         "/fresh", None, cloud_files=0, local_files=0, local_dir=True,
         expect_rclone="[L]", expect_daemon="[B]",
         in_cloud=False,
@@ -202,6 +213,27 @@ SAMPLE_TREE: List[BenchPath] = [
             "case falls into, which is exactly why it needs a test",
     ),
 ]
+
+
+def expected_listing(path: str) -> List[str]:
+    """What `os.listdir` should show for `path` after it is copied out of the cloud.
+
+    Files *and* immediate child folders. Two checks derived this from
+    `cloud_files` alone, which quietly assumed no entry in the table ever has a
+    child — true until 2026-09-12, and then not. Derived rather than written out
+    so the next row added cannot make them wrong instead of failing.
+    """
+    prefix = _rel(path)
+    names = [f"f{i}.txt" for entry in SAMPLE_TREE if entry.path == path
+             for i in range(entry.cloud_files)]
+    for entry in SAMPLE_TREE:
+        rel = _rel(entry.path)
+        if not entry.in_cloud or not rel.startswith(f"{prefix}/"):
+            continue
+        remainder = rel[len(prefix) + 1:]
+        if "/" not in remainder:
+            names.append(remainder)
+    return sorted(names)
 
 
 def expectations(backend: str) -> Dict[str, str]:

@@ -153,6 +153,87 @@ def browse_rows(entries: List[OrphanEntry], prefix: str = "") -> List[BrowseRow]
     return sorted(seen.values(), key=lambda row: row.name.lower())
 
 
+@dataclass
+class LevelChoice:
+    """What the operator asked for at one level of the picker."""
+
+    action: str  # "up" | "open" | "add" | "retry"
+    open_row: Optional[BrowseRow] = None
+    add: List[BrowseRow] = None
+    skipped: List[str] = None
+    message: str = ""
+
+    def __post_init__(self):
+        self.add = self.add or []
+        self.skipped = self.skipped or []
+
+
+def parse_level_input(raw: str, rows: List[BrowseRow]) -> LevelChoice:
+    """Read one line of the picker: add these, or open that one.
+
+    Adding and descending were the same keystroke, and the first rule that
+    resolved it — a lone container descends, anything else adds — left a folder
+    that is *both* with no way in at all. `Books/Math/База2` was exactly that:
+    addable, and holding 39 more.
+
+    So the two are separate now. A bare number adds, because that is the verb
+    the screen exists for, and `N/` opens — spelled the way the rows already
+    print containers. A bare number on a row that cannot be added still opens
+    it: refusing would be pedantry, there is nothing else it could mean, and
+    plain navigation stays one keypress.
+
+    Pure, so the screen's behaviour can be tested without a terminal.
+    """
+    text = raw.strip().lower()
+    if text in {"", "0", "q"}:
+        return LevelChoice("up")
+
+    def row_at(token: str) -> Optional[BrowseRow]:
+        if not token.isdigit():
+            return None
+        index = int(token)
+        return rows[index - 1] if 1 <= index <= len(rows) else None
+
+    # `N/` and `/N` both read as "go in there"; people type the slash on the
+    # side they saw it on.
+    if text.endswith("/") or text.startswith("/"):
+        row = row_at(text.strip("/"))
+        if row is None:
+            return LevelChoice("retry", message=f"No such row: {raw.strip()}")
+        if not row.inside:
+            return LevelChoice(
+                "retry", message=f"{row.name} has nothing inside — plain {text.strip('/')} adds it."
+            )
+        return LevelChoice("open", open_row=row)
+
+    if text == "all":
+        chosen = list(rows)
+    else:
+        tokens = [t for t in text.replace(" ", "").split(",") if t]
+        chosen = []
+        for token in tokens:
+            row = row_at(token)
+            if row is None:
+                return LevelChoice(
+                    "retry",
+                    message="Numbers like 1 or 1,2 or 'all'; 2/ to open; 0 to go back.",
+                )
+            chosen.append(row)
+        # One number on a folder there is no point adding means "open it".
+        if len(chosen) == 1 and not chosen[0].addable and chosen[0].inside:
+            return LevelChoice("open", open_row=chosen[0])
+
+    addable = [row for row in chosen if row.addable]
+    skipped = [row.name for row in chosen if not row.addable]
+    if not addable:
+        return LevelChoice(
+            "retry",
+            skipped=skipped,
+            message="Nothing there to add — open it with a trailing slash, e.g. 1/.",
+        )
+    return LevelChoice("add", add=addable, skipped=skipped)
+
+
 def format_browse_row(row: BrowseRow) -> str:
     size = _format_bytes(row.total_bytes)
     if row.addable:
