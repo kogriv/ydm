@@ -63,23 +63,37 @@ def _policy_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def _bisync_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
+def _bisync_ns(cfg: MenuConfig, command: str = "run", **extra) -> argparse.Namespace:
+    """The arguments `sync_bisync`'s own commands expect, filled in for the menu.
+
+    Defaults come from that tool's parser rather than being restated here. They
+    were restated, and the two drifted: `resync` grew `--force-filter`, this
+    function did not, and the first person to accept the resync the menu offers
+    got `AttributeError: 'Namespace' object has no attribute 'force_filter'`
+    after the policy and filters had already been written — a half-applied add,
+    with the scheduled job set to refuse every run until someone resynced by
+    hand. Asking the parser cannot drift, and `command` is what decides which
+    options exist.
+    """
+    from tools.sync_bisync import build_parser
+
     is_daemon = cfg.backend_kind == "daemon"
     backend_arg = "daemon" if is_daemon else "rclone"
-    base = {
+    base = vars(build_parser().parse_args([command]))
+    base.update({
         "db_path": cfg.db_path,
         "local_root": cfg.local_root,
         "remote": cfg.remote,
         "filter_path": cfg.bisync_filter_path,
         "policy_path": cfg.policy_path,
-        "max_delete": 20,
-        "check_access": True,
         "format": "json",
         "text_header": False,
+        # Not parser options: the menu streams rclone's output to the terminal
+        # and picks the backend from its own config.
         "stream": False,
         "backend": backend_arg,
         "exclude_config": cfg.exclude_config,
-    }
+    })
     base.update(extra)
     return argparse.Namespace(**base)
 
@@ -405,7 +419,7 @@ def offer_resync_if_needed(
 
 def action_resync(cfg: MenuConfig, *, apply: bool) -> ActionResult:
     stream = _interactive_stream(apply=apply)
-    payload = cmd_resync(_bisync_ns(cfg, apply=apply, stream=stream))
+    payload = cmd_resync(_bisync_ns(cfg, "resync", apply=apply, stream=stream))
     if payload.get("error"):
         return _format_bisync_result(payload, label="Bisync resync")
     if not apply:
@@ -915,6 +929,6 @@ def print_detailed_status(cfg: MenuConfig) -> None:
         for p in status.disabled:
             print(f"  [X] {p}")
     print_database_line(cfg)
-    bisync = cmd_status(_bisync_ns(cfg))
+    bisync = cmd_status(_bisync_ns(cfg, "status"))
     for line in (bisync.get("log_tail") or [])[-5:]:
         print(f"  log: {line}")

@@ -5,6 +5,62 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-12 — accepting the resync the menu offers used to crash
+
+Found by the device's owner walking the Phase 14 screen end to end, which is
+also the first time anyone accepted that prompt. `AttributeError: 'Namespace'
+object has no attribute 'force_filter'` — after the policy and the filters had
+been written and before the baseline was, so the add was half-applied and every
+scheduled run would refuse until someone resynced by hand.
+
+- **Not new: on master since 2026-08-25.** `sync_bisync resync` grew
+  `--force-filter` that day and `_bisync_ns`, which hand-builds the Namespace
+  the menu passes in, was not updated. Reproduced on `master` to be sure.
+- **The branch had no coverage, by construction.** Every existing check of that
+  screen stops before the resync — answering "no", or adding download-only,
+  which never offers one. So the tests passed while the path crashed.
+- **Defaults come from the parser now**, via a `build_parser()` split out of
+  `parse_args()`. Restating them is what drifted; `parse_args([command])` cannot.
+- **Two tests that would have caught it**, both verified against the bug: a unit
+  check that each command gets every option its own parser defines, and the
+  whole screen driven to the end against the bench's fake cloud — a real
+  `rclone bisync --resync`, no network. It asserts the recorded baseline rather
+  than "it did not raise", because the half-applied state is the actual damage.
+
+## 2026-09-12 — the tree could not see what was never uploaded
+
+Phase 14, from the device's owner: a folder copied onto the phone —
+`Books/Math/База2`, 166 files, 1.6 GB — did not appear in the menu screen
+called **Add LOCAL folder to sync**. Not filtered out, not too deep: it could
+not get there. See `tasks/ydm_menu/GAP.md` G9 and G10.
+
+- **Nodes come from the cloud snapshot, so a folder with no cloud row had
+  nothing to render it.** `[L]` in practice meant "in the cloud, not in the
+  policy, on disk". The screen's own list is derived from that tree, which is
+  why every one of its 32 rows showed `cloud files:` above zero. The tree was
+  equally blind: `--path /Books/Math --depth 1` showed `База` and not `База2`.
+- **Fixing only the menu was not available.**
+  `test_the_orphan_list_agrees_with_the_tree` pins the two together on purpose,
+  so that the menu never offers what the tree does not show. The change is in
+  `build_tree`; the menu gets it as a consequence and the invariant is untouched.
+- **One walk of the disk, not a listdir per node.** Phases 12-13 were spent
+  making the walk cost nothing per node, and every syscall here costs ~0.2 ms
+  under proot. Measured against the same snapshot: **4 queries before, 4 after**,
+  3810 nodes to 3850, plus 0.28 s of filesystem walk once.
+- **No tenth marker.** No cloud files, a directory on disk and no policy entry
+  already resolve to `orphan` → `[L]` through `local_state()`, with no new
+  branch anywhere.
+- **The fuller list made the flat one worse, so the screen descends now.**
+  `База2` brought its own 40 subfolders along — each just as local and just as
+  absent from the policy — taking the list from 32 rows to 72. Trimming it would
+  have broken the invariant above, and the tree is right to show them. So the
+  presentation changed instead: the root is 4 rows, and the owner's folder is
+  three keypresses away. A row can be both addable and a way in; `+39 inside` is
+  information, since adding a folder covers everything under it.
+- **The bench describes the case now** (`BenchPath.in_cloud`, `/fresh`), which
+  makes the two derived bench checks cover it for free — the exact-set orphan
+  list and the menu-agrees-with-tree invariant.
+
 ## 2026-09-09 — the test suite was notifying the phone
 
 Running `python3 -m unittest discover -s tests` on the device sent a real

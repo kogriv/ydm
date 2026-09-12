@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from tools.sync_common import create_storage, get_latest_successful_scan_id
 from tools.sync_policy import effective_download_paths, load_policy
 from tools.sync_tree import (
+    LocalDirIndex,
     apply_policy_overlay,
     apply_sync_percent,
     build_tree,
@@ -71,6 +72,96 @@ def format_orphan_label(entry: OrphanEntry) -> str:
         f"{entry.rel_path}  ({_format_bytes(entry.local_bytes)}, "
         f"cloud files: {entry.cloud_file_count})"
     )
+
+
+@dataclass
+class BrowseRow:
+    """One line of the orphan picker at one level of the tree.
+
+    A row is either a folder that can be added (`entry` is set) or a container
+    holding some further down, and it can be both: adding a folder covers
+    everything inside it, so `inside` is information, not a reason to descend.
+    """
+
+    prefix: str
+    name: str
+    entry: Optional[OrphanEntry]
+    inside: int
+    total_bytes: int
+
+    @property
+    def addable(self) -> bool:
+        return self.entry is not None
+
+
+def _under(prefix: str, rel_path: str) -> bool:
+    return rel_path.startswith(f"{prefix}/") if prefix else bool(rel_path)
+
+
+def _shallowest_bytes(entries: List[OrphanEntry], prefix: str) -> int:
+    """Bytes of the orphans under `prefix` that have no orphan above them.
+
+    Summing every orphan would count the same files repeatedly: an orphan's
+    size includes its subfolders, and those subfolders are orphans too.
+    """
+    paths = {entry.rel_path for entry in entries}
+    total = 0
+    for entry in entries:
+        if not _under(prefix, entry.rel_path):
+            continue
+        parts = entry.rel_path.split("/")
+        covered = any(
+            "/".join(parts[:i]) in paths and _under(prefix, "/".join(parts[:i]))
+            for i in range(1, len(parts))
+        )
+        if not covered:
+            total += entry.local_bytes
+    return total
+
+
+def browse_rows(entries: List[OrphanEntry], prefix: str = "") -> List[BrowseRow]:
+    """The rows to show at `prefix`: its immediate children, nothing deeper.
+
+    The flat list this replaces ran to 32 lines on the device, 24 of them one
+    subtree, with full paths on every line and the choice numbered across the
+    whole thing (G10). Worse after G9: a folder that exists only locally brings
+    every folder inside it along, because each of those is just as local and
+    just as absent from the policy — `Books/Math/База2` alone added 40 rows.
+
+    A pure function of the list, so the screen it feeds needs no terminal to be
+    tested.
+    """
+    seen: Dict[str, BrowseRow] = {}
+    by_path = {entry.rel_path: entry for entry in entries}
+    for entry in entries:
+        if not _under(prefix, entry.rel_path):
+            continue
+        remainder = entry.rel_path[len(prefix) + 1:] if prefix else entry.rel_path
+        name = remainder.split("/")[0]
+        child_prefix = f"{prefix}/{name}" if prefix else name
+        if child_prefix in seen:
+            continue
+        own = by_path.get(child_prefix)
+        inside = sum(1 for other in entries if _under(child_prefix, other.rel_path))
+        seen[child_prefix] = BrowseRow(
+            prefix=child_prefix,
+            name=name,
+            entry=own,
+            inside=inside,
+            total_bytes=own.local_bytes if own else _shallowest_bytes(entries, child_prefix),
+        )
+    return sorted(seen.values(), key=lambda row: row.name.lower())
+
+
+def format_browse_row(row: BrowseRow) -> str:
+    size = _format_bytes(row.total_bytes)
+    if row.addable:
+        label = f"{row.name}  ({size}, cloud files: {row.entry.cloud_file_count})"
+        if row.inside:
+            label += f"  +{row.inside} inside"
+        return label
+    plural = "folder" if row.inside == 1 else "folders"
+    return f"{row.name}/  -> {row.inside} {plural}, {size}"
 
 
 def _collect_orphans_from_node(node, local_root: str, out: List[OrphanEntry]) -> None:
@@ -136,11 +227,17 @@ def list_orphan_paths(
     if policy_ctx.policy:
         membership = set(effective_download_paths(policy_ctx.policy))
 
+    # The screen this feeds is called "Add LOCAL folder to sync", and until
+    # 2026-09-12 it could not see a folder that existed only on the phone: the
+    # list is derived from the cloud snapshot, so a folder with no cloud row had
+    # no node to carry `[L]`. See G9 and Phase 14.
+    local_index = LocalDirIndex(local_root, root, max_depth)
+
     # One connection for the whole read: build_tree has its own scope, but the
     # counting that follows opened one per node on top of that — 7 802 in a
     # single run here. Everything between these lines reads.
     with storage.reuse_connection():
-        node = build_tree(analyzer, snapshot, root, max_depth)
+        node = build_tree(analyzer, snapshot, root, max_depth, local_index=local_index)
         compute_status_whitelist(
             node,
             membership,

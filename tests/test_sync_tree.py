@@ -25,6 +25,7 @@ from query_count import counting_queries  # noqa: E402
 from tools.sync_common import CompositeSnapshot  # noqa: E402
 from tools.sync_tree import (  # noqa: E402
     FolderFileCounts,
+    LocalDirIndex,
     _count_files_for_prefix,
     _folder_file_counts,
     apply_sync_percent,
@@ -1301,6 +1302,96 @@ class SnapshotSelectionQueryBudgetTests(unittest.TestCase):
             if times > 1 and statement.startswith("SELECT scan_root, scan_depth")
         }
         self.assertEqual(repeated, {}, queries.report(limit=10))
+
+
+class LocalOnlyFoldersTests(unittest.TestCase):
+    """Folders that exist on the phone and in no cloud scan — G9, Phase 14.
+
+    Nodes come from the snapshot, so a folder copied onto the device and never
+    uploaded had nothing to render it with: invisible in the tree, and through
+    the tree invisible in the menu screen called "Add LOCAL folder to sync".
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.db_path = os.path.join(self.tmpdir, "monitor.db")
+        self.mirror = os.path.join(self.tmpdir, "mirror")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY, scan_id INTEGER, parent_path TEXT,
+                name TEXT, type TEXT, size INTEGER, modified TEXT, md5 TEXT, path TEXT
+            );
+            CREATE UNIQUE INDEX idx_files_unique ON files (scan_id, parent_path, name);
+            CREATE TABLE scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME,
+                scan_type TEXT NOT NULL, status TEXT NOT NULL, duration REAL,
+                scan_root TEXT, scan_depth INTEGER
+            );
+            INSERT INTO scans (id, scan_type, status, duration)
+                VALUES (1, 'cloud', 'success', 1);
+            """
+        )
+        conn.executemany(
+            "INSERT INTO files (scan_id, parent_path, name, type, size) VALUES (1, ?, ?, ?, 1)",
+            [("", "Books", "dir"), ("/Books", "Math", "dir"), ("/Books/Math", "f.txt", "file")],
+        )
+        conn.commit()
+        conn.close()
+        os.makedirs(os.path.join(self.mirror, "Books", "Math", "Copied", "Deeper"))
+
+    def _tree(self, depth=4, with_local=True):
+        storage = StorageManager(self.db_path, use_temp_storage=False)
+        analyzer = Analyzer(storage)
+        snapshot = CompositeSnapshot(base_scan_id=1, folder_updates={})
+        index = LocalDirIndex(self.mirror, "/", depth) if with_local else None
+        return build_tree(analyzer, snapshot, "/", depth, local_index=index)
+
+    def _names(self, node, path):
+        for part in [p for p in path.split("/") if p]:
+            node = next(child for child in node.children if child.name == part)
+        return [child.name for child in node.children]
+
+    def test_a_folder_only_on_disk_gets_a_node(self):
+        self.assertIn("Copied", self._names(self._tree(), "/Books/Math"))
+
+    def test_without_the_index_nothing_changes(self):
+        """The guarantee that makes this safe to switch on everywhere.
+
+        A tree with no local additions must come out exactly as before, so the
+        old behaviour is what a caller gets by leaving the argument off.
+        """
+        self.assertEqual(self._names(self._tree(with_local=False), "/Books/Math"), [])
+
+    def test_the_cloud_keeps_its_order_and_local_names_follow(self):
+        """Appended, not merged: the same reason as above, one level down."""
+        os.makedirs(os.path.join(self.mirror, "Books", "Aaa"))
+        names = self._names(self._tree(), "/Books")
+        self.assertEqual(names, ["Math", "Aaa"], "local names must come after cloud ones")
+
+    def test_a_folder_in_both_places_is_not_listed_twice(self):
+        self.assertEqual(self._names(self._tree(), "/Books").count("Math"), 1)
+
+    def test_the_walk_stops_where_the_tree_does(self):
+        """Depth bounds the filesystem walk too, or a deep mirror costs for
+        levels nobody asked for."""
+        index = LocalDirIndex(self.mirror, "/", 2)
+        self.assertEqual(index.children("/Books"), ["Math"])
+        self.assertEqual(index.children("/Books/Math"), ["Copied"])
+        self.assertEqual(index.children("/Books/Math/Copied"), [],
+                         "walked past the requested depth")
+
+    def test_a_missing_mirror_is_not_an_error(self):
+        """/sdcard can be unmounted for a session; the tree still has to render."""
+        index = LocalDirIndex(os.path.join(self.tmpdir, "gone"), "/", 3)
+        self.assertEqual(index.children("/"), [])
+
+    def test_the_index_can_start_below_the_root(self):
+        index = LocalDirIndex(self.mirror, "/Books/Math", 2)
+        self.assertEqual(index.children("/Books/Math"), ["Copied"])
+        self.assertEqual(index.children("/Books/Math/Copied"), ["Deeper"])
 
 
 class CliConnectionBudgetTests(unittest.TestCase):

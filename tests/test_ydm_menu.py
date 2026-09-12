@@ -389,5 +389,174 @@ class MenuCliTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class BisyncArgumentsTests(unittest.TestCase):
+    """What the menu hands to sync_bisync must be what sync_bisync reads.
+
+    The menu builds that Namespace itself instead of going through the CLI, so
+    the two can drift, and they did: `resync` grew `--force-filter` and
+    `_bisync_ns` did not. The first person to accept the resync the menu offers
+    got `AttributeError: 'Namespace' object has no attribute 'force_filter'` —
+    after the policy and the filters had already been written, so the add was
+    half-applied and the scheduled job would refuse every run until someone
+    resynced by hand.
+
+    Asserting per command rather than for one union of options: each subcommand
+    defines its own, and `run` having a flag proves nothing about `resync`.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def _cfg(self):
+        return MenuConfig.from_env_and_args(
+            db_path=os.path.join(self.tmpdir, "monitor.db"),
+            local_root=os.path.join(self.tmpdir, "mirror"),
+            policy_path=os.path.join(self.tmpdir, "sync_policy.json"),
+            exclude_config=os.path.join(self.tmpdir, "config.cfg"),
+            bisync_filter_path=os.path.join(self.tmpdir, "mirror.bisync.filters"),
+            backend="rclone",
+        )
+
+    def _parser_options(self, command):
+        from tools.sync_bisync import build_parser
+
+        return set(vars(build_parser().parse_args([command])))
+
+    def test_every_command_gets_every_option_it_defines(self):
+        from tools.ydm_menu_actions import _bisync_ns
+
+        cfg = self._cfg()
+        for command in ("resync", "run", "status"):
+            with self.subTest(command=command):
+                produced = set(vars(_bisync_ns(cfg, command)))
+                missing = self._parser_options(command) - produced
+                self.assertEqual(missing, set(), f"{command} would raise on these")
+
+    def test_the_menu_does_not_quietly_force_a_download_filter(self):
+        """`--force-filter` defaults to off, and that default has to survive.
+
+        It is the one flag that lets a resync establish a baseline from the
+        download-only filter — sending back paths chosen precisely because they
+        are unsafe to send back. Inheriting the parser's default is right; making
+        it true here would be a data-loss switch nobody asked for.
+        """
+        from tools.ydm_menu_actions import _bisync_ns
+
+        self.assertFalse(_bisync_ns(self._cfg(), "resync").force_filter)
+
+    def test_the_menu_still_overrides_what_it_means_to(self):
+        """Taking defaults from the parser must not lose the menu's own values."""
+        from tools.ydm_menu_actions import _bisync_ns
+
+        cfg = self._cfg()
+        ns = _bisync_ns(cfg, "resync", apply=True)
+        self.assertEqual(ns.db_path, cfg.db_path)
+        self.assertEqual(ns.filter_path, cfg.bisync_filter_path)
+        self.assertEqual(ns.format, "json")
+        self.assertTrue(ns.apply)
+        self.assertFalse(ns.text_header)
+
+
+class OrphanBrowsingTests(unittest.TestCase):
+    """One level of the picker at a time — G10, and what G9 made necessary.
+
+    The flat list ran to 32 lines on the device, 24 of them a single subtree,
+    numbered across the whole thing. After G9 it got worse rather than better:
+    a folder that exists only on disk brings every folder inside it along, since
+    each of those is just as local and just as absent from the policy —
+    `Books/Math/База2` alone added 40 rows to a list of 32.
+
+    `browse_rows` is a pure function of the list, so none of this needs a
+    terminal, a database or a filesystem.
+    """
+
+    def _entries(self, *specs):
+        from tools.ydm_menu_orphans import OrphanEntry
+
+        return [
+            OrphanEntry(
+                cloud_path=f"/{rel}", rel_path=rel, local_bytes=size,
+                cloud_file_count=cloud, display_marker="[L]",
+            )
+            for rel, size, cloud in specs
+        ]
+
+    def _rows(self, entries, prefix=""):
+        from tools.ydm_menu_orphans import browse_rows
+
+        return browse_rows(entries, prefix)
+
+    def test_the_root_shows_containers_not_every_path(self):
+        entries = self._entries(
+            ("pro/a", 10, 1), ("pro/b", 20, 1), ("pro/c/d", 30, 1), ("tst", 5, 2),
+        )
+        rows = self._rows(entries)
+        self.assertEqual([row.name for row in rows], ["pro", "tst"])
+        pro = rows[0]
+        self.assertFalse(pro.addable, "a folder with no entry of its own is a way in")
+        self.assertEqual(pro.inside, 3)
+        self.assertTrue(rows[1].addable)
+
+    def test_descending_narrows_to_that_folder(self):
+        entries = self._entries(("pro/a", 10, 1), ("pro/c/d", 30, 1), ("tst", 5, 2))
+        rows = self._rows(entries, "pro")
+        self.assertEqual([row.name for row in rows], ["a", "c"])
+        self.assertTrue(rows[0].addable)
+        self.assertFalse(rows[1].addable)
+
+    def test_a_folder_can_be_both_addable_and_a_way_in(self):
+        """The case G9 produced, and the reason `inside` is not a verdict.
+
+        Adding a folder covers everything under it, so the 39 folders inside
+        `База2` are information — not a reason to make someone descend.
+        """
+        entries = self._entries(
+            ("Books/Math/База2", 1_600_000_000, 0),
+            ("Books/Math/База2/x", 900_000_000, 0),
+            ("Books/Math/База2/y", 700_000_000, 0),
+        )
+        rows = self._rows(entries, "Books/Math")
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].addable)
+        self.assertEqual(rows[0].inside, 2)
+
+    def test_a_container_does_not_count_the_same_bytes_twice(self):
+        """An orphan's size already includes the orphans inside it.
+
+        Summing the list would report a folder as several times its own size,
+        which on the device meant `Books/` claiming far more than the disk holds.
+        """
+        entries = self._entries(
+            ("Books/Math/База2", 1000, 0),
+            ("Books/Math/База2/x", 600, 0),
+            ("Books/Math/База2/y", 400, 0),
+        )
+        rows = self._rows(entries)
+        self.assertEqual(rows[0].name, "Books")
+        self.assertEqual(rows[0].total_bytes, 1000)
+
+    def test_rows_are_ordered_by_name_not_by_path_length(self):
+        entries = self._entries(("b", 1, 1), ("A/x", 1, 1), ("c", 1, 1))
+        self.assertEqual([row.name for row in self._rows(entries)], ["A", "b", "c"])
+
+    def test_the_current_folder_is_not_offered_inside_itself(self):
+        """Otherwise every level would carry a row that goes nowhere."""
+        entries = self._entries(("pro", 10, 1), ("pro/a", 5, 1))
+        rows = self._rows(entries, "pro")
+        self.assertEqual([row.name for row in rows], ["a"])
+
+    def test_labels_say_which_rows_can_be_added(self):
+        from tools.ydm_menu_orphans import format_browse_row
+
+        entries = self._entries(("pro/a", 2048, 3), ("pro/c/d", 1024, 1))
+        rows = self._rows(entries)
+        label = format_browse_row(rows[0])
+        self.assertIn("2 folders", label, label)
+        self.assertTrue(label.startswith("pro/"), label)
+        addable = format_browse_row(self._rows(entries, "pro")[0])
+        self.assertIn("cloud files: 3", addable, addable)
+
+
 if __name__ == "__main__":
     unittest.main()

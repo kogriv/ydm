@@ -447,14 +447,18 @@ class TestRcloneOnTheBench(BenchTestCase):
         self.assertEqual(listed, ["android:", "cloud:"], listed)
 
     def test_the_fake_cloud_holds_what_the_snapshot_claims(self):
-        """Two descriptions of the same cloud must not drift apart."""
+        """Two descriptions of the same cloud must not drift apart.
+
+        `in_cloud=False` rows are the exception and the point of the field: they
+        exist on disk and nowhere else, so the fake cloud must *not* hold them.
+        """
         listed = {
             line.rstrip("/") for line in
             self.rclone("lsf", "cloud:", "--dirs-only").stdout.splitlines() if line.strip()
         }
         expected = {
             entry.path.strip("/") for entry in SAMPLE_TREE
-            if entry.path != "/" and "/" not in entry.path.strip("/")
+            if entry.path != "/" and "/" not in entry.path.strip("/") and entry.in_cloud
         }
         self.assertEqual(listed, expected)
 
@@ -1538,40 +1542,169 @@ class TestAddScreensConfirm(BenchTestCase):
             screen(self.cfg(backend), scripted_reader(answers))
         return buffer.getvalue()
 
-    def _orphan_index(self, path):
-        from tools.ydm_menu_orphans import list_orphan_paths
+    def _answers_to_reach(self, path):
+        """The numbers a person would type to get from the root to `path`.
+
+        The screen shows one level at a time (G10), so reaching a folder is a
+        sequence of choices, not one index into a flat list. Derived from
+        `browse_rows` rather than written out, so a change in ordering or in what
+        the list contains cannot leave these tests quietly picking the wrong row.
+        """
+        from tools.ydm_menu_orphans import browse_rows, list_orphan_paths
 
         orphans = list_orphan_paths(
             self.bench.db_path, self.bench.local_root, self.bench.policy_path,
             root="/", max_depth=5,
         )
-        for index, entry in enumerate(orphans, start=1):
-            if entry.cloud_path == path:
-                return str(index)
-        self.fail(f"{path} is not in the orphan list: "
-                  f"{[e.cloud_path for e in orphans]}")
+        answers = []
+        prefix = ""
+        segments = path.strip("/").split("/")
+        for position, segment in enumerate(segments):
+            rows = browse_rows(orphans, prefix)
+            names = [row.name for row in rows]
+            if segment not in names:
+                self.fail(f"{segment!r} is not offered at /{prefix}: {names}")
+            answers.append(str(names.index(segment) + 1))
+            if position < len(segments) - 1:
+                prefix = f"{prefix}/{segment}" if prefix else segment
+        return answers
 
     def test_declining_the_preview_leaves_the_policy_alone(self):
         """The barrier only counts if answering no actually stops it."""
         before = self.bench.read_policy()
-        pick = self._orphan_index("/orphans")
         text = self.run_screen(
             __import__("tools.ydm_menu", fromlist=["x"]).screen_add_orphans,
-            [pick, "2", "n"],
+            [*self._answers_to_reach("/orphans"), "2", "n"],
         )
         self.assertIn("Download filter", text)
         self.assertEqual(before, self.bench.read_policy())
 
     def test_confirming_it_applies(self):
         """And the same screen, answered yes, still does the work."""
-        pick = self._orphan_index("/orphans")
         self.run_screen(
             __import__("tools.ydm_menu", fromlist=["x"]).screen_add_orphans,
-            [pick, "2", "y"],
+            [*self._answers_to_reach("/orphans"), "2", "y"],
         )
         policy = self.bench.read_policy()
         self.assertIn("orphans", policy["paths"])
         self.assertEqual("download_only", policy["paths"]["orphans"]["mode"])
+
+    def _cfg_against_the_fake_cloud(self):
+        from tools.ydm_menu_config import MenuConfig
+
+        return MenuConfig.from_env_and_args(
+            db_path=self.bench.db_path,
+            local_root=self.bench.local_root,
+            policy_path=self.bench.policy_path,
+            exclude_config=self.bench.exclude_config,
+            backend="rclone",
+            remote="cloud",
+            plain=True,
+        )
+
+    def _require_rclone(self):
+        """Only the two resync checks need it; the rest of this class does not.
+
+        Guarded per test rather than in setUp for that reason — and skipping is
+        the project's convention here, since CI has no rclone and the device
+        does. See docs/ANDROID_SETUP.md: the phone covers more than CI.
+        """
+        if shutil.which("rclone") is None:
+            self.skipTest("rclone is not installed here (nor in CI)")
+
+    def _run_screen_to_the_end(self, answers):
+        """Like run_screen, but with the bench's environment in this process.
+
+        `run_screen` is enough while nothing reaches rclone. Accepting the resync
+        does, and rclone reads RCLONE_CONFIG from the environment — so without
+        this the screen would address whatever remote the operator has configured.
+        """
+        import contextlib
+        import io
+        from unittest import mock
+
+        from tools.ydm_menu_prompts import scripted_reader
+
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            with contextlib.redirect_stdout(buffer):
+                __import__("tools.ydm_menu", fromlist=["x"]).screen_add_orphans(
+                    self._cfg_against_the_fake_cloud(), scripted_reader(answers)
+                )
+        return buffer.getvalue()
+
+    def _resync_is_recorded_for_the_current_filter(self):
+        from tools.sync_common import filter_file_hash
+
+        cfg = self._cfg_against_the_fake_cloud()
+        state_path = os.path.join(self.bench.var_dir, "bisync_state.json")
+        if not os.path.exists(state_path):
+            return False
+        with open(state_path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        return state.get("last_resync_filter_hash") == filter_file_hash(
+            cfg.bisync_filter_path
+        )
+
+    def test_accepting_the_resync_actually_resyncs(self):
+        """The whole add, answered the way a person answers it.
+
+        Every other check of this screen stops before the resync — they answer
+        "no", or add download-only, which never offers one. So the accepting path
+        had no coverage at all, and on 2026-09-12 it crashed on the device with
+        `Namespace has no attribute 'force_filter'`: the policy and the filters
+        were already written, the baseline was not, and every scheduled run would
+        then refuse until someone resynced by hand. A half-applied add is the
+        worst outcome this screen can produce, which is why the assertion is the
+        recorded baseline rather than "it did not raise".
+
+        Runs a real `rclone bisync --resync` against the bench's fake cloud. No
+        network, no live remote.
+        """
+        self._require_rclone()
+        text = self._run_screen_to_the_end(
+            [*self._answers_to_reach("/orphans"), "1", "y", "y"]
+        )
+        policy = self.bench.read_policy()
+        self.assertIn("orphans", policy["paths"], text[-2000:])
+        self.assertEqual("bidirectional", policy["paths"]["orphans"]["mode"])
+        self.assertTrue(
+            self._resync_is_recorded_for_the_current_filter(),
+            f"policy and filters changed but no baseline was recorded:\n{text[-2000:]}",
+        )
+
+    def test_forcing_a_local_only_folder_resyncs_too(self):
+        """G9 and the resync path in one pass, since that is how it arrived.
+
+        `/fresh` is in no cloud scan, so the risk check cannot read its filenames
+        and refuses bidirectional; forcing is the answer the screen offers. This
+        is the exact sequence the device's owner typed.
+        """
+        self._require_rclone()
+        text = self._run_screen_to_the_end(
+            [*self._answers_to_reach("/fresh"), "1", "3", "yes", "y"]
+        )
+        policy = self.bench.read_policy()
+        self.assertIn("fresh", policy["paths"], text[-2000:])
+        self.assertTrue(policy["paths"]["fresh"].get("forced_risk"), policy["paths"])
+        self.assertTrue(
+            self._resync_is_recorded_for_the_current_filter(),
+            f"the add went through but the baseline did not:\n{text[-2000:]}",
+        )
+
+    def test_a_folder_that_exists_only_on_disk_can_be_added(self):
+        """G9, end to end through the screen that promises it.
+
+        `/fresh` is in no cloud scan — it was copied onto the phone and never
+        uploaded. Before Phase 14 the tree had no node for it, so this screen
+        could not offer it and the sequence below would not have reached it.
+        """
+        self.run_screen(
+            __import__("tools.ydm_menu", fromlist=["x"]).screen_add_orphans,
+            [*self._answers_to_reach("/fresh"), "2", "y"],
+        )
+        policy = self.bench.read_policy()
+        self.assertIn("fresh", policy["paths"], policy["paths"])
 
 
 # --- Phase 8.8 -------------------------------------------------------------

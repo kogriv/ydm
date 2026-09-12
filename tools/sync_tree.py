@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -163,11 +164,58 @@ def is_path_included(path: str, include_dirs: Set[str]) -> bool:
     return False
 
 
+class LocalDirIndex:
+    """Folder names present on disk under the mirror, from one walk.
+
+    The tree is built from the cloud snapshot, so a folder that exists only on
+    the phone has no node and is invisible — in the tree and, through it, in the
+    menu screen named "Add LOCAL folder to sync". That is G9; see
+    `tasks/ydm_menu/BACKLOG.md`, Phase 14.
+
+    One walk, not a listdir per node. Every syscall costs ~0.2 ms under proot,
+    and Phase 12-13 were spent making sure the walk pays nothing per node —
+    asking the filesystem about each of 5 568 folders would hand that back.
+    Measured on the device: 97 folders to depth 5 in 1.1 s, once.
+
+    Symlinks are not followed. On Android `/sdcard` is itself a symlink and a
+    mirror can contain more; following them risks walking outside the tree
+    entirely.
+    """
+
+    def __init__(self, local_root: str, root_path: str, depth: int):
+        self._children: Dict[str, List[str]] = {}
+        root = normalize_path(root_path)
+        base = os.path.expanduser(local_root.rstrip("/")) or "/"
+        start = base if root == "/" else os.path.join(base, root.lstrip("/"))
+        if not os.path.isdir(start):
+            return
+        for current, subdirs, _files in os.walk(start, followlinks=False):
+            subdirs.sort()
+            rel = os.path.relpath(current, base)
+            if rel == ".":
+                cloud_path = "/"
+                level = 0
+            else:
+                cloud_path = "/" + rel.replace(os.sep, "/")
+                level = rel.count(os.sep) + 1
+            if subdirs:
+                self._children[cloud_path] = list(subdirs)
+            # `depth` counts levels below root_path, so stop descending once
+            # the children just recorded are the last ones the tree will show.
+            root_level = 0 if root == "/" else root.strip("/").count("/") + 1
+            if level - root_level >= depth:
+                subdirs[:] = []
+
+    def children(self, cloud_path: str) -> List[str]:
+        return self._children.get(normalize_path(cloud_path), [])
+
+
 def build_tree(
     analyzer: Analyzer,
     snapshot,
     root_path: str,
     depth: int,
+    local_index: Optional[LocalDirIndex] = None,
 ) -> TreeNode:
     storage = analyzer.storage
     # Read each scan's folder structure once instead of once per node. The
@@ -181,6 +229,14 @@ def build_tree(
         node = TreeNode(path=normalized, name=name)
         scan_id = select_scan_id_for_path(normalized, snapshot)
         children_names = fetch_child_names(storage, scan_id, normalized, index=index)
+        if local_index is not None:
+            # Appended after the cloud's own children, sorted, rather than
+            # merged into them: a tree with nothing extra on disk must come out
+            # byte-identical to before, and that is asserted, not assumed.
+            known = set(children_names)
+            children_names = children_names + [
+                child for child in local_index.children(normalized) if child not in known
+            ]
         node.children_count = len(children_names)
 
         if remaining_depth > 0:
@@ -829,10 +885,16 @@ def main() -> None:
         if local_result.started and local_result.scan_id is not None:
             local_scan_id = local_result.scan_id
 
+    # Folders that exist only on the phone have no row in the cloud snapshot,
+    # and without this the tree cannot show them at all — see G9. Built here
+    # rather than inside build_tree because it walks the filesystem, and the
+    # scope below is for database reads.
+    local_index = LocalDirIndex(args.local_root, root_path, args.depth)
+
     # One connection for the read that follows. Deliberately after the local
     # scan above, which writes; nothing below this line does.
     with storage.reuse_connection():
-        node = build_tree(analyzer, snapshot, root_path, args.depth)
+        node = build_tree(analyzer, snapshot, root_path, args.depth, local_index=local_index)
         if effective_backend == "daemon":
             compute_status(node, membership_dirs, collapse=collapse)
         else:

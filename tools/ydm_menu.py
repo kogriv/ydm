@@ -8,7 +8,7 @@ import os
 import shlex
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -41,8 +41,10 @@ from tools.sync_backends import BackendError  # noqa: E402
 from tools.sync_policy import VALID_MODES  # noqa: E402
 from tools.ydm_menu_config import MenuConfig  # noqa: E402
 from tools.ydm_menu_orphans import (  # noqa: E402
+    OrphanEntry,
+    browse_rows,
     cloud_scan_available,
-    format_orphan_label,
+    format_browse_row,
     list_orphan_paths,
     orphans_to_json,
 )
@@ -151,6 +153,58 @@ def screen_add_cloud(cfg: MenuConfig, reader: Reader) -> None:
             offer_resync_if_needed(cfg, mode=mode, reader=reader)
 
 
+def _pick_orphans(orphans, reader: Reader) -> List[OrphanEntry]:
+    """One level at a time, until the operator picks folders to add.
+
+    The flat list this replaces ran to 32 lines here, 24 of them one subtree,
+    and after G9 a single local-only folder brought 40 more along. Descending
+    keeps a level short and keeps the numbers next to short names instead of
+    full paths — see G10.
+
+    Returns the folders chosen, empty if the operator backed out. The choice
+    itself is `browse_rows`, which is a pure function and tested as one; what
+    is here is the loop and the printing.
+    """
+    prefix = ""
+    while True:
+        rows = browse_rows(orphans, prefix)
+        if not rows:
+            # Only reachable if the list changed under us; going up is the one
+            # answer that cannot loop.
+            prefix = prefix.rpartition("/")[0]
+            if not prefix:
+                return []
+            continue
+        where = f"/{prefix}" if prefix else "/"
+        print(f"\nLocal folders not in sync — {where}\n")
+        for i, row in enumerate(rows, start=1):
+            print(f" {i:2d}  {format_browse_row(row)}")
+        print("  0  " + ("Up" if prefix else "Back"))
+        picks = prompt_ints(
+            "Open a folder, or choose what to add (1 or 1,2 or all)",
+            max_n=len(rows),
+            reader=reader,
+        )
+        if not picks:
+            if not prefix:
+                return []
+            prefix = prefix.rpartition("/")[0]
+            continue
+        chosen = [rows[index - 1] for index in picks]
+        if len(chosen) == 1 and not chosen[0].addable:
+            prefix = chosen[0].prefix
+            continue
+        # `all` on a level that mixes the two is the common way to get here, so
+        # the containers are skipped with a word rather than refused.
+        skipped = [row.name for row in chosen if not row.addable]
+        addable = [row.entry for row in chosen if row.addable]
+        if skipped:
+            print(f"Not added (open them to choose inside): {', '.join(skipped)}")
+        if not addable:
+            continue
+        return addable
+
+
 def screen_add_orphans(cfg: MenuConfig, reader: Reader) -> None:
     orphans = list_orphan_paths(
         cfg.db_path, cfg.local_root, cfg.policy_path, root="/", max_depth=5
@@ -159,12 +213,8 @@ def screen_add_orphans(cfg: MenuConfig, reader: Reader) -> None:
         print("No local orphan folders found.")
         print("Tip: folders with [L] in ydm-tree appear here.")
         return
-    print("Local folders not in sync:\n")
-    for i, entry in enumerate(orphans, start=1):
-        print(f" {i:2d}  {format_orphan_label(entry)}")
-    print("  0  Back")
-    picks = prompt_ints("Choose (e.g. 1 or 1,2 or all)", max_n=len(orphans), reader=reader)
-    if not picks:
+    picked = _pick_orphans(orphans, reader=reader)
+    if not picked:
         return
     print("Mode: 1=bidirectional  2=download-only  0=cancel")
     mode_choice = prompt_int("Mode", reader=reader)
@@ -176,8 +226,7 @@ def screen_add_orphans(cfg: MenuConfig, reader: Reader) -> None:
         return
 
     added_any = False
-    for index in picks:
-        entry = orphans[index - 1]
+    for entry in picked:
         path = entry.cloud_path
         if mode == "bidirectional":
             inspect_payload = action_inspect(cfg, path)

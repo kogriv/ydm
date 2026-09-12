@@ -492,7 +492,16 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
             print(f"  {line}")
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, without parsing anything yet.
+
+    Separate from `parse_args` so a caller that reaches `cmd_resync` and friends
+    directly can take its defaults from here instead of restating them.
+    `tools/ydm_menu_actions._bisync_ns` used to restate them, drifted, and the
+    menu crashed with `Namespace has no attribute 'force_filter'` the first time
+    someone accepted the resync it offers. `parse_args([command])` gives every
+    option that command defines, because none of them is required.
+    """
     parser = argparse.ArgumentParser(
         description="Bidirectional sync via rclone bisync (--backend rclone)"
     )
@@ -538,7 +547,11 @@ def parse_args() -> argparse.Namespace:
     )
     common_flags(status_parser)
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:

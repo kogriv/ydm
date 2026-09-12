@@ -66,6 +66,12 @@ class BenchPath:
     #: What it should render under blacklist (daemon) semantics, where the
     #: policy holds only exclusions and everything else is synced.
     expect_daemon: str
+    #: Whether the folder exists in the cloud at all. False is the case the bench
+    #: had no row for until 2026-09-12: a folder copied onto the phone and never
+    #: uploaded. With no snapshot row the tree — built from the snapshot — had no
+    #: node to render it with, so the screen named "Add LOCAL folder to sync"
+    #: could not list it. See GAP.md G9 and BACKLOG.md Phase 14.
+    in_cloud: bool = True
     why: str = ""
 
 
@@ -174,6 +180,20 @@ SAMPLE_TREE: List[BenchPath] = [
         expect_rclone="[L]", expect_daemon="[B]",
         why="on disk, not in policy: an orphan under whitelist. A blacklist has "
             "no orphans — nothing is outside it",
+    ),
+    BenchPath(
+        "/fresh", None, cloud_files=0, local_files=0, local_dir=True,
+        expect_rclone="[L]", expect_daemon="[B]",
+        in_cloud=False,
+        why="copied onto the phone and never uploaded — the only row with no "
+            "cloud existence at all. Nodes come from the snapshot, so until "
+            "2026-09-12 there was no node to carry a marker: the tree did not "
+            "show it and the screen promising to add local folders could not "
+            "list it (G9). It stands exactly as /orphans does, differing only "
+            "in having no cloud row, which is why the pair belongs together. "
+            "Needs no tenth marker: no cloud files, a directory on disk and no "
+            "policy entry already mean `orphan` -> [L] under a whitelist, and "
+            "under a blacklist nothing excludes it -> [B]",
     ),
     BenchPath(
         "/arch", None, cloud_files=1, local_files=0, local_dir=False,
@@ -334,6 +354,8 @@ def build_bench(tmpdir: str, *, base_age_days: int = 1) -> Bench:
     cloud_root = root / "cloud"
     cloud_root.mkdir(parents=True, exist_ok=True)
     for entry in SAMPLE_TREE:
+        if not entry.in_cloud:
+            continue
         folder = cloud_root / _rel(entry.path) if _rel(entry.path) else cloud_root
         folder.mkdir(parents=True, exist_ok=True)
         for i in range(entry.cloud_files):
@@ -368,11 +390,13 @@ def build_bench(tmpdir: str, *, base_age_days: int = 1) -> Bench:
         local_rows = []
         for entry in SAMPLE_TREE:
             rel = _rel(entry.path)
-            if rel:
+            if rel and entry.in_cloud:
                 parent, _, name = rel.rpartition("/")
                 # The directory row, so the tree has a node to render at all.
                 # The sync root needs none: it is the tree's starting point,
-                # not a child of anything.
+                # not a child of anything. A folder that is not in the cloud gets
+                # no row at all — that absence is the case being described, and
+                # the tree has to find it on disk instead.
                 cloud_rows.append((1, _cloud_parent(f"/{parent}" if parent else ""), name, "dir", 0))
             for i in range(entry.cloud_files):
                 cloud_rows.append((1, _cloud_parent(entry.path), f"f{i}.txt", "file", 10))
