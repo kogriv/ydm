@@ -5,6 +5,27 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-13 — one notification per problem, not one per run
+
+A screenshot from the device: four identical "Filter-file changed since the last
+resync" cards stacked in the notification shade, 6 minutes / 35 minutes / 1 hour
+/ 1 hour apart. The job runs every half hour and a blocked run stays blocked
+until a person acts, so notifying per run means the same card forever.
+
+- **This is the rule `job_run.sh` already follows, applied to the other half.**
+  Its tests say a block notifies and a skip does not, because a notification per
+  skip trains the operator to swipe ydm's cards away unread — the important one
+  included. `sync_bisync run` was doing exactly that.
+- **The log still records every run.** It is the audit trail and a gap in it
+  looks like a job that never fired, which is the confusion issue #14 was about.
+  Deduplication applies to the interruption, not the record.
+- **Cleared on a successful run**, so a problem that returns after things were
+  working interrupts again instead of being silently swallowed.
+- **The card names the menu now.** It said "Run `sync_bisync.py resync --apply`"
+  to somebody holding a phone who works through `ydm`; it now says to open ydm
+  and choose 6. The error string keeps the command — it goes to the log and the
+  JSON envelope, where that is the right answer.
+
 ## 2026-09-12 — menu 6 crashed on a name it never imported
 
 Third crash in a row on an "apply" branch, reported from the device:

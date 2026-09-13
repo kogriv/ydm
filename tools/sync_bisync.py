@@ -30,7 +30,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -272,6 +272,50 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     return payload
 
 
+#: What a person can actually do about an error, said in terms of the menu they
+#: use. The error strings themselves stay as they are: they go into the log and
+#: the JSON envelope, where a command name is the right answer.
+_NOTICE_FOR_ERROR = (
+    ("Filter-file changed since the last resync",
+     "Sync is paused: the synced folders changed. Open ydm and choose "
+     "6 (Resync baseline)."),
+    ("No successful resync on record",
+     "Sync has no baseline yet. Open ydm and choose 6 (Resync baseline)."),
+)
+
+
+def human_notice(error: str) -> str:
+    for prefix, notice in _NOTICE_FOR_ERROR:
+        if error.startswith(prefix):
+            return notice
+    return error
+
+
+def notify_once(state: Dict[str, object], title: str, message: str) -> bool:
+    """Notify unless this exact thing was the last thing notified.
+
+    The scheduled job runs every half hour, and a blocked run is blocked until a
+    person does something about it — so notifying per run means the same message
+    arriving forever. On the device that was four identical "Filter-file changed
+    since the last resync" cards stacked in the shade overnight, which is how an
+    operator learns to swipe ydm's notifications away without reading them, the
+    important one included. `job_run.sh` already only notifies for the one verdict
+    worth interrupting someone over; this is the same rule for the other half.
+
+    The log still records every run. It is the audit trail, and it should be
+    complete; the notification is an interruption, and it should not be.
+
+    Cleared on a successful run, so a problem that comes back after things were
+    working is a new interruption rather than a silence.
+    """
+    if state.get("last_notified_error") == message:
+        return False
+    state["last_notified_error"] = message
+    save_bisync_state(state)
+    notify(title, message)
+    return True
+
+
 def cmd_run(args: argparse.Namespace) -> dict:
     filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
     state = load_bisync_state()
@@ -309,7 +353,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
             append_text_log(var_path("bisync.log"),
                              f"{datetime.now().isoformat()} run BLOCKED {payload['error']}")
             if args.notify_on_error:
-                notify("ydm sync_bisync", payload["error"])
+                notify_once(state, "ydm sync", human_notice(payload["error"]))
         return payload
 
     preview_cmd = [
@@ -359,7 +403,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
             append_text_log(var_path("bisync.log"),
                              f"{datetime.now().isoformat()} run FAILED rc={result.returncode}")
             if args.notify_on_error:
-                notify("ydm sync_bisync", payload["error"])
+                notify_once(state, "ydm sync", human_notice(payload["error"]))
             return payload
 
         local_scan = run_local_scan(args.db_path, args.local_root)
@@ -367,6 +411,9 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
         state["last_run_at"] = datetime.now().isoformat()
         state["last_status"] = "ok"
+        # A run that worked ends the notification: whatever comes next is news
+        # again rather than the same card returning every half hour.
+        state["last_notified_error"] = None
         save_bisync_state(state)
         payload["state_after"] = dict(state)
         append_text_log(var_path("bisync.log"), f"{datetime.now().isoformat()} run OK")
