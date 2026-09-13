@@ -1807,6 +1807,42 @@ class TestAddScreensConfirm(BenchTestCase):
             f"menu 6 said yes and no baseline was written:\n{text[-2000:]}",
         )
 
+
+    def test_a_resync_ends_the_paused_notification(self):
+        """The flag has to be set before clearing it can mean anything.
+
+        The first version of this asserted the cleared flag straight after a
+        resync — with no blocked run before it the flag had never been set, so
+        the assertion passed against the unfixed code too. A check that cannot
+        fail is worse than none: it reports coverage it does not have. Verified
+        by mutation this time.
+        """
+        self._require_rclone()
+        from unittest import mock
+
+        from tools.sync_bisync import cmd_run
+        from tools.ydm_menu_actions import _bisync_ns, action_resync, render_filters_apply
+
+        state_path = os.path.join(self.bench.var_dir, "bisync_state.json")
+
+        def flag():
+            if not os.path.exists(state_path):
+                return None
+            with open(state_path, encoding="utf-8") as handle:
+                return json.load(handle).get("last_notified_error")
+
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            cfg = self._cfg_against_the_fake_cloud()
+            self.assertTrue(render_filters_apply(cfg).ok)
+            # No baseline yet, so this run is blocked and raises the notice.
+            with mock.patch("tools.sync_bisync.notify"):
+                blocked = cmd_run(_bisync_ns(cfg, "run", apply=True))
+            self.assertIsNotNone(blocked["error"], blocked)
+            self.assertIsNotNone(flag(), "the run should have raised a notice")
+
+            self.assertTrue(action_resync(cfg, apply=True).ok)
+        self.assertIsNone(flag(), "the resync fixed it and the notice outlived it")
+
     def test_forcing_a_local_only_folder_resyncs_too(self):
         """G9 and the resync path in one pass, since that is how it arrived.
 

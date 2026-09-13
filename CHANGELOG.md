@@ -21,6 +21,16 @@ until a person acts, so notifying per run means the same card forever.
   Deduplication applies to the interruption, not the record.
 - **Cleared on a successful run**, so a problem that returns after things were
   working interrupts again instead of being silently swallowed.
+- **A finished resync ends the notice.** Found by reading the state after the
+  real one on the device: the flag outlived the condition it described. The next
+  successful run would have cleared it, but a run that blocked again for the same
+  reason first would have been silent — the guard quiet exactly when it has
+  something to say, which is the shape of issue #5.
+- **And the first test for that clearing could not fail.** It asserted the flag
+  was empty after a resync without ever making it non-empty, so it passed against
+  the unfixed code too. A check that cannot fail is worse than none: it reports
+  coverage it does not have. Rewritten to raise the notice first, and
+  mutation-checked.
 - **The card names the menu now.** It said "Run `sync_bisync.py resync --apply`"
   to somebody holding a phone who works through `ydm`; it now says to open ydm
   and choose 6. The error string keeps the command — it goes to the log and the

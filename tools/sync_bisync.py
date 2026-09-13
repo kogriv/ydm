@@ -257,6 +257,12 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     state = load_bisync_state()
     state["last_resync_filter_hash"] = filter_file_hash(filter_path)
     state["last_resync_at"] = datetime.now().isoformat()
+    # A resync is the answer to "sync is paused", so finishing one ends that
+    # notification. Without this the flag survives until the next successful
+    # run, and if the very next run blocked for the same reason in between, the
+    # card would be suppressed — the guard silent exactly when it has something
+    # to say, which is the shape of issue #5.
+    state["last_notified_error"] = None
     state["last_status"] = "ok"
     save_bisync_state(state)
     payload["state_after"] = state

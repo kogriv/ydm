@@ -104,6 +104,24 @@ class BlockedRunNotificationTests(unittest.TestCase):
             json.dump(state, handle)
         self.assertEqual(self._run()[1], 1)
 
+    def test_a_cleared_flag_lets_the_same_problem_speak_again(self):
+        """Whatever clears the flag, clearing it has to restore the interruption.
+
+        This is the reset half of the rule, tested where it lives — in
+        `notify_once`. That `cmd_resync` actually performs the reset is a
+        different claim and is asserted against a real resync on the bench
+        (`test_menu_six_applies_the_resync_it_offers`), because asserting it here
+        would mean simulating the thing under test.
+        """
+        self._run()
+        self.assertTrue(self._state().get("last_notified_error"))
+        state = self._state()
+        state["last_notified_error"] = None
+        with open(os.path.join(self.var_dir, "bisync_state.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump(state, handle)
+        self.assertEqual(self._run()[1], 1)
+
     def test_the_message_points_at_the_menu_not_a_command(self):
         """The person reading it works through `ydm`, not the CLI.
 
