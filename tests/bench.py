@@ -194,6 +194,18 @@ SAMPLE_TREE: List[BenchPath] = [
             "cloud has it and the disk does not",
     ),
     BenchPath(
+        "/pending_unscanned", "bidirectional", cloud_files=0, local_files=0,
+        local_dir=True, in_cloud=False,
+        expect_rclone="[B^]", expect_daemon="[B^]",
+        why="the same as /pending, except no local scan has seen it yet — a "
+            "folder added minutes ago, which is when someone is most likely to "
+            "look. The first version of the [B^] rule tested `local_count > 0` "
+            "and so missed exactly the case it was written for: "
+            "Books/Math/math_pop, 118 files on disk, read [B] because the scan "
+            "predated them. The directory existing is a live fact; the count is "
+            "a recorded one and it lags",
+    ),
+    BenchPath(
         "/pro/inherited", None, cloud_files=1, local_files=1, local_dir=True,
         expect_rclone="[B]", expect_daemon="[B]",
         why="inside a bidirectional folder with no entry of its own — the case "
@@ -206,7 +218,7 @@ SAMPLE_TREE: List[BenchPath] = [
     ),
     BenchPath(
         "/fresh", None, cloud_files=0, local_files=0, local_dir=True,
-        expect_rclone="[L]", expect_daemon="[B]",
+        expect_rclone="[L]", expect_daemon="[B^]",
         in_cloud=False,
         why="copied onto the phone and never uploaded — the only row with no "
             "cloud existence at all. Nodes come from the snapshot, so until "
@@ -215,8 +227,12 @@ SAMPLE_TREE: List[BenchPath] = [
             "list it (G9). It stands exactly as /orphans does, differing only "
             "in having no cloud row, which is why the pair belongs together. "
             "Needs no tenth marker: no cloud files, a directory on disk and no "
-            "policy entry already mean `orphan` -> [L] under a whitelist, and "
-            "under a blacklist nothing excludes it -> [B]",
+            "policy entry already mean `orphan` -> [L] under a whitelist. Under "
+            "a blacklist nothing excludes it, so it is in the sync set with "
+            "nothing of it in the cloud — which is [B^]. This row said [B] until "
+            "2026-09-13, and that was the same overstatement [B^] exists to "
+            "stop, reached through the daemon's semantics instead of the "
+            "whitelist's",
     ),
     BenchPath(
         "/arch", None, cloud_files=1, local_files=0, local_dir=False,

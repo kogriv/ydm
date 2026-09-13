@@ -176,7 +176,7 @@ def local_state(
             return "missing"
         if cloud_count > 0 and local_count < cloud_count:
             return "partial"
-        if policy_mode == "bidirectional" and cloud_count == 0 and local_count > 0:
+        if policy_mode == "bidirectional" and cloud_count == 0 and materialized:
             # On disk, in the policy, and the cloud has none of it. Reported as
             # `materialized` until 2026-09-12, which rendered `[B] 100%` — the
             # tree asserting "fully synced" about data that exists in exactly one
@@ -187,6 +187,13 @@ def local_state(
             # Not an error by itself: it is also what every folder looks like
             # between being added and being synced for the first time. It is a
             # state, and it needed a name.
+            #
+            # `materialized`, not `local_count > 0`: the count comes from the
+            # last local scan, and a folder added minutes ago is not in it yet.
+            # The first version tested the count and so missed exactly the case
+            # it was written for — `Books/Math/math_pop`, 118 files on disk, read
+            # `[B]` because no scan had seen them. The directory existing is a
+            # live fact; the count is a recorded one, and it can lag.
             return "not_uploaded"
         return "materialized"
     if materialized and not in_policy:

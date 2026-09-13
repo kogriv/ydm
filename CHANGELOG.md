@@ -5,6 +5,25 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-13 — `[B^]` missed the folder added a minute ago
+
+The owner added a second folder — `Books/Math/math_pop`, 118 files, 121 MB, on
+disk and in no cloud scan — and it rendered `[B]`, the exact overstatement `[B^]`
+had been added to stop the day before.
+
+- **The rule tested the recorded count, not the live fact.** `local_count` comes
+  from the last local scan, and a folder added minutes ago is not in it: cloud 0,
+  local 0, so the branch never fired. `local_state()` already computes
+  `has_local_dir` for this reason, and the condition uses it now. Which means the
+  first version missed precisely the case it was written for — someone looking
+  right after adding a folder, which is when they look.
+- **The bench had the shape but not this variant.** `/pending` carries a local
+  scan row; `/pending_unscanned` is the same folder before any scan has seen it.
+- **`/fresh` under the daemon becomes `[B^]` too**, and that is the table being
+  improved rather than adjusted: under blacklist semantics every path is in the
+  sync set, so a local-only folder is "in sync, nothing in the cloud yet" — the
+  same overstatement, reached through the other semantics.
+
 ## 2026-09-13 — one notification per problem, not one per run
 
 A screenshot from the device: four identical "Filter-file changed since the last

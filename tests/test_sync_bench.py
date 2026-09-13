@@ -443,8 +443,11 @@ class TestMenuOnBench(BenchTestCase):
             lines = bisync_scope_lines(cfg)
         text = "\n".join(lines)
         pending = [line for line in lines if "will be uploaded" in line]
-        self.assertEqual(len(pending), 1, text)
-        self.assertIn("/pending/", pending[0], text)
+        self.assertEqual(
+            sorted(line.split()[1] for line in pending),
+            ["/pending/", "/pending_unscanned/"],
+            text,
+        )
         self.assertIn("nothing in the cloud yet", text)
         # And the folders that are in sync must not be tarred with it.
         self.assertNotIn("/pro/   <- not in the cloud", text)
