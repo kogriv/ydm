@@ -5,6 +5,28 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-13 — the card outlived the problem
+
+A screenshot of the notification shade: "Sync is stuck: bisync lost its baseline
+and every run will fail until it is rebuilt" sitting at the top, hours after a
+resync had fixed exactly that and the job had gone back to `run OK`. Two older
+cards under it, one in the pre-fix wording. Three statements about the past and
+none about the present.
+
+- **Android keeps a card until something removes it, and nothing did.** Every
+  notification was a separate entry that could be neither replaced nor taken
+  back, because none carried an id.
+- **One id for everything ydm says about syncing**, so the shade holds at most
+  one such card and a new one replaces the old rather than stacking. `job_run.sh`
+  keeps its own, separate: the guard and bisync say different things and neither
+  should quietly overwrite the other.
+- **Taken back when it stops being true** — a successful run or resync removes
+  the sync card, a run the guard allows removes the guard's. A card that
+  survives its own problem teaches the reader to distrust all of them, which is
+  the same damage as one card per run.
+- **Deduplication still does its job**: the id stops the stack, `notify_once`
+  stops the re-alerting, and `--alert-once` stops an edit from buzzing.
+
 ## 2026-09-13 — rclone can lose its listings, and nothing said so
 
 Found by walking every menu entry by hand — the sweep itself passed, but the

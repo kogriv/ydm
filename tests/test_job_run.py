@@ -56,6 +56,11 @@ class JobRunTestCase(unittest.TestCase):
         # that — and a suite run on the device sent a real "bisync blocked"
         # notification to the phone, indistinguishable from the guard stopping
         # a live sync. It happened, on 2026-09-09.
+        self.dismiss_log = os.path.join(self.tmpdir, "dismissals")
+        self.dismiss_bin = os.path.join(self.tmpdir, "dismiss-stub")
+        with open(self.dismiss_bin, "w", encoding="utf-8") as handle:
+            handle.write('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DISMISS_LOG"\n')
+        os.chmod(self.dismiss_bin, 0o755)
         self.notify_log = os.path.join(self.tmpdir, "notifications")
         self.notify_bin = os.path.join(self.tmpdir, "notify-stub")
         with open(self.notify_bin, "w", encoding="utf-8") as handle:
@@ -90,7 +95,9 @@ class JobRunTestCase(unittest.TestCase):
             "STUB_TRACE": self.trace,
             "YDM_VAR_DIR": self.var_dir,
             "YDM_NOTIFY_BIN": self.notify_bin,
+            "YDM_NOTIFY_REMOVE_BIN": self.dismiss_bin,
             "NOTIFY_LOG": self.notify_log,
+            "DISMISS_LOG": self.dismiss_log,
         })
         result = subprocess.run(
             ["bash", str(JOB_RUN), "--local-root", self.mirror,
@@ -108,6 +115,12 @@ class JobRunTestCase(unittest.TestCase):
 
     def bisync_ran(self):
         return os.path.exists(self.trace)
+
+    def dismissals(self):
+        if not os.path.exists(self.dismiss_log):
+            return []
+        with open(self.dismiss_log, encoding="utf-8") as handle:
+            return [line for line in handle.read().splitlines() if line]
 
     def notifications(self):
         if not os.path.exists(self.notify_log):
@@ -144,6 +157,25 @@ class GuardDecisionsReachTheLog(JobRunTestCase):
         self.run_job("block_bisync", "ambiguous_candidates")
         self.assertEqual(len(self.notifications()), 1, self.notifications())
         self.assertIn("bisync blocked", self.notifications()[0])
+
+    def test_the_card_carries_an_id_of_its_own(self):
+        """Its own, not sync_bisync's: the two say different things.
+
+        Without an id a card cannot be replaced or taken back, so every
+        interruption becomes a permanent entry — the state the owner\'s
+        notification shade was in on 2026-09-13.
+        """
+        self.run_job("block_bisync", "ambiguous_candidates")
+        self.assertIn("--id ydm-guard", self.notifications()[0], self.notifications())
+
+    def test_a_clean_run_takes_the_card_back(self):
+        """The guard let this run through, so its last complaint is over."""
+        self.run_job("allow_bisync", "no_candidates")
+        self.assertEqual(self.dismissals(), ["ydm-guard"], self.dismissals())
+
+    def test_a_blocked_run_does_not_take_it_back(self):
+        self.run_job("block_bisync", "ambiguous_candidates")
+        self.assertEqual(self.dismissals(), [])
 
     def test_a_skip_does_not_reach_the_phone(self):
         self.run_job("skip_bisync", "no_comparable_baseline")

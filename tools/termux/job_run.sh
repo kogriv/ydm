@@ -61,10 +61,22 @@ cd "$PROJECT_DIR" || exit 2
 # on the device it looked exactly like the guard stopping a live sync. Named
 # through a variable so a test can point it at a recorder and assert on it.
 NOTIFY_BIN="${YDM_NOTIFY_BIN:-/data/data/com.termux/files/usr/bin/termux-notification}"
+NOTIFY_REMOVE_BIN="${YDM_NOTIFY_REMOVE_BIN:-/data/data/com.termux/files/usr/bin/termux-notification-remove}"
+# Its own id, separate from sync_bisync's: the two say different things and one
+# must not silently replace the other. Both are ids rather than nothing, so a
+# card can be taken back once what it describes stops being true — see
+# tools/sync_common.py, SYNC_NOTIFICATION_ID.
+NOTIFY_ID="ydm-guard"
 
 notify() {
     [ -x "$NOTIFY_BIN" ] || return 0
-    "$NOTIFY_BIN" --title "$1" --content "$2" >/dev/null 2>&1 || true
+    "$NOTIFY_BIN" --title "$1" --content "$2" --id "$NOTIFY_ID" --alert-once \
+        >/dev/null 2>&1 || true
+}
+
+dismiss_notify() {
+    [ -x "$NOTIFY_REMOVE_BIN" ] || return 0
+    "$NOTIFY_REMOVE_BIN" "$NOTIFY_ID" >/dev/null 2>&1 || true
 }
 
 # The same file sync_bisync.py appends to. It resolves this through
@@ -134,6 +146,9 @@ case "$decision" in
         notify "ydm rename preflight" "bisync blocked; run sync_rename.py status"
         ;;
     *)
+        # The guard let this run through, so whatever it complained about last
+        # time is over. The card goes with it.
+        dismiss_notify
         if [ "$APPLY" -eq 1 ]; then
             python3 tools/sync_bisync.py run --apply \
                 --db-path "$DB_PATH" \

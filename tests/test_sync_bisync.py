@@ -225,5 +225,52 @@ class RcloneLosesItsListingsTests(BlockedRunNotificationTests):
         self.assertEqual((first, repeats), (1, 0))
 
 
+class TheCardIsTakenBackTests(RcloneLosesItsListingsTests):
+    """A notification says "now", or it teaches the reader to ignore it.
+
+    Android keeps a card until something removes it, and nothing did: on
+    2026-09-13 the shade held "Sync is stuck: bisync lost its baseline and every
+    run will fail" for hours after a resync had fixed exactly that and the job
+    had gone back to `run OK`. Two older cards sat under it, one of them the
+    pre-fix wording. Three statements about the past, none about the present.
+    """
+
+    def _succeeding_run(self):
+        from tools.sync_common import CommandResult
+
+        ok = CommandResult(cmd=["rclone"], returncode=0, stdout="", stderr="")
+        with mock.patch("tools.sync_bisync.rclone_bisync_run", return_value=ok), \
+             mock.patch("tools.sync_bisync.LOCK_PATH",
+                        os.path.join(self.tmpdir, "lock")), \
+             mock.patch("tools.sync_bisync.run_local_scan") as scan, \
+             mock.patch("tools.sync_bisync.dismiss_notification") as dismiss, \
+             mock.patch("tools.sync_bisync.notify"):
+            scan.return_value = mock.Mock(started=True, scan_id=1, error=None,
+                                          duration_sec=0.1)
+            cmd_run(self._args_with_a_baseline())
+        return dismiss
+
+    def test_a_run_that_works_removes_the_card(self):
+        self._run_against(2, "Must run --resync to recover.\n")
+        self.assertTrue(self._state().get("last_notified_error"))
+        self.assertEqual(self._succeeding_run().call_count, 1)
+
+    def test_nothing_is_removed_when_nothing_was_said(self):
+        """A card belonging to something else must not be swept up."""
+        self.assertEqual(self._succeeding_run().call_count, 0)
+
+    def test_the_id_makes_a_new_card_replace_the_old(self):
+        """Without it every notification is a separate, unremovable entry."""
+        from tools.sync_common import SYNC_NOTIFICATION_ID, notify
+
+        with mock.patch("tools.sync_common.shutil.which", return_value="/bin/true"), \
+             mock.patch("tools.sync_common.subprocess.run") as run:
+            notify("t", "m")
+        argv = run.call_args[0][0]
+        self.assertIn("--id", argv)
+        self.assertIn(SYNC_NOTIFICATION_ID, argv)
+        self.assertIn("--alert-once", argv)
+
+
 if __name__ == "__main__":
     unittest.main()

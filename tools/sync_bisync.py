@@ -41,6 +41,7 @@ from tools.sync_common import (  # noqa: E402
     acquire_lock,
     append_text_log,
     filter_file_hash,
+    dismiss_notification,
     load_bisync_state,
     load_sync_filters,
     notify,
@@ -266,6 +267,8 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     # run, and if the very next run blocked for the same reason in between, the
     # card would be suppressed — the guard silent exactly when it has something
     # to say, which is the shape of issue #5.
+    if state.get("last_notified_error"):
+        dismiss_notification()
     state["last_notified_error"] = None
     state["rclone_wants_resync"] = False
     state["last_status"] = "ok"
@@ -440,7 +443,12 @@ def cmd_run(args: argparse.Namespace) -> dict:
         state["last_run_at"] = datetime.now().isoformat()
         state["last_status"] = "ok"
         # A run that worked ends the notification: whatever comes next is news
-        # again rather than the same card returning every half hour.
+        # again rather than the same card returning every half hour. And the
+        # card already on the phone is taken back — it described a problem that
+        # no longer exists, and leaving it there is how someone learns to
+        # distrust all of them.
+        if state.get("last_notified_error"):
+            dismiss_notification()
         state["last_notified_error"] = None
         save_bisync_state(state)
         payload["state_after"] = dict(state)

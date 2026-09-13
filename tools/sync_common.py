@@ -799,14 +799,44 @@ def append_text_log(path: str, line: str) -> None:
         handle.write(line.rstrip("\n") + "\n")
 
 
-def notify(title: str, message: str) -> None:
+#: One id for everything ydm says about syncing, so the shade holds at most one
+#: such card. Without it every notification is a separate one that nothing can
+#: take back, and a solved problem keeps shouting: on 2026-09-13 the owner had
+#: "Sync is stuck… every run will fail" sitting above two older cards, hours
+#: after a resync had fixed it and the job had gone back to `run OK`.
+SYNC_NOTIFICATION_ID = "ydm-sync"
+
+
+def notify(title: str, message: str, notification_id: str = SYNC_NOTIFICATION_ID) -> None:
     """Best-effort termux-notification wrapper — no-op (never raises) if the
-    binary isn't available or the call fails."""
+    binary isn't available or the call fails.
+
+    `--id` overwrites any previous card with the same id, which is what makes a
+    notification a statement about now rather than an entry in a log.
+    """
     binary = shutil.which("termux-notification")
     if not binary:
         return
+    command = [binary, "--title", title, "--content", message]
+    if notification_id:
+        command += ["--id", notification_id, "--alert-once"]
     try:
-        subprocess.run([binary, "--title", title, "--content", message],
-                        capture_output=True)
+        subprocess.run(command, capture_output=True)
+    except OSError:
+        pass
+
+
+def dismiss_notification(notification_id: str = SYNC_NOTIFICATION_ID) -> None:
+    """Take the card back once the thing it describes is no longer true.
+
+    The other half of giving notifications an id. A card that survives its own
+    problem teaches the reader to distrust all of them, which is the same damage
+    as one card per run — see `notify_once`.
+    """
+    binary = shutil.which("termux-notification-remove")
+    if not binary:
+        return
+    try:
+        subprocess.run([binary, notification_id], capture_output=True)
     except OSError:
         pass
