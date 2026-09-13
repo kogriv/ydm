@@ -5,6 +5,37 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-13 — one menu entry for scans and the database
+
+"Не могу понять, где в меню запуск скана облака (полного, умного) и просмотр
+инфо по этим сканам, и то же самое про локальный." Three parts, each broken
+differently — `tasks/ydm_menu/GAP.md` G14.
+
+- **The full cloud scan was hidden inside "Scan one folder…"**, as the
+  second-to-last row of a folder list spelled `/ (full disk, slow)`. Reachable,
+  and behind a label that denies it exists, which is why it could not be found.
+  Its own line now, with what it costs.
+- **The local scan had no entry at all.** It happens on its own — before a tree
+  render, in the rename preflight, after a resync — so it never got one; but
+  "the tree still shows yesterday" had no answer, and a folder added minutes ago
+  is invisible to every count until it runs.
+- **Scan information was one line ending in a command to type.** There is a list
+  now: type, time, rows, and which scan the tree actually reads. That last part
+  is decided at read time rather than stored, so a plain dump of the table
+  cannot show it — and a list without it invites pruning the base.
+- **Cleaning up is an entry with a plan and a question**, not `-> python3 ydm.py
+  report prune` printed at somebody working through a menu.
+- **The docs caught up in the same pass.** `HOW_TO_USE.md` describes the new
+  entry and its six actions; the marker table there had also fallen behind —
+  five of the ten were missing, including `[B^]`, added the day before. The
+  in-app help (`9`) lists `[B^]` and points at 7. `DESIGN-2026-08-24.md` keeps
+  its text as the record of that day's decision, with a banner saying item 7 has
+  since grown.
+- **Two rules the owner set — "без простыней и двоякости"** — are G10 and G12
+  restated: counts up front and the list behind its own entry, capped at ten;
+  and "full" and "one folder" as separate lines rather than one with a surprise
+  inside. Both are asserted, and both mutation-checked.
+
 ## 2026-09-13 — `[B^]` missed the folder added a minute ago
 
 The owner added a second folder — `Books/Math/math_pop`, 118 files, 121 MB, on

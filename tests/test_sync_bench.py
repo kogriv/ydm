@@ -380,6 +380,101 @@ class TestMenuOnBench(BenchTestCase):
         self.assertIn("/Books/Keep", listed)
         self.assertIn("/Books/Math", listed)
 
+    def test_the_scans_screen_offers_the_full_walk_as_its_own_line(self):
+        """G14: the full cloud scan was hidden inside "Scan one folder…".
+
+        It was reachable — as the second-to-last row of a folder list, spelled
+        `/ (full disk, slow)` — which is why the owner could not find it. A
+        capability behind a label that denies it is not offered.
+        """
+        text = self._scans_screen(["0"])
+        self.assertIn("Full cloud scan of the whole disk", text, text)
+        self.assertIn("Scan one cloud folder", text, text)
+        self.assertIn("Rescan the local mirror now", text, text)
+
+    def test_the_scans_screen_opens_with_the_state_not_a_list(self):
+        """No walls: counts up front, the scan list behind its own entry.
+
+        The orphan screen taught this the hard way — 32 rows printed on every
+        visit, three quarters of them one subtree (G10).
+        """
+        text = self._scans_screen(["0"])
+        self.assertIn("Cloud snapshot:", text)
+        self.assertIn("Local scan:", text)
+        self.assertIn("Database:", text)
+        self.assertNotIn("folder update", text, "the scan list should be behind 5")
+
+    def test_the_scan_list_says_which_one_the_tree_reads(self):
+        """A list without it invites someone to prune the base.
+
+        Which scan the composite draws from is decided at read time, not stored
+        as a column, so a plain dump of the table cannot show it.
+        """
+        text = self._scans_screen(["5", "0"])
+        self.assertIn("base of the snapshot", text, text)
+
+    def test_cleaning_up_shows_a_plan_and_asks(self):
+        """Not "-> python3 ydm.py report prune", which is what it used to say.
+
+        Answering no must leave the database alone, which is the half worth
+        asserting: a preview that deletes anyway is worse than no preview.
+        """
+        import sqlite3
+
+        def scans():
+            conn = sqlite3.connect(self.bench.db_path)
+            try:
+                return conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+            finally:
+                conn.close()
+
+        before = scans()
+        text = self._scans_screen(["6", "n", "0"])
+        self.assertNotIn("python3 ydm.py", text, text)
+        self.assertEqual(scans(), before, "answering no still changed the database")
+
+    def test_rescanning_the_local_mirror_records_a_scan(self):
+        """The entry that did not exist at all, doing the thing it names."""
+        import sqlite3
+
+        def local_scans():
+            conn = sqlite3.connect(self.bench.db_path)
+            try:
+                return conn.execute(
+                    "SELECT COUNT(*) FROM scans WHERE scan_type = 'local'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+        before = local_scans()
+        text = self._scans_screen(["4", "0"])
+        self.assertIn("Local scan #", text, text)
+        self.assertEqual(local_scans(), before + 1)
+
+    def _scans_screen(self, answers):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from tools.ydm_menu_config import MenuConfig
+        from tools.ydm_menu_prompts import scripted_reader
+
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, self.bench.env(), clear=True):
+            cfg = MenuConfig.from_env_and_args(
+                db_path=self.bench.db_path,
+                local_root=self.bench.local_root,
+                policy_path=self.bench.policy_path,
+                exclude_config=self.bench.exclude_config,
+                backend="rclone",
+                plain=True,
+            )
+            with contextlib.redirect_stdout(buffer):
+                __import__("tools.ydm_menu", fromlist=["x"]).screen_scans(
+                    cfg, scripted_reader(answers)
+                )
+        return buffer.getvalue()
+
     def test_the_status_screen_agrees_with_the_tree(self):
         """A third place deriving markers, pinned before it can drift.
 

@@ -1006,3 +1006,161 @@ def print_detailed_status(cfg: MenuConfig) -> None:
     bisync = cmd_status(_bisync_ns(cfg, "status"))
     for line in (bisync.get("log_tail") or [])[-5:]:
         print(f"  log: {line}")
+
+
+def scan_overview(cfg: MenuConfig) -> dict:
+    """The four facts the scans screen opens with, gathered in one place.
+
+    Three of them existed and were scattered: the snapshot's age lived in the
+    tree header, the database line in detailed status, and the local scan's id
+    only in a JSON field nobody reads. The fourth — when the local mirror was
+    last scanned — was not shown anywhere at all, which is G14.
+    """
+    from tools.sync_common import create_storage, get_latest_successful_scan_id
+    from tools.sync_tree_cloud import select_snapshot_for_tree
+    from ydm import Analyzer
+
+    storage = create_storage(cfg.db_path)
+    analyzer = Analyzer(storage)
+    overview: dict = {"snapshot": None, "local_scan": None, "database": None,
+                      "error": None}
+    try:
+        selection = select_snapshot_for_tree(analyzer, "/")
+        overview["snapshot"] = analyzer.snapshot_freshness()
+        overview["snapshot"]["folder_updates"] = len(selection.snapshot.folder_updates)
+    except Exception as exc:  # a database without a cloud scan is a real state
+        overview["error"] = f"{type(exc).__name__}: {exc}"
+
+    local_id = get_latest_successful_scan_id(storage, "local")
+    if local_id:
+        with storage.reuse_connection() as _:
+            pass
+        conn = storage.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT timestamp FROM scans WHERE id = ?", (local_id,)
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE scan_id = ?", (local_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        overview["local_scan"] = {
+            "id": local_id,
+            "timestamp": row[0] if row else None,
+            "rows": rows,
+        }
+    try:
+        overview["database"] = _database_facts(cfg)
+    except Exception as exc:
+        overview["database"] = {"error": f"{type(exc).__name__}: {exc}"}
+    return overview
+
+
+def recent_scans(cfg: MenuConfig, limit: int = 10) -> List[dict]:
+    """The last `limit` scans, with the one thing the table cannot say itself.
+
+    Which scan the composite draws from is not a column — it is decided at read
+    time by `select_snapshot_for_tree` — so a list of scans without it invites
+    the reader to prune the base. Marked here rather than left to be inferred.
+    """
+    import sqlite3
+
+    from tools.sync_common import create_storage
+    from tools.sync_tree_cloud import select_snapshot_for_tree
+    from ydm import Analyzer
+
+    storage = create_storage(cfg.db_path)
+    base_id = None
+    update_ids: set = set()
+    try:
+        snapshot = select_snapshot_for_tree(Analyzer(storage), "/").snapshot
+        base_id = snapshot.base_scan_id
+        update_ids = set(snapshot.folder_updates.values())
+    except Exception:
+        pass
+
+    conn = sqlite3.connect(os.path.expanduser(cfg.db_path))
+    try:
+        rows = conn.execute(
+            "SELECT id, timestamp, scan_type, status, duration FROM scans"
+            " ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        counts = dict(
+            conn.execute(
+                "SELECT scan_id, COUNT(*) FROM files GROUP BY scan_id"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+    listed = []
+    for scan_id, timestamp, scan_type, status, duration in rows:
+        role = ""
+        if scan_id == base_id:
+            role = "base of the snapshot"
+        elif scan_id in update_ids:
+            role = "folder update"
+        listed.append({
+            "id": scan_id,
+            "timestamp": timestamp,
+            "type": scan_type,
+            "status": status,
+            "duration": duration,
+            "rows": counts.get(scan_id, 0),
+            "role": role,
+        })
+    return listed
+
+
+def action_local_scan(cfg: MenuConfig) -> ActionResult:
+    """Rescan the local mirror, on purpose rather than as a side effect.
+
+    It already happens on its own — before a tree render, inside the rename
+    preflight every half hour, after a resync — which is why it never got an
+    entry. But "the tree still shows yesterday" has no answer without one, and
+    a folder added minutes ago is invisible to every count until it runs.
+    """
+    from tools.sync_common import run_local_scan
+
+    result = run_local_scan(cfg.db_path, cfg.local_root)
+    if not result.started or result.scan_id is None:
+        return ActionResult(False, f"Local scan failed: {result.error}")
+    return ActionResult(
+        True,
+        f"Local scan #{result.scan_id} done in {result.duration_sec:.1f}s",
+        {"scan_id": result.scan_id},
+    )
+
+
+def prune_preview(cfg: MenuConfig) -> ActionResult:
+    """What housekeeping would delete, before it deletes anything."""
+    from tools.sync_common import create_storage
+    from ydm import Analyzer
+
+    analyzer = Analyzer(create_storage(cfg.db_path))
+    plan = analyzer.prune_plan()
+    kept = len(plan.get("kept") or [])
+    return ActionResult(
+        True,
+        f"Would drop {plan['prunable_scans']} scan(s), "
+        f"{plan['prunable_rows']} of {plan['total_rows']} rows "
+        f"({plan['prunable_share_percent']}%), keeping {kept}",
+        plan,
+    )
+
+
+def action_prune(cfg: MenuConfig) -> ActionResult:
+    """Delete what the preview listed, and shrink the file afterwards.
+
+    `vacuum=True` because the point on a phone is the free space: without it the
+    file keeps its size and the operator sees the same number they were trying
+    to reduce.
+    """
+    from tools.sync_common import create_storage
+    from ydm import Analyzer
+
+    analyzer = Analyzer(create_storage(cfg.db_path))
+    result = analyzer.prune(apply=True, vacuum=True)
+    dropped = result.get("deleted_scans", result.get("prunable_scans"))
+    return ActionResult(True, f"Removed {dropped} scan(s); database vacuumed", result)

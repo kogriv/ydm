@@ -496,6 +496,122 @@ def screen_cloud_scan(cfg: MenuConfig, reader: Reader) -> None:
         _scan_one_folder(cfg, reader)
 
 
+def _overview_lines(cfg: MenuConfig) -> List[str]:
+    """Four lines of state, gathered from three places nobody looked in together."""
+    from tools.ydm_menu_actions import scan_overview
+
+    overview = scan_overview(cfg)
+    lines = []
+    snapshot = overview.get("snapshot")
+    if snapshot:
+        updates = snapshot.get("folder_updates") or 0
+        extra = f", +{updates} folder update(s)" if updates else ""
+        lines.append(
+            f"Cloud snapshot: base #{snapshot['base_scan_id']}, "
+            f"{snapshot.get('base_at')} ({snapshot.get('base_age_days')} d)"
+            f"{extra}, {snapshot.get('files_from_base', 0)} files"
+        )
+    else:
+        lines.append(f"Cloud snapshot: none yet ({overview.get('error')})")
+    local = overview.get("local_scan")
+    lines.append(
+        f"Local scan:     #{local['id']}, {local['timestamp']}, {local['rows']} rows"
+        if local else "Local scan:     never run"
+    )
+    database = overview.get("database") or {}
+    if database.get("error"):
+        lines.append(f"Database:       unreadable ({database['error']})")
+    else:
+        prunable = database.get("prunable_scans")
+        share = database.get("prunable_share_percent")
+        drop = (f", {prunable} prunable ({share}% of rows)"
+                if prunable is not None else "")
+        lines.append(
+            f"Database:       {database.get('size_bytes', 0) / (1024 * 1024):.1f} MB, "
+            f"{database.get('scans', 0)} scans{drop}"
+        )
+    return lines
+
+
+def _show_recent_scans(cfg: MenuConfig) -> None:
+    from tools.ydm_menu_actions import recent_scans
+
+    listed = recent_scans(cfg, limit=10)
+    if not listed:
+        print("No scans recorded yet.")
+        return
+    print("\nid      when              type   rows    role")
+    for scan in listed:
+        print(
+            f"{scan['id']:<7} {str(scan['timestamp'])[:16]:<17} "
+            f"{scan['type']:<6} {scan['rows']:<7} {scan['role']}"
+        )
+    print("\nThe base and its folder updates are what the tree reads;")
+    print("cleaning up never touches them.")
+
+
+def _clean_the_database(cfg: MenuConfig, reader: Reader) -> None:
+    from tools.ydm_menu_actions import action_prune, prune_preview
+
+    preview = prune_preview(cfg)
+    print(preview.message)
+    if not preview.ok:
+        return
+    plan = preview.details or {}
+    if not plan.get("prunable_scans"):
+        print("Nothing to clean up.")
+        return
+    if prompt_yes_no("Delete them and shrink the file?", default=False, reader=reader):
+        print(action_prune(cfg).message)
+
+
+def screen_scans(cfg: MenuConfig, reader: Reader) -> None:
+    """Everything about scans and the database, in one place — G14.
+
+    The parts existed and were scattered: the smart cloud check was here, the
+    full walk was hidden inside "Scan one folder…", the database was a line in
+    detailed status ending in a command to type, and the local scan had no entry
+    at all although the tree, the counts and every marker depend on it.
+
+    Two rules the owner asked for, which are G10 and G12 restated: no walls —
+    the scan list is behind its own entry and capped at ten, not printed on
+    every visit; and no double meanings — "full" and "one folder" are separate
+    lines, and cleaning up shows a plan and asks rather than naming a command.
+    """
+    while True:
+        print("")
+        for line in _overview_lines(cfg):
+            print(line)
+        print("")
+        print(" 1  Check the cloud and refresh what changed   (1 request first)")
+        print(" 2  Scan one cloud folder…")
+        print(" 3  Full cloud scan of the whole disk          (slow)")
+        print(" 4  Rescan the local mirror now")
+        print(" 5  Recent scans…")
+        print(" 6  Clean up the database…")
+        print("  0  Back")
+        choice = prompt_int("Choose", reader=reader)
+        if choice is None or choice == 0:
+            return
+        if choice == 1:
+            screen_cloud_scan(cfg, reader)
+        elif choice == 2:
+            _scan_one_folder(cfg, reader)
+        elif choice == 3:
+            print("The whole disk, every folder. On this device the last one "
+                  "took about 200 minutes.")
+            if prompt_yes_no("Start a full cloud scan?", default=False, reader=reader):
+                print(run_cloud_scan(cfg, "/").message)
+        elif choice == 4:
+            from tools.ydm_menu_actions import action_local_scan
+
+            print(action_local_scan(cfg).message)
+        elif choice == 5:
+            _show_recent_scans(cfg)
+        elif choice == 6:
+            _clean_the_database(cfg, reader)
+
+
 def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
     handlers = {
         "1": lambda: screen_tree(cfg, reader),
@@ -504,7 +620,7 @@ def run_repl(cfg: MenuConfig, reader: Reader = default_reader) -> None:
         "4": lambda: screen_remove(cfg, reader),
         "5": lambda: screen_bisync_run(cfg, reader),
         "6": lambda: screen_resync(cfg, reader),
-        "7": lambda: screen_cloud_scan(cfg, reader),
+        "7": lambda: screen_scans(cfg, reader),
         "8": lambda: print_detailed_status(cfg),
         "9": lambda: print("\n".join(render_short_help())),
         # Letters, not new numbers: `2` for "add from cloud" is in the owner's
