@@ -57,6 +57,10 @@ LOCK_PATH = "/tmp/ydm_bisync.lock"
 CHECK_ACCESS_FILENAME = "RCLONE_TEST"
 CHECK_ACCESS_CONTENT = "ydm sync_bisync check-access sentinel\n"
 POLICY_SCHEMA = "ydm_sync_policy:v1"
+#: rclone's own words when its listings are gone. Matched rather than parsed:
+#: the exit code is 2 for every kind of failure, so the code alone cannot tell
+#: "needs a resync" from "the network dropped".
+RCLONE_WANTS_RESYNC = "Must run --resync to recover"
 
 
 def default_policy_path() -> str:
@@ -263,6 +267,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     # card would be suppressed — the guard silent exactly when it has something
     # to say, which is the shape of issue #5.
     state["last_notified_error"] = None
+    state["rclone_wants_resync"] = False
     state["last_status"] = "ok"
     save_bisync_state(state)
     payload["state_after"] = state
@@ -287,6 +292,9 @@ _NOTICE_FOR_ERROR = (
      "6 (Resync baseline)."),
     ("No successful resync on record",
      "Sync has no baseline yet. Open ydm and choose 6 (Resync baseline)."),
+    ("rclone lost its bisync listings",
+     "Sync is stuck: bisync lost its baseline and every run will fail until "
+     "it is rebuilt. Open ydm and choose 6 (Resync baseline)."),
 )
 
 
@@ -402,6 +410,20 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
         if result.returncode != 0:
             payload["error"] = f"rclone bisync failed (returncode={result.returncode})"
+            # rclone keeps its own state — the two listings it diffs — and can
+            # lose it independently of anything ydm records. When it does, it
+            # says so and every later run aborts on the same line. Caught here
+            # because this is the only moment the sentence exists: `run`
+            # overwrites bisync_last.log, and the summary in bisync.log is
+            # `rc=2`, which sends nobody anywhere. Happened on the device
+            # 2026-09-13: one run died at 03:10 and the next seven failed
+            # identically while the header said "resync: not needed".
+            if RCLONE_WANTS_RESYNC in (result.stderr or ""):
+                payload["error"] = (
+                    "rclone lost its bisync listings and needs a fresh baseline "
+                    f"(returncode={result.returncode})"
+                )
+                state["rclone_wants_resync"] = True
             state["last_run_at"] = datetime.now().isoformat()
             state["last_status"] = "error"
             save_bisync_state(state)
@@ -453,9 +475,15 @@ def cmd_status(args: argparse.Namespace) -> dict:
         with open(log_path, "r") as handle:
             log_tail = [line.rstrip("\n") for line in handle.readlines()[-10:]]
 
+    # Two independent reasons, and the second is not ours. The filter hash says
+    # what *ydm* knows changed; `rclone_wants_resync` says rclone threw its
+    # listings away, which no hash can see. Reporting only the first told the
+    # owner "resync: not needed" through seven consecutive failed runs whose
+    # own error said the opposite.
     resync_needed = (
         not state.get("last_resync_filter_hash")
         or current_hash != state.get("last_resync_filter_hash")
+        or bool(state.get("rclone_wants_resync"))
     )
 
     return {

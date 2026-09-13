@@ -26,7 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.sync_bisync import build_parser, cmd_run, human_notice  # noqa: E402
+from tools.sync_bisync import (  # noqa: E402
+    build_parser,
+    cmd_run,
+    cmd_status,
+    human_notice,
+)
 
 
 class BlockedRunNotificationTests(unittest.TestCase):
@@ -144,6 +149,80 @@ class BlockedRunNotificationTests(unittest.TestCase):
     def test_the_log_keeps_the_command_even_when_the_card_does_not(self):
         self._run()
         self.assertIn("sync_bisync.py resync --apply", self._log())
+
+
+class RcloneLosesItsListingsTests(BlockedRunNotificationTests):
+    """rclone keeps state of its own and can lose it without ydm noticing.
+
+    On 2026-09-13 one run died mid-flight; the next seven aborted on
+    "cannot find prior Path1 or Path2 listings … Must run --resync to recover",
+    while the menu header said `resync: not needed` — because ydm decided that
+    from its own filter hash, which had not changed and could not see this.
+    The log said `run FAILED rc=2`, and rc 2 is rclone's code for everything.
+    """
+
+    def _args_with_a_baseline(self):
+        """A run that gets as far as calling rclone, rather than being blocked.
+
+        Seeded once, not per call: rewriting the state before every run would
+        wipe the notification flag, and the deduplication check below would then
+        be measuring the fixture instead of the code.
+        """
+        from tools.sync_common import filter_file_hash, load_bisync_state, save_bisync_state
+
+        state = load_bisync_state()
+        if not state.get("last_resync_filter_hash"):
+            state["last_resync_filter_hash"] = filter_file_hash(self.filter_path)
+            state["last_resync_at"] = "2026-09-13T02:38:33"
+            save_bisync_state(state)
+        return self._args()
+
+    def _run_against(self, returncode, stderr):
+        from tools.sync_common import CommandResult
+
+        result = CommandResult(cmd=["rclone"], returncode=returncode,
+                               stdout="", stderr=stderr)
+        with mock.patch("tools.sync_bisync.rclone_bisync_run", return_value=result), \
+             mock.patch("tools.sync_bisync.LOCK_PATH",
+                        os.path.join(self.tmpdir, "lock")), \
+             mock.patch("tools.sync_bisync.notify") as notifier:
+            payload = cmd_run(self._args_with_a_baseline())
+        return payload, notifier
+
+    def test_rclones_own_verdict_is_recorded(self):
+        payload, _ = self._run_against(
+            2, "ERROR : Bisync aborted. Must run --resync to recover.\n")
+        self.assertIn("lost its bisync listings", payload["error"], payload["error"])
+        self.assertTrue(self._state().get("rclone_wants_resync"))
+
+    def test_another_kind_of_failure_is_not_read_as_that_one(self):
+        """rc 2 is rclone's code for everything, so the code cannot decide it."""
+        payload, _ = self._run_against(2, "ERROR : couldn't connect: no route to host\n")
+        self.assertNotIn("lost its bisync listings", payload["error"])
+        self.assertFalse(self._state().get("rclone_wants_resync"))
+
+    def test_the_status_stops_saying_resync_is_not_needed(self):
+        """The filter hash still matches; the answer must not come only from it."""
+        self._run_against(2, "Must run --resync to recover.\n")
+        args = build_parser().parse_args(["status"])
+        args.local_root = self.mirror
+        args.filter_path = self.filter_path
+        args.db_path = os.path.join(self.tmpdir, "monitor.db")
+        self.assertTrue(cmd_status(args)["resync_needed"])
+
+    def test_the_card_says_what_to_do_about_it(self):
+        notice = human_notice(
+            "rclone lost its bisync listings and needs a fresh baseline "
+            "(returncode=2)")
+        self.assertIn("6 (Resync baseline)", notice)
+        self.assertNotIn("returncode", notice)
+
+    def test_seven_identical_failures_are_one_card(self):
+        """Half-hourly, and it stayed broken for three hours on the device."""
+        stderr = "Must run --resync to recover.\n"
+        first = self._run_against(2, stderr)[1].call_count
+        repeats = sum(self._run_against(2, stderr)[1].call_count for _ in range(6))
+        self.assertEqual((first, repeats), (1, 0))
 
 
 if __name__ == "__main__":

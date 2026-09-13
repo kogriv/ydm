@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-13 — rclone can lose its listings, and nothing said so
+
+Found by walking every menu entry by hand — the sweep itself passed, but the
+file-fingerprint check at the end flagged that `var/bisync_state.json` had moved
+under it. The scheduled job had written it: seven consecutive `run FAILED rc=2`
+since 03:10, on `cannot find prior Path1 or Path2 listings … Must run --resync
+to recover`.
+
+- **ydm decided "resync needed" from its own filter hash**, which had not
+  changed and could not see this. So the header said `Status: CHECK (error)` and
+  `resync: not needed` in the same breath, while a resync was the only thing
+  that would fix it. The state now records rclone's own verdict, and
+  `resync_needed` is the two facts together.
+- **rc 2 is rclone's code for everything**, so the exit code cannot tell "needs a
+  resync" from "the network dropped". The sentence in its stderr can, and that
+  sentence exists only at the moment of failure: `bisync_last.log` is
+  overwritten each run and the durable log keeps `rc=2`. Matched there and
+  turned into "Sync is stuck: bisync lost its baseline … choose 6".
+- **Cleared by a successful resync**, like the notification it travels with.
+- **One card for seven failures**, which the deduplication from earlier today
+  already gave — visible in the notification shade as a single entry rather than
+  a column.
+
 ## 2026-09-13 — one menu entry for scans and the database
 
 "Не могу понять, где в меню запуск скана облака (полного, умного) и просмотр
