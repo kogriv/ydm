@@ -5,6 +5,30 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-23 — both waiting answers came back, and one of them was wrong
+
+Two questions had been parked on the calendar since August. Both were due, and
+running them took under a minute. No code changed.
+
+- **The dangling objects are still served, a month on.** The pre-publication
+  probe (`tasks/opensource/BACKLOG.md`, 5.3) answers `ЖИВ` on GitHub *and*
+  GitLab, with its control still returning `not our ref`. The fact is
+  unchanged; the *reason for waiting* is not. Decision 5.2 said support was
+  being asked for something that would probably happen by itself — two weeks
+  is `gc.pruneExpire` in ordinary git, not a promise from a host, and neither
+  host collects on a schedule anyone outside can see. So 5.4 stops being
+  conditional. The owner's standing "no letters, no rush" stands until the
+  owner says otherwise; what is recorded is what changed, so the call is made
+  on facts rather than a forecast that expired.
+- **The trash counter lies, as suspected.** Noted item 1 predicted: if the
+  counter does not reach zero once Yandex empties the trash, it is not about
+  those three entries. The trash is now empty — `GET /trash/resources`
+  returns **0** against August's three — and the counter moved 105.84 GB →
+  **105.38 GB**. It is stale from the 2026-08-16 restore and does not
+  recompute. Trust the API listing, not `yandex-disk status`.
+- **The GitLab mirror was twelve commits behind**, stuck at 2026-08-29 while
+  September's work landed on GitHub. Pushed; both remotes agree again.
+
 ## 2026-09-13 — the card outlived the problem
 
 A screenshot of the notification shade: "Sync is stuck: bisync lost its baseline
