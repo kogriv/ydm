@@ -5,6 +5,32 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-09-24 — GitLab is clean; GitHub was never going to clean itself
+
+The owner lifted "no letters" and asked for the path to be walked to the end.
+Details and the exact route through each site are in
+`tasks/opensource/BACKLOG.md`, Phase 5.
+
+- **GitLab: done, by a button nobody had pressed.** August's journal called
+  self-service exhausted after housekeeping, cleanup and blob removal. The same
+  settings section has a second button, `Prune unreachable objects`, which
+  cuts the grace period from two weeks to thirty minutes; the documented
+  procedure is housekeeping, wait thirty minutes, prune. After it the old root
+  answers `not our ref`, exactly like the control's made-up SHA, and `master`
+  is intact — `f3b54a4`, clean `fsck`, 123 commits as locally.
+- **GitHub: the object was never dangling.** `refs/pull/2/head` — PR #2,
+  closed, created before the rewrite — still reaches the old root, and users
+  cannot delete pull-request refs. Reachable objects are not collected, so
+  waiting would have failed forever; decision 5.2 was wrong for GitHub from the
+  start, not merely out of date. Support request #4788201 is filed with what
+  the sensitive-data procedure asks for: repository, affected PRs (one),
+  First Changed Commit from `.git/filter-repo/first-changed-commits`, no LFS.
+- **How it was clicked.** Headed Chromium on its own screen, one profile per
+  site, CDP on loopback only, and an allowed-host check before and after every
+  action — the pattern from `pro/tgsh`. The owner logged in; the agent pressed.
+  The host check earned its place once: the support portal redirected to
+  `help.github.com`, which was refused until added deliberately.
+
 ## 2026-09-23 — both waiting answers came back, and one of them was wrong
 
 Two questions had been parked on the calendar since August. Both were due, and
