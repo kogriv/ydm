@@ -5,6 +5,27 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-09 — the project is public on both hosts
+
+Journal and the exact checks are in `tasks/opensource/BACKLOG.md`, Phase 5.
+
+- **GitLab was opened as it stood.** Asking it for one old SHA proves one SHA,
+  so it was asked for everything that exists only in the old history — 81
+  commits, trees and files, one fetch each. None came back, before the switch
+  or without credentials after it.
+- **GitHub was recreated, not cleaned.** Support request #4788201 sat for 15
+  days without a word, and the closed PR #2 went on holding the old history.
+  The old repository is now `kogriv/ydm-archive`, still private, with its 22
+  pull requests and 10 issues; the new `kogriv/ydm` received `master` and
+  nothing else. The same 81 objects, asked for anonymously: none.
+- **What that costs.** Issue and PR numbers on GitHub start again from one, so
+  `(#31)` in an older commit title refers to the archive.
+- **The probe itself was wrong in one direction.** It fetched both hosts into
+  one temporary repository; an object GitHub handed over made the GitLab fetch
+  succeed without asking the server. It could only raise a false alarm, never
+  hide a live object. It now uses a fresh repository per host.
+- **Every push is public from here on**, on both hosts at once.
+
 ## 2026-09-24 — GitLab is clean; GitHub was never going to clean itself
 
 The owner lifted "no letters" and asked for the path to be walked to the end.
