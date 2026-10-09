@@ -1895,26 +1895,47 @@ class Analyzer:
             "files_count": best["files_count"],
         }
 
-    def get_folders_in_scan(self, scan_id):
+    def get_folders_in_scan(self, scan_id, files_only=False):
         """
-        Gets list of all folders (parent_paths) that were scanned in a given scan.
-        
+        Which folders this scan listed the contents of.
+
+        A folder counts as listed when the scan wrote any child of it, of
+        either type. This used to require `type = 'file'` always, which
+        quietly excluded every folder holding nothing but subfolders — and a
+        folder the snapshot does not count as listed goes on being served by
+        the base scan, however old that is.
+
+        So a folder created after the base stayed invisible even once scanned.
+        On 2026-09-23 `/pro/physon` held three subfolders and no loose files: a
+        scan of it registered `/pro/physon/ege`, `/obch` and `/oge` and not
+        `/pro/physon`, which was still served by a base from 09-09 that
+        predated the folder — and adding it to the policy was refused with
+        `path_not_found`, one minute after scanning it.
+
+        Folders a scan *did not enter* are unaffected either way: only a
+        folder whose children were listed appears as a `parent_path` at all,
+        which is why a depth-limited scan still claims nothing below its cut.
+
+        `files_only` asks the old, narrower question, and callers use it for a
+        walk that did not finish — see build_composite_scan().
+
         Args:
             scan_id: Scan ID to analyze
-            
+            files_only: Count only folders holding at least one file
+
         Returns:
             set: Set of parent_path values from files table for this scan
         """
         conn = self.storage.get_connection()
-        
+
         # Get all distinct parent_paths from files table
         folders = conn.execute(
-            """SELECT DISTINCT parent_path 
-            FROM files 
-            WHERE scan_id = ? AND type = 'file'""",
+            """SELECT DISTINCT parent_path
+            FROM files
+            WHERE scan_id = ?""" + (" AND type = 'file'" if files_only else ""),
             (scan_id,)
         ).fetchall()
-        
+
         return {row[0] for row in folders}
 
     @staticmethod
@@ -2143,8 +2164,19 @@ class Analyzer:
                     "scan_id": scan_id
                 }
 
-                # Get all folders in this partial scan
-                folders = self.get_folders_in_scan(scan_id)
+                # Get all folders in this partial scan.
+                #
+                # A walk that did not finish gets the narrower answer. The
+                # cloud walk appends a folder's children in the order the API
+                # returns them, so a scan killed mid-folder can have written
+                # that folder's subfolder rows and none of its files — and
+                # claiming the folder would then serve it as empty and report
+                # its files as deleted from the cloud. Keeping the base's rows
+                # is the safe direction to be wrong in, the same rule
+                # _retire_deleted_folders() applies.
+                folders = self.get_folders_in_scan(
+                    scan_id, files_only=partial_scan.get("status") != "success"
+                )
 
                 # Normalize root_path for comparison
                 normalized_root = root_path.rstrip('/')

@@ -31,6 +31,34 @@ Details and the exact route through each site are in
   The host check earned its place once: the support portal redirected to
   `help.github.com`, which was refused until added deliberately.
 
+## 2026-09-23 — a folder with no loose files was a folder no scan had seen
+
+The owner asked for `/pro/physon` to be added to sync. It had been scanned a
+minute earlier; the menu answered `path_not_found`.
+
+- **`get_folders_in_scan()` asked `WHERE type = 'file'`**, so a folder holding
+  nothing but subfolders was never counted as covered by any scan, and went on
+  being served by the base — here a base from 09-09 that predated the folder
+  entirely. `/pro/physon` has three subfolders and no loose files, so the scan of
+  it registered `ege`, `obch` and `oge` and not the folder itself.
+- **The blocker that could not fire was the worse half.** `inspect_path()` reads
+  the files under a path to check their names against what Android's filesystem
+  accepts. Served from a base that had never seen the folder, it checked zero
+  files and reported the path as safe.
+- **A folder now counts as listed when the scan wrote any child of it**, of
+  either type — with two limits kept: a walk that did not finish gets the old,
+  narrower answer (it can hold a folder's subfolder rows and none of its files,
+  and claiming the folder would report those files as deleted from the cloud),
+  and a depth-limited scan still claims nothing below its cut.
+- **Emptying a folder of files was already handled** by `_retire_deleted_folders`,
+  not by this predicate — a first version of these tests passed against the bug
+  because of it, and said so in a docstring. Rewritten to assert through
+  `cloud_files_for_path`, which is what the risk check actually reads.
+- Still open, recorded as [Phase 18.2](tasks/ydm_menu/BACKLOG.md): the snapshot
+  can know a folder exists while the interface cannot show it, because the
+  parent's child listing is older. A new cloud folder needs its parent refreshed
+  (`scan cloud --path <parent> --depth 1`), and the smart scan does not do that.
+
 ## 2026-09-23 — both waiting answers came back, and one of them was wrong
 
 Two questions had been parked on the calendar since August. Both were due, and
@@ -54,6 +82,7 @@ running them took under a minute. No code changed.
   recompute. Trust the API listing, not `yandex-disk status`.
 - **The GitLab mirror was twelve commits behind**, stuck at 2026-08-29 while
   September's work landed on GitHub. Pushed; both remotes agree again.
+
 
 ## 2026-09-13 — the card outlived the problem
 

@@ -914,6 +914,93 @@ class TestRetiredFolders(AnalyzerTestCase):
         self.assertIn(("other", "untouched.txt"), files)
 
 
+class TestFolderWithOnlySubfolders(AnalyzerTestCase):
+    """A folder is listed by a scan whether or not it holds loose files.
+
+    `get_folders_in_scan()` asked for `type = 'file'`, so a folder containing
+    only subfolders was never counted as covered and went on being served by
+    the base scan. On 2026-09-23 that made `/pro/physon` — created after the
+    base, three subfolders, no loose files — impossible to add to the policy:
+    the owner asked for it, a scan of it had just succeeded, and the risk check
+    answered `path_not_found`.
+    """
+
+    def _base(self, scan_id=1):
+        """A base from before `/pro/physon` existed."""
+        self.insert_scan(scan_id, "cloud", "success", scan_root="/")
+        self.insert_files(scan_id, [
+            ("", "pro", "dir", 0, None),
+            ("/pro", "mathcoach", "dir", 0, None),
+            ("/pro/mathcoach", "old.txt", "file", 1, None),
+        ])
+
+    def _scan_of_the_new_folder(self, scan_id=2):
+        """What `scan cloud --path /pro/physon` writes: no file sits in it."""
+        self.insert_scan(scan_id, "cloud", "success", scan_root="/pro/physon")
+        self.insert_files(scan_id, [
+            ("/pro/physon", "ege", "dir", 0, None),
+            ("/pro/physon", "oge", "dir", 0, None),
+            ("/pro/physon/ege", "demo.pdf", "file", 10, None),
+            ("/pro/physon/oge", "demo.pdf", "file", 10, None),
+        ])
+
+    def test_the_folder_itself_is_registered_not_only_its_children(self):
+        self._base()
+        self._scan_of_the_new_folder()
+        updates = self.analyzer.build_composite_scan(use_cache=False)["folder_updates"]
+        self.assertEqual(updates.get("/pro/physon"), 2, updates)
+
+    def test_the_snapshot_can_be_asked_whether_it_exists(self):
+        """The question the policy asks before agreeing to sync a path.
+
+        Served from the base, `/pro/physon` is a folder that does not exist,
+        and `sync_policy` refuses to add it. This is the end of that chain, and
+        it is what the owner actually hit.
+        """
+        from tools.sync_common import build_composite_snapshot, path_exists_in_snapshot
+
+        self._base()
+        self._scan_of_the_new_folder()
+        snapshot = build_composite_snapshot(self.analyzer)
+        self.assertTrue(path_exists_in_snapshot(self.analyzer, snapshot, "/pro/physon"))
+
+    def test_the_files_under_it_are_the_ones_the_risk_check_reads(self):
+        """`inspect_path` checks every file under the path for Android-hostile
+        names, and reads them through this. Served from a base that never saw
+        the folder it checked nothing at all and called the result clean — a
+        blocker that cannot fire is worse than no blocker, because it reports
+        the path as safe."""
+        from tools.sync_policy import cloud_files_for_path
+
+        self._base()
+        self._scan_of_the_new_folder()
+        _, exists, files = cloud_files_for_path(self.db_path, "/pro/physon")
+        self.assertTrue(exists)
+        self.assertEqual(len(files), 2, files)
+
+    def test_an_unfinished_walk_does_not_claim_it(self):
+        """The narrow answer is right for a scan that was killed mid-folder.
+
+        The cloud walk writes a folder's children in the order the API returns
+        them, so a crashed scan can hold the subfolder rows of a folder whose
+        files it never reached. Claiming it would serve the folder as empty and
+        report every file in it as deleted from the cloud.
+        """
+        self.insert_scan(1, "cloud", "success", scan_root="/")
+        self.insert_files(1, [
+            ("", "A", "dir", 0, None),
+            ("/A", "sub", "dir", 0, None),
+            ("/A", "real.txt", "file", 1, None),
+        ])
+        self.insert_scan(2, "cloud", "crashed", scan_root="/A")
+        self.insert_files(2, [("/A", "sub", "dir", 0, None)])
+
+        composite = self.analyzer.build_composite_scan(use_cache=False)
+        self.assertNotIn("/A", composite["folder_updates"])
+        files = self.analyzer._composite_cloud_files(composite)
+        self.assertIn(("A", "real.txt"), files)
+
+
 class TestNoBaseWithoutCoverage(AnalyzerTestCase):
     """The coverage gate must have no back door.
 
