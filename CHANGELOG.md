@@ -52,6 +52,29 @@ Details and the exact route through each site are in
   The host check earned its place once: the support portal redirected to
   `help.github.com`, which was refused until added deliberately.
 
+## 2026-10-12 — the documented way to stop the sync did not stop it
+
+Found while stopping it, during an outage, which is the only time anybody runs
+it. Yandex Disk's resource API had been answering `410 GoneError` for every path
+on the live disk since 2026-10-11 07:37 UTC (10:37 Moscow) — see
+[the incident note](docs/incidents/yandex-disk-410-gone-2026-10-11.md) — and
+pausing the scheduled job was the one thing that needed doing.
+
+- **`termux-job-scheduler --cancel N` is not the cancel syntax.** The id is a
+  flag of its own (`--cancel --job-id N`); the positional form answers
+  "too many arguments", exits 1 and leaves the job scheduled. `install_job.sh
+  remove` printed "Cancelled job 31415" regardless, so a job that was still
+  running every half hour looked stopped.
+- **The exit code does not carry the distinction**, which is why the fix does
+  not rest on it: the malformed form exits 1, while cancelling a job that was
+  never there exits 0 with "No job N found" — and only one of those means the
+  job is still live. `remove` now asks `--pending` afterwards and reports what
+  is actually scheduled.
+- **The binary is named through `YDM_JOB_SCHEDULER_BIN`**, so the existence
+  check and the calls cannot disagree and a test can point it at a recorder —
+  the same reason `job_run.sh` names `termux-notification` that way. The script
+  had no tests at all; it has nine now, three mutations checked.
+
 ## 2026-09-23 — a folder with no loose files was a folder no scan had seen
 
 The owner asked for `/pro/physon` to be added to sync. It had been scanned a
