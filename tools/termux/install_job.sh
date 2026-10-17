@@ -17,9 +17,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${YDM_JOB_PATH:-$HOME/ydm_bisync_job.sh}"
 PERIOD_MS="${YDM_JOB_PERIOD_MS:-1800000}"
 JOB_ID="${YDM_JOB_ID:-31415}"
+# One name for the binary, so the existence check and the calls cannot
+# disagree, and so a test can point it at a recorder and assert on the
+# arguments — the same reason job_run.sh names termux-notification through a
+# variable. The absolute path is deliberate: Termux's bin is not on the
+# container's PATH, and `remove` used to be reached from there.
+JOB_BIN="${YDM_JOB_SCHEDULER_BIN:-/data/data/com.termux/files/usr/bin/termux-job-scheduler}"
 
 need_termux() {
-    if [ ! -x /data/data/com.termux/files/usr/bin/termux-job-scheduler ]; then
+    if [ ! -x "$JOB_BIN" ]; then
         echo "termux-job-scheduler not found." >&2
         echo "  Install the Termux:API app *and* the package: pkg install termux-api" >&2
         echo "  Both are needed — the package alone is a client for the app." >&2
@@ -37,7 +43,7 @@ case "${1:-}" in
             echo "  That is what shared storage does. Pick a path in Termux's own \$HOME." >&2
             exit 1
         fi
-        termux-job-scheduler \
+        "$JOB_BIN" \
             --script "$TARGET" \
             --job-id "$JOB_ID" \
             --period-ms "$PERIOD_MS" \
@@ -49,12 +55,30 @@ case "${1:-}" in
         ;;
     status)
         need_termux
-        termux-job-scheduler --pending
+        "$JOB_BIN" --pending
         ;;
     remove)
         need_termux
-        termux-job-scheduler --cancel "$JOB_ID"
-        echo "Cancelled job $JOB_ID. The script stays at $TARGET."
+        # `--cancel --job-id N`, not `--cancel N`. The job id is a flag of its
+        # own and --cancel takes no value, so the positional form fails with
+        # "termux-job-scheduler: too many arguments" and the job keeps running.
+        # Found on 2026-10-12, with the sync down and this the documented way
+        # to stop it: `--pending` still listed job 31415 afterwards, and the
+        # script had said nothing to suggest otherwise.
+        "$JOB_BIN" --cancel --job-id "$JOB_ID" || true
+
+        # Then ask what is actually scheduled, rather than trusting the answer.
+        # This tool's exit code does not carry the distinction: the broken form
+        # above exits 1, but cancelling a job that was never there exits 0 with
+        # "No job N found" — and only one of those two means the job is still
+        # running. The end state is the only thing worth reporting, so it is
+        # the thing that gets checked.
+        if "$JOB_BIN" --pending 2>/dev/null | grep -q "Job $JOB_ID:"; then
+            echo "Job $JOB_ID is STILL scheduled." >&2
+            echo "  Cancel it by hand: $JOB_BIN --cancel --job-id $JOB_ID" >&2
+            exit 1
+        fi
+        echo "Job $JOB_ID is not scheduled. The script stays at $TARGET."
         ;;
     *)
         sed -n '2,13p' "${BASH_SOURCE[0]}"

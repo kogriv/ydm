@@ -174,6 +174,28 @@ Defaults, all overridable by environment variable: job id `31415`, period
 battery or storage is low. Android will not schedule anything more often than
 every 15 minutes, and treats the period as a suggestion in any case.
 
+#### Pausing it, and putting it back
+
+```bash
+bash tools/termux/install_job.sh remove     # off the schedule
+bash tools/termux/install_job.sh status     # confirm: "No pending jobs"
+bash tools/termux/install_job.sh install    # back on
+```
+
+`remove` confirms by asking the scheduler what is pending, rather than by
+trusting its exit code — `termux-job-scheduler` exits 0 when asked to cancel a
+job that was never there and 1 when the arguments are wrong, and for a while
+this script reported both as success. See
+[the 2026-10-11 incident](incidents/yandex-disk-410-gone-2026-10-11.md).
+
+**When to pause:** a cloud-side outage is a reason to pause, and not because
+syncing fails — a failing run is harmless, it aborts before transferring
+anything. The reason is the recovery. If the cloud comes back with part of the
+tree genuinely missing, bisync will faithfully reproduce that locally, deleting
+up to `--max-delete` files per run. `--check-access` and the delete cap stop the
+wholesale case; neither stops a small real loss. Before putting the job back,
+check a few policy folders with `rclone check … --size-only`.
+
 Point the job at your own paths by exporting before `install`, or by editing
 the copy:
 
