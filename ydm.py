@@ -21,6 +21,7 @@ from tools.targets import (
     load_targets_file,
     resolve_target,
 )
+from tools.providers import provider_for
 
 # Global state for signal handling
 _storage_for_signal = None
@@ -205,6 +206,9 @@ DEFAULT_CONFIG = {
     # first, then an rclone remote. Override per profile in ydm_config.json,
     # with YDM_BACKEND, or with --backend.
     "backend": "auto",
+    # Inventory retries are deliberately bounded per folder. A failed folder
+    # remains in progress for resume rather than becoming an empty success.
+    "inventory_retry_attempts": 3,
 }
 
 def load_config(profile="prod"):
@@ -1272,13 +1276,14 @@ class LocalScanner:
         return count
 
 
+class InventoryError(RuntimeError):
+    """A failed listing; never treat this as an empty remote folder."""
+
+
 class CloudResourceClient(ABC):
     """
-    Backend interface for CloudScanner/scan-meta: whatever fetches Yandex
-    Disk resource listings, regardless of transport (REST API vs rclone).
-    Item dicts returned by get_resources() must have the same shape the
-    Yandex API returns: name, type ('dir'|'file'), size, md5, created,
-    modified (ISO 8601 strings, 'Z' suffix, microsecond precision or less).
+    Read-only inventory transport. It is intentionally unrelated to
+    ``SyncBackend``: choosing rclone to list a provider never chooses bisync.
     """
 
     @abstractmethod
@@ -1298,6 +1303,7 @@ class YandexClient(CloudResourceClient):
 
     def __init__(self, token):
         self.token = token
+        self.provider = provider_for("yandex")
         self.headers = {
             "Authorization": f"OAuth {token}",
             "Accept": "application/json"
@@ -1327,9 +1333,7 @@ class YandexClient(CloudResourceClient):
                 data = json.loads(response.read().decode('utf-8'))
                 return data.get('_embedded', {})
         except Exception as e:
-            # Если папка пустая или недоступна
-            print(f"Warning: Failed to list {path}: {e}")
-            return {"items": [], "total": 0}
+            raise InventoryError(f"failed to list {path} via Yandex API: {e}") from e
 
 
 class RcloneClient(CloudResourceClient):
@@ -1344,8 +1348,10 @@ class RcloneClient(CloudResourceClient):
     both fields are set to the same ModTime value.
     """
 
-    def __init__(self, remote="yandex"):
+    def __init__(self, remote="yandex", *, provider="yandex", retry_attempts=None):
         self.remote = remote
+        self.provider = provider_for(provider) if isinstance(provider, str) else provider
+        self.retry_attempts = retry_attempts if retry_attempts is not None else DEFAULT_CONFIG["inventory_retry_attempts"]
         self._folder_cache = {}  # path -> full normalized item list (rclone lsjson has no offset/limit)
 
     def get_disk_info(self):
@@ -1368,15 +1374,24 @@ class RcloneClient(CloudResourceClient):
 
     def _list_folder(self, path):
         remote_path = f"{self.remote}:" if path in ("", "/") else f"{self.remote}:{path}"
-        try:
-            result = subprocess.run(
-                ["rclone", "lsjson", remote_path, "--hash", "--metadata"],
-                capture_output=True, text=True, check=True
-            )
-            entries = json.loads(result.stdout)
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-            print(f"Warning: Failed to list {path} via rclone: {e}")
-            return []
+        attempts = max(1, int(self.retry_attempts))
+        last_error = None
+        for _attempt in range(attempts):
+            try:
+                result = subprocess.run(
+                    ["rclone", "lsjson", remote_path, "--hash", "--metadata"],
+                    capture_output=True, text=True, check=True
+                )
+                entries = json.loads(result.stdout)
+                if not isinstance(entries, list):
+                    raise ValueError("rclone lsjson result is not a list")
+                break
+            except (subprocess.CalledProcessError, json.JSONDecodeError, OSError, ValueError) as exc:
+                last_error = exc
+        else:
+            raise InventoryError(
+                f"failed to list {path} via rclone after {attempts} attempt(s): {last_error}"
+            ) from last_error
 
         items = []
         for entry in entries:
@@ -1388,31 +1403,14 @@ class RcloneClient(CloudResourceClient):
                 head, frac_and_zone = mod_time.split(".", 1)
                 frac = frac_and_zone.rstrip("Z")[:6]
                 mod_time = f"{head}.{frac}Z"
-            is_dir = entry.get("IsDir", False)
-            hashes = entry.get("Hashes") or {}
-            hash_name = "md5" if hashes.get("md5") else (sorted(hashes)[0] if hashes else None)
-            content_hash = hashes.get(hash_name) if hash_name else None
-            metadata = dict(entry.get("Metadata") or {})
-            if hashes:
-                # Keep every provider hash even though hash_name/content_hash
-                # expose a single compatibility value to existing reports.
-                metadata["rclone_hashes"] = dict(hashes)
-            items.append({
-                "name": entry["Name"],
-                "type": "dir" if is_dir else "file",
-                "size": 0 if is_dir else entry.get("Size", 0),
-                "md5": hashes.get("md5"),
-                "object_id": entry.get("ID"),
-                "parent_id": entry.get("ParentID"),
-                "mime_type": entry.get("MimeType"),
-                "hash_name": hash_name,
-                "content_hash": content_hash,
-                "is_native": bool(entry.get("IsNative", False)),
-                "is_shortcut": bool(entry.get("IsShortcut", False)),
-                "metadata": metadata,
-                "created": mod_time,
-                "modified": mod_time,
-            })
+            item = self.provider.normalize_rclone_item(entry)
+            if (self.provider.capabilities.stable_object_id
+                    and item["type"] != "dir" and not item["object_id"]):
+                raise InventoryError(
+                    f"rclone item {item['name']!r} has no stable object ID for {self.provider.name}"
+                )
+            item.update({"created": mod_time, "modified": mod_time})
+            items.append(item)
         return items
 
 
@@ -3245,6 +3243,8 @@ class YDM_CLI:
         targets_show = targets_subparsers.add_parser("show", help="Show a target and derived state paths")
         targets_show.add_argument("name", nargs="?", help="Target name (defaults to resolved --target/default)")
         targets_subparsers.add_parser("validate", help="Validate ydm_targets:v1 without remote access")
+        targets_doctor = targets_subparsers.add_parser("doctor", help="Read-only inventory capability probe")
+        targets_doctor.add_argument("name", nargs="?", help="Target name (defaults to resolved --target/default)")
         
         # scan command
         scan_parser = subparsers.add_parser("scan", help="Scan operations")
@@ -3407,6 +3407,34 @@ class YDM_CLI:
             "remote_name": getattr(client, "remote", None),
         }
 
+    def _inventory_client_for_context(self, context):
+        """Build only an inventory client; sync engine selection is irrelevant."""
+        config = context.config
+        if config.inventory_kind == "rclone":
+            return RcloneClient(
+                remote=config.inventory_remote,
+                provider=config.provider,
+                retry_attempts=self.args.config.get("inventory_retry_attempts"),
+            )
+        token = load_token_from_env()
+        if not token:
+            raise InventoryError("YANDEX_DISK_TOKEN not found in .env")
+        return YandexClient(token)
+
+    @staticmethod
+    def _capabilities_payload(capabilities):
+        return {
+            "stable_object_id": capabilities.stable_object_id,
+            "duplicate_sibling_names": capabilities.duplicate_sibling_names,
+            "content_hashes": sorted(capabilities.content_hashes),
+            "native_documents": capabilities.native_documents,
+            "shortcuts": capabilities.shortcuts,
+            "revisions": capabilities.revisions,
+            "trash_listing": capabilities.trash_listing,
+            "server_side_move": capabilities.server_side_move,
+            "bidirectional_sync": capabilities.bidirectional_sync,
+        }
+
     def targets_command_handler(self):
         path = discover_targets_file(self.args.targets_file)
         if path is None:
@@ -3453,6 +3481,30 @@ class YDM_CLI:
         except TargetConfigError as exc:
             self.render(f"Target configuration error: {exc}", success=False)
             return True
+        if self.args.targets_command == "doctor":
+            # Doctor is deliberately read-only: about + one shallow list and
+            # static provider capabilities. It never creates target state.
+            try:
+                self.args.config = load_config(context.config.config_profile)
+                client = self._inventory_client_for_context(context)
+                listing = client.get_resources("/", limit=1, offset=0)
+                client.get_disk_info()
+                payload = {
+                    "target": context.name,
+                    "provider": context.provider,
+                    "inventory_kind": context.inventory_kind,
+                    "sync_kind": context.sync_kind,
+                    "capabilities": self._capabilities_payload(client.provider.capabilities),
+                    # Never echo remote metadata, names, IDs, or quota values.
+                    "probe": {"about_reachable": True, "root_listing_reachable": True,
+                              "root_entries": listing.get("total", 0)},
+                    "read_only": True,
+                }
+            except (InventoryError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                self.render({"target": context.name, "read_only": True, "error": str(exc)}, success=False)
+                return True
+            self.render(payload if self.args.format == "json" else json.dumps(payload, ensure_ascii=False, indent=2))
+            return True
         payload = self._target_payload(context)
         self.render(payload if self.args.format == "json" else json.dumps(payload, ensure_ascii=False, indent=2))
         return True
@@ -3473,7 +3525,11 @@ class YDM_CLI:
                         self.render("Error: rclone not found in PATH (required for --backend rclone)", success=False)
                         return True
                     remote = self.args.config.get("rclone_remote", "yandex")
-                    client = RcloneClient(remote=remote)
+                    provider = self.target_context.provider if self.target_context else "yandex"
+                    client = RcloneClient(
+                        remote=remote, provider=provider,
+                        retry_attempts=self.args.config.get("inventory_retry_attempts"),
+                    )
                 else:
                     token = load_token_from_env()
                     if not token:
@@ -3671,6 +3727,20 @@ class YDM_CLI:
                         print(f"Resuming last cloud scan {scan_id}...", file=sys.stderr)
                     
                     # Восстановить данные сеанса из disk DB в tmpfs
+                    if self.target_context:
+                        disk_conn = sqlite3.connect(storage.final_db_path)
+                        stored = disk_conn.execute(
+                            "SELECT target_name, provider, inventory_kind, remote_name FROM scans WHERE id=?",
+                            (scan_id,),
+                        ).fetchone()
+                        disk_conn.close()
+                        expected = self._scan_provenance(client)
+                        if not stored or tuple(stored) != (
+                            expected["target_name"], expected["provider"],
+                            expected["inventory_kind"], expected["remote_name"],
+                        ):
+                            self.render("Error: resume scan provenance does not match the active target", success=False)
+                            return True
                     storage.restore_from_disk(scan_id)
                 else:
                     scan_depth = getattr(self.args, "depth", None)
@@ -3774,7 +3844,9 @@ class YDM_CLI:
                     return True
                 except Exception as e:
                     storage.finish_scan(scan_id, 'failed', time.time() - start_time)
-                    # Очистить tmpfs БД при ошибке
+                    # Preserve in-progress folder state so --resume retries
+                    # the failed listing; do not turn it into empty coverage.
+                    storage.checkpoint_to_disk(force=True)
                     storage.cleanup_temp_db()
                     self.render(f"Cloud scan failed: {str(e)}", success=False)
                 finally:
