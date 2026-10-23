@@ -57,7 +57,7 @@ from ydm import DEFAULT_CONFIG  # noqa: E402
 LOCK_PATH = "/tmp/ydm_bisync.lock"
 CHECK_ACCESS_FILENAME = "RCLONE_TEST"
 CHECK_ACCESS_CONTENT = "ydm sync_bisync check-access sentinel\n"
-POLICY_SCHEMA = "ydm_sync_policy:v1"
+POLICY_SCHEMAS = {"ydm_sync_policy:v1", "ydm_sync_policy:v2"}
 #: rclone's own words when its listings are gone. Matched rather than parsed:
 #: the exit code is 2 for every kind of failure, so the code alone cannot tell
 #: "needs a resync" from "the network dropped".
@@ -108,7 +108,7 @@ def load_sync_policy(policy_path: str) -> dict | None:
             payload = json.load(handle)
     except (OSError, ValueError):
         return None
-    if payload.get("schema") != POLICY_SCHEMA:
+    if payload.get("schema") not in POLICY_SCHEMAS:
         return None
     return payload
 

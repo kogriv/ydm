@@ -181,18 +181,19 @@ def validate_policy_binding(args: argparse.Namespace, policy: dict) -> Optional[
 
 def configure_target_args(args: argparse.Namespace) -> None:
     """Resolve one immutable target and derive every writable state path."""
-    if not getattr(args, "target", None) and not getattr(args, "targets_file", None):
+    cli_target = getattr(args, "target", None) or os.environ.get("YDM_TARGET")
+    targets_file = getattr(args, "targets_file", None) or os.environ.get("YDM_TARGETS_FILE")
+    if not cli_target and not targets_file and not os.path.exists("ydm_targets.json"):
         args.target_managed = False
         return
-    context = resolve_target(cli_target=getattr(args, "target", None),
-                             targets_path=getattr(args, "targets_file", None))
+    context = resolve_target(cli_target=cli_target, targets_path=targets_file)
     if context is None:
         raise TargetConfigError("target-managed invocation requires a targets file")
     cfg = context.config
     args.target_managed = True
     args.target, args.provider = cfg.name, cfg.provider
     args.inventory_kind, args.sync_kind = cfg.inventory_kind, cfg.sync_kind
-    args.remote, args.local_root, args.db_path = cfg.remote, cfg.local_root, context.db_path
+    args.remote, args.local_root, args.db_path = cfg.sync_remote, cfg.local_root, context.db_path
     args.policy_path = context.policy_path
     args.download_filter_path, args.bisync_filter_path = context.download_filter_path, context.bisync_filter_path
     # sync.kind is authoritative: Google never falls through daemon autodetect.
@@ -574,6 +575,12 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
     download_path = args.download_filter_path or download_filter_path(args.local_root)
     bisync_path = args.bisync_filter_path or bisync_filter_path(args.local_root)
     validation_error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
+    if (validation_error is None and getattr(args, "target_managed", False)
+            and download_paths):
+        validation_error = (
+            "target-managed download-only paths require download-apply with an "
+            "exact inventory manifest; path-level download filters are disabled"
+        )
     result = {
         "schema": SCHEMA,
         "action": "render-filters",
@@ -598,12 +605,11 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
     error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
     paths = policy_paths_by_mode(policy, "download_only")
     target = f"{args.remote}:"
-    eligibility, excluded, seen = [], [], {}
+    eligibility, excluded = [], []
+    candidates = []
     for entry in paths:
         if not os.path.exists(args.db_path):
-            # A plan remains offline and useful before the first scan; apply
-            # will still be blocked by normal inventory validation in callers.
-            eligibility.append({"path": entry, "object_id": None, "scan_id": None})
+            excluded.append({"path": entry, "reason": "incomplete_or_missing_inventory"})
             continue
         try:
             scan_id, exists, files = cloud_files_for_path(args.db_path, f"/{entry}" if entry else "/")
@@ -614,24 +620,39 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
             excluded.append({"path": entry, "reason": "incomplete_or_missing_inventory"})
             continue
         for item in files:
-            reason = None
             if item.is_native:
-                reason = "native_document"
+                excluded.append({"path": item.rel_path, "reason": "native_document", "scan_id": scan_id})
             elif item.is_shortcut:
-                reason = "shortcut"
-            elif item.sanitized_rel_path in seen and seen[item.sanitized_rel_path] != item.object_id:
-                reason = "materialization_collision"
-            if reason:
-                excluded.append({"path": item.rel_path, "reason": reason, "scan_id": scan_id})
+                excluded.append({"path": item.rel_path, "reason": "shortcut", "scan_id": scan_id})
+            elif item.chars or "\n" in item.rel_path or "\r" in item.rel_path:
+                excluded.append({"path": item.rel_path, "reason": "incompatible_name", "scan_id": scan_id})
             else:
-                seen[item.sanitized_rel_path] = item.object_id
-                eligibility.append({"path": item.rel_path, "object_id": item.object_id, "scan_id": scan_id})
+                candidates.append((item, scan_id))
+    groups = {}
+    for item, scan_id in candidates:
+        groups.setdefault(item.sanitized_rel_path, []).append((item, scan_id))
+    for rows in groups.values():
+        identities = {(item.rel_path, item.object_id) for item, _scan_id in rows}
+        if len(identities) > 1:
+            for item, scan_id in rows:
+                excluded.append({"path": item.rel_path, "reason": "materialization_collision",
+                                 "scan_id": scan_id})
+            continue
+        item, scan_id = rows[0]
+        eligibility.append({"path": item.rel_path, "object_id": item.object_id, "scan_id": scan_id})
+    if error is None and any(
+            item["reason"] == "incomplete_or_missing_inventory" for item in excluded):
+        error = "download inventory is incomplete or missing"
+    if error is None and getattr(args, "target_managed", False) and args.sync_kind != "rclone":
+        error = "download-apply requires a target with rclone sync"
+    manifest_path = (args.download_filter_path or download_filter_path(args.local_root)) + ".files-from"
     return {
         "schema": "ydm_download_plan:v1", "action": "download-plan", "dry_run": True,
         "target": policy.get("target"), "provider": policy.get("provider"),
         "remote": args.remote, "local_root": args.local_root,
         "source": target, "destination": args.local_root, "paths": paths,
         "filter_path": args.download_filter_path or download_filter_path(args.local_root),
+        "manifest_path": manifest_path,
         "eligible": eligibility, "excluded": excluded,
         "error": error,
     }
@@ -644,14 +665,20 @@ def download_apply(args: argparse.Namespace, policy: dict) -> dict:
     plan["dry_run"] = not args.apply
     if plan["error"] or not args.apply:
         return plan
-    # Filters were rendered by the same target-bound policy.  No delete or
-    # reverse-transfer flags are permitted in this command.
-    render_result = render_filters(args, policy)
-    if render_result["error"]:
-        plan["error"] = render_result["error"]
+    if not plan["eligible"]:
+        plan["nothing_to_download"] = True
         return plan
+    manifest_path = plan["manifest_path"]
+    os.makedirs(os.path.dirname(manifest_path) or ".", exist_ok=True)
+    temp_path = f"{manifest_path}.tmp.{os.getpid()}"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        for item in sorted({row["path"].lstrip("/") for row in plan["eligible"]}):
+            handle.write(item + "\n")
+    os.replace(temp_path, manifest_path)
+    # Exact eligible object paths only. No delete, sync, move, purge, or
+    # reverse-transfer flags are permitted in this command.
     cmd = ["rclone", "copy", f"{args.remote}:", args.local_root,
-           "--filter-from", render_result["download_filter_path"]]
+           "--files-from-raw", manifest_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     plan.update({"command": cmd, "returncode": proc.returncode,
                  "stdout": proc.stdout, "stderr": proc.stderr,
@@ -1005,6 +1032,18 @@ def _apply_backend_policy(args: argparse.Namespace, policy: dict) -> dict:
     return backend.apply_policy(policy, dry_run=not args.apply)
 
 
+def _target_managed_backend_skip(args: argparse.Namespace) -> dict:
+    """Explain why policy edits do not implicitly mutate a managed backend."""
+    return {
+        "skipped": True,
+        "reason": (
+            "target-managed policy edits are state-only; use download-plan/"
+            "download-apply for download-only paths"
+        ),
+        "target": getattr(args, "target", None),
+    }
+
+
 def main() -> None:
     args = parse_args()
     try:
@@ -1037,7 +1076,7 @@ def main() -> None:
             else:
                 payload = render_filters(args, policy)
                 # Also apply to backend if requested
-                if args.apply:
+                if args.apply and payload.get("error") is None:
                     backend_payload = _apply_backend_policy(args, policy)
                     payload["backend_apply"] = backend_payload
         elif args.command == "download-plan":
@@ -1054,17 +1093,23 @@ def main() -> None:
         elif args.command == "add":
             payload = add_policy_path(args)
             if args.apply and payload.get("error") is None:
-                policy = load_policy(args.policy_path)
-                if policy:
-                    backend_payload = _apply_backend_policy(args, policy)
-                    payload["backend_apply"] = backend_payload
+                if getattr(args, "target_managed", False):
+                    payload["backend_apply"] = _target_managed_backend_skip(args)
+                else:
+                    policy = load_policy(args.policy_path)
+                    if policy:
+                        backend_payload = _apply_backend_policy(args, policy)
+                        payload["backend_apply"] = backend_payload
         else:
             payload = remove_policy_path(args)
             if args.apply and payload.get("error") is None:
-                policy = load_policy(args.policy_path)
-                if policy:
-                    backend_payload = _apply_backend_policy(args, policy)
-                    payload["backend_apply"] = backend_payload
+                if getattr(args, "target_managed", False):
+                    payload["backend_apply"] = _target_managed_backend_skip(args)
+                else:
+                    policy = load_policy(args.policy_path)
+                    if policy:
+                        backend_payload = _apply_backend_policy(args, policy)
+                        payload["backend_apply"] = backend_payload
     except Exception as exc:
         payload = {
             "schema": SCHEMA,

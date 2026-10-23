@@ -368,6 +368,10 @@ def delete_local_entry_contents(local_root: str, entry: str) -> Dict[str, object
     if not os.path.exists(target):
         return {"deleted": False, "reason": "not found", "path": target, "files_removed": 0}
 
+    for walk_root, dirs, _files in os.walk(target):
+        if any(os.path.islink(os.path.join(walk_root, name)) for name in dirs):
+            return {"deleted": False, "reason": "refusing nested symlink", "path": target, "files_removed": 0}
+
     removed = 0
     for root, dirs, files in os.walk(target, topdown=False):
         for name in files:

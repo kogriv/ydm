@@ -42,6 +42,7 @@ from tools.sync_common import (  # noqa: E402
     write_sync_filters,
 )
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
+from tools.targets import discover_targets_file  # noqa: E402
 
 
 @dataclass
@@ -234,7 +235,8 @@ def main() -> None:
     args = parse_args()
     # This legacy editor owns only legacy filter files.  Refuse a target
     # selection before opening a DB, writing a filter, or spawning rclone.
-    if os.environ.get("YDM_TARGET") or os.environ.get("YDM_TARGETS_FILE"):
+    if (os.environ.get("YDM_TARGET") or os.environ.get("YDM_TARGETS_FILE")
+            or discover_targets_file() is not None):
         result = ActionResult(action=args.command, path=getattr(args, "path", ""), dry_run=True,
                               before=[], after=[], error="target-managed invocation is unsupported; use sync_policy.py")
         render(result, args.format, args.text_header)

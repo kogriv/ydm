@@ -31,7 +31,8 @@ class DownloadPolicyV2Tests(unittest.TestCase):
         self.assertTrue(plan["dry_run"])
         self.assertEqual(plan["paths"], ["keep"])
         self.assertEqual(plan["source"], "synthetic:")
-        self.assertIsNone(plan["error"])
+        self.assertIn("inventory", plan["error"])
+        self.assertEqual(plan["eligible"], [])
 
     def test_remove_never_deletes_local_without_explicit_future_operation(self):
         with tempfile.TemporaryDirectory() as tmp:

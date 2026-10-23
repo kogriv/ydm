@@ -93,7 +93,7 @@ write-path, пока предыдущая не умеет корректно п�
 **Exit:** native documents и shortcuts не могут молча попасть в обычный file
 bisync.
 
-## Phase 6 — Selective download-only
+## Phase 6 — Selective download-only (ordinary-file implementation complete; 6.6 and 6.8 pending)
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
@@ -104,9 +104,12 @@ bisync.
 | 6.5 | Disposable filesystem-remote E2E | sync bench | selected paths copied, disabled absent, cleanup automatic |
 | 6.6 | Disposable live Google folder | private acceptance | upload fixture separately, download, compare, remove fixture |
 | 6.7 | Remove flow keeps local by default | menu/policy | local deletion requires explicit choice and successful check |
+| 6.8 | Execute validated native export plans | provider/download backend | exact object ID and declared format are exported only to the bound artifact path; no generic copy/bisync |
 
 **Exit:** selected ordinary files and optional exports can be downloaded without
-bidirectional state.
+bidirectional state. Ordinary-file acceptance is covered by the disposable
+filesystem remote; native export execution and live Google acceptance remain
+closed gates.
 
 ## Phase 7 — Bidirectional ordinary files
 
