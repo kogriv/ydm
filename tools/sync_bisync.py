@@ -57,6 +57,7 @@ from tools.sync_policy import (  # noqa: E402
     configure_target_args,
     validate_policy_binding,
 )
+from tools.sync_backends import daemon_conflict_error  # noqa: E402
 from ydm import DEFAULT_CONFIG  # noqa: E402
 
 
@@ -189,10 +190,8 @@ def configure_target(args: argparse.Namespace) -> None:
         return
     # Policy helpers intentionally only know the two filter paths.  Bisync's
     # state, audit log, captured log and lock must be equally isolated.
-    from tools.targets import context_for, resolve_target
-    context = resolve_target(cli_target=args.target, targets_path=getattr(args, "targets_file", None))
-    if context is None:  # defensive: configure_target_args already rejects this
-        raise RuntimeError("target context disappeared during configuration")
+    context = args.target_context
+    args.filter_path = context.bisync_filter_path
     args.bisync_state_path = context.bisync_state_path
     args.bisync_log_path = context.bisync_log_path
     args.bisync_last_log_path = os.path.join(context.state_dir, "bisync_last.log")
@@ -232,6 +231,15 @@ def bidirectional_eligibility_error(args: argparse.Namespace, policy: dict | Non
     binding_error = validate_policy_binding(args, policy)
     if binding_error:
         return binding_error
+    conflict = daemon_conflict_error(args.local_root)
+    if conflict:
+        return conflict
+    selected = policy_paths_by_mode(policy, "bidirectional")
+    if not selected:
+        return "Bidirectional eligibility requires at least one bidirectional policy path"
+    filters = load_sync_filters(args.filter_path or default_bisync_filter_path(args.local_root))
+    if sorted(filters.include_dirs) != selected:
+        return "Bidirectional filter scope does not match the target-bound policy"
     marker = os.path.join(os.path.expanduser(args.local_root), CHECK_ACCESS_FILENAME)
     if not os.path.isfile(marker):
         return f"Bidirectional eligibility requires local access marker: {marker}"
@@ -250,6 +258,8 @@ def bidirectional_eligibility_error(args: argparse.Namespace, policy: dict | Non
                 return f"Bidirectional eligibility rejects native document: {item.rel_path}"
             if item.is_shortcut:
                 return f"Bidirectional eligibility rejects shortcut: {item.rel_path}"
+            if item.chars or "\n" in item.rel_path or "\r" in item.rel_path:
+                return f"Bidirectional eligibility rejects incompatible name: {item.rel_path}"
             previous = materialized.get(item.sanitized_rel_path)
             if previous and (previous.rel_path != item.rel_path or previous.object_id != item.object_id):
                 return f"Bidirectional eligibility rejects materialization collision under /{entry}"
@@ -259,6 +269,7 @@ def bidirectional_eligibility_error(args: argparse.Namespace, policy: dict | Non
 
 def cmd_resync(args: argparse.Namespace) -> dict:
     filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
+    state_path, log_path, last_log_path, lock_path = _runtime_paths(args)
     payload = {
         "schema": "sync_bisync:v1",
         "action": "resync",
@@ -271,7 +282,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         "lock": None,
         "bisync": None,
         "local_scan": None,
-        "state_before": load_bisync_state(),
+        "state_before": load_bisync_state(state_path),
         "state_after": None,
         "plan_text": [],
         "warnings": [],
@@ -298,6 +309,12 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         )
         return payload
 
+    eligibility_error = bidirectional_eligibility_error(
+        args, load_sync_policy(getattr(args, "policy_path", None) or default_policy_path()))
+    if eligibility_error:
+        payload["error"] = eligibility_error
+        return payload
+
     preview_cmd = [
         "rclone", "--max-delete", str(args.max_delete), "bisync",
         os.path.expanduser(args.local_root), f"{args.remote}:",
@@ -315,56 +332,71 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     if not args.apply:
         return payload
 
-    if args.check_access:
-        ensure_check_access_filter(filter_path)
-        ensure_check_access_file(args.local_root)
-
-    stream = bool(getattr(args, "stream", False))
-    if stream:
-        print("Starting rclone bisync --resync (verbose log below)...", flush=True)
-
-    result = rclone_bisync_run(
-        args.remote, args.local_root, filter_path,
-        resync=True, max_delete=args.max_delete, check_access=args.check_access,
-        stream=stream,
-    )
-    payload["bisync"] = {
-        "cmd": result.cmd, "returncode": result.returncode,
-        "stdout": result.stdout, "stderr": result.stderr,
-    }
-    write_last_log(result)
-
-    if result.returncode != 0:
-        payload["error"] = f"rclone bisync --resync failed (returncode={result.returncode})"
-        append_text_log(var_path("bisync.log"),
-                         f"{datetime.now().isoformat()} resync FAILED rc={result.returncode}")
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    lock = acquire_lock(lock_path)
+    payload["lock"] = {"acquired": lock.acquired, "holder_pid": lock.holder_pid}
+    if not lock.acquired:
+        payload["error"] = (
+            f"Another bisync run is already in progress (PID: {lock.holder_pid})."
+            if lock.holder_pid else "Failed to acquire bisync lock."
+        )
+        append_text_log(log_path, f"{datetime.now().isoformat()} resync SKIPPED {payload['error']}")
         return payload
 
-    state = load_bisync_state()
-    state["last_resync_filter_hash"] = filter_file_hash(filter_path)
-    state["last_resync_at"] = datetime.now().isoformat()
+    try:
+        if args.check_access:
+            ensure_check_access_filter(filter_path)
+            if not getattr(args, "target_managed", False):
+                ensure_check_access_file(args.local_root)
+
+        stream = bool(getattr(args, "stream", False))
+        if stream:
+            print("Starting rclone bisync --resync (verbose log below)...", flush=True)
+
+        result = rclone_bisync_run(
+            args.remote, args.local_root, filter_path,
+            resync=True, max_delete=args.max_delete, check_access=args.check_access,
+            stream=stream,
+        )
+        payload["bisync"] = {
+            "cmd": result.cmd, "returncode": result.returncode,
+            "stdout": result.stdout, "stderr": result.stderr,
+        }
+        write_last_log(result, last_log_path)
+
+        if result.returncode != 0:
+            payload["error"] = f"rclone bisync --resync failed (returncode={result.returncode})"
+            append_text_log(log_path,
+                            f"{datetime.now().isoformat()} resync FAILED rc={result.returncode}")
+            return payload
+
+        state = load_bisync_state(state_path)
+        state["last_resync_filter_hash"] = filter_file_hash(filter_path)
+        state["last_resync_at"] = datetime.now().isoformat()
     # A resync is the answer to "sync is paused", so finishing one ends that
     # notification. Without this the flag survives until the next successful
     # run, and if the very next run blocked for the same reason in between, the
     # card would be suppressed — the guard silent exactly when it has something
     # to say, which is the shape of issue #5.
-    if state.get("last_notified_error"):
-        dismiss_notification()
-    state["last_notified_error"] = None
-    state["rclone_wants_resync"] = False
-    state["last_status"] = "ok"
-    save_bisync_state(state)
-    payload["state_after"] = state
+        if state.get("last_notified_error"):
+            dismiss_notification()
+        state["last_notified_error"] = None
+        state["rclone_wants_resync"] = False
+        state["last_status"] = "ok"
+        save_bisync_state(state, state_path)
+        payload["state_after"] = state
 
-    if stream:
-        print("\nUpdating local scan index after resync...", flush=True)
-    local_scan = run_local_scan(args.db_path, args.local_root)
-    payload["local_scan"] = vars(local_scan)
-    if stream and local_scan.duration_sec is not None:
-        print(f"Local scan done in {local_scan.duration_sec:.0f}s.", flush=True)
+        if stream:
+            print("\nUpdating local scan index after resync...", flush=True)
+        local_scan = run_local_scan(args.db_path, args.local_root)
+        payload["local_scan"] = vars(local_scan)
+        if stream and local_scan.duration_sec is not None:
+            print(f"Local scan done in {local_scan.duration_sec:.0f}s.", flush=True)
 
-    append_text_log(var_path("bisync.log"), f"{datetime.now().isoformat()} resync OK")
-    return payload
+        append_text_log(log_path, f"{datetime.now().isoformat()} resync OK")
+        return payload
+    finally:
+        release_lock(lock_path)
 
 
 #: What a person can actually do about an error, said in terms of the menu they
@@ -389,7 +421,8 @@ def human_notice(error: str) -> str:
     return error
 
 
-def notify_once(state: Dict[str, object], title: str, message: str) -> bool:
+def notify_once(state: Dict[str, object], title: str, message: str,
+                state_path: str | None = None) -> bool:
     """Notify unless this exact thing was the last thing notified.
 
     The scheduled job runs every half hour, and a blocked run is blocked until a
@@ -409,14 +442,15 @@ def notify_once(state: Dict[str, object], title: str, message: str) -> bool:
     if state.get("last_notified_error") == message:
         return False
     state["last_notified_error"] = message
-    save_bisync_state(state)
+    save_bisync_state(state, state_path)
     notify(title, message)
     return True
 
 
 def cmd_run(args: argparse.Namespace) -> dict:
     filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
-    state = load_bisync_state()
+    state_path, log_path, last_log_path, lock_path = _runtime_paths(args)
+    state = load_bisync_state(state_path)
     payload = {
         "schema": "sync_bisync:v1",
         "action": "run",
@@ -448,10 +482,19 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
     if payload["error"]:
         if args.apply:
-            append_text_log(var_path("bisync.log"),
+            append_text_log(log_path,
                              f"{datetime.now().isoformat()} run BLOCKED {payload['error']}")
             if args.notify_on_error:
-                notify_once(state, "ydm sync", human_notice(payload["error"]))
+                notify_once(state, "ydm sync", human_notice(payload["error"]), state_path)
+        return payload
+
+    eligibility_error = bidirectional_eligibility_error(
+        args, load_sync_policy(getattr(args, "policy_path", None) or default_policy_path()))
+    if eligibility_error:
+        payload["error"] = eligibility_error
+        if args.apply:
+            append_text_log(log_path,
+                            f"{datetime.now().isoformat()} run BLOCKED {payload['error']}")
         return payload
 
     preview_cmd = [
@@ -466,14 +509,15 @@ def cmd_run(args: argparse.Namespace) -> dict:
     if not args.apply:
         return payload
 
-    lock = acquire_lock(LOCK_PATH)
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    lock = acquire_lock(lock_path)
     payload["lock"] = {"acquired": lock.acquired, "holder_pid": lock.holder_pid}
     if not lock.acquired:
         payload["error"] = (
             f"Another bisync run is already in progress (PID: {lock.holder_pid})."
             if lock.holder_pid else "Failed to acquire bisync lock."
         )
-        append_text_log(var_path("bisync.log"),
+        append_text_log(log_path,
                          f"{datetime.now().isoformat()} run SKIPPED {payload['error']}")
         return payload
 
@@ -490,7 +534,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
             "cmd": result.cmd, "returncode": result.returncode,
             "stdout": result.stdout, "stderr": result.stderr,
         }
-        write_last_log(result)
+        write_last_log(result, last_log_path)
 
         if result.returncode != 0:
             payload["error"] = f"rclone bisync failed (returncode={result.returncode})"
@@ -510,12 +554,12 @@ def cmd_run(args: argparse.Namespace) -> dict:
                 state["rclone_wants_resync"] = True
             state["last_run_at"] = datetime.now().isoformat()
             state["last_status"] = "error"
-            save_bisync_state(state)
+            save_bisync_state(state, state_path)
             payload["state_after"] = dict(state)
-            append_text_log(var_path("bisync.log"),
+            append_text_log(log_path,
                              f"{datetime.now().isoformat()} run FAILED rc={result.returncode}")
             if args.notify_on_error:
-                notify_once(state, "ydm sync", human_notice(payload["error"]))
+                notify_once(state, "ydm sync", human_notice(payload["error"]), state_path)
             return payload
 
         local_scan = run_local_scan(args.db_path, args.local_root)
@@ -531,26 +575,27 @@ def cmd_run(args: argparse.Namespace) -> dict:
         if state.get("last_notified_error"):
             dismiss_notification()
         state["last_notified_error"] = None
-        save_bisync_state(state)
+        save_bisync_state(state, state_path)
         payload["state_after"] = dict(state)
-        append_text_log(var_path("bisync.log"), f"{datetime.now().isoformat()} run OK")
+        append_text_log(log_path, f"{datetime.now().isoformat()} run OK")
         return payload
     finally:
-        release_lock(LOCK_PATH)
+        release_lock(lock_path)
 
 
 def cmd_status(args: argparse.Namespace) -> dict:
     filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
     policy_path = getattr(args, "policy_path", None) or default_policy_path()
     policy = load_sync_policy(policy_path)
-    policy_bisync_filter_path = default_bisync_filter_path(args.local_root) if policy else None
-    state = load_bisync_state()
+    policy_bisync_filter_path = filter_path if policy else None
+    state_path, log_path, _last_log_path, lock_path = _runtime_paths(args)
+    state = load_bisync_state(state_path)
     current_hash = filter_file_hash(filter_path)
     policy_bisync_hash = filter_file_hash(policy_bisync_filter_path) if policy_bisync_filter_path else None
 
-    if os.path.exists(LOCK_PATH):
+    if os.path.exists(lock_path):
         try:
-            with open(LOCK_PATH, "r") as handle:
+            with open(lock_path, "r") as handle:
                 pid = int(handle.read().strip())
             lock_info = {"held": os.path.exists(f"/proc/{pid}"), "pid": pid}
         except (ValueError, IOError):
@@ -558,7 +603,6 @@ def cmd_status(args: argparse.Namespace) -> dict:
     else:
         lock_info = {"held": False, "pid": None}
 
-    log_path = var_path("bisync.log")
     log_tail: List[str] = []
     if os.path.exists(log_path):
         with open(log_path, "r") as handle:
@@ -689,6 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
         sub.add_argument("--policy-path", default=default_policy_path())
+        sub.add_argument("--target", default=None)
+        sub.add_argument("--targets-file", default=None)
 
     resync_parser = subparsers.add_parser(
         "resync", help="Establish/re-establish the bisync baseline (Path1 may overwrite Path2)"
@@ -726,6 +772,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    try:
+        configure_target(args)
+    except Exception as exc:
+        render({"schema": "sync_bisync:v1", "action": args.command,
+                "dry_run": True, "error": str(exc)}, args.format, args.text_header)
+        return
     if args.command == "resync":
         payload = cmd_resync(args)
     elif args.command == "run":

@@ -111,17 +111,17 @@ bidirectional state. Ordinary files use an exact manifest; native exports use
 the Drive `copyid` backend command. Live Google acceptance remains a closed
 gate.
 
-## Phase 7 — Bidirectional ordinary files
+## Phase 7 — Bidirectional ordinary files (implementation complete; live 7.8 pending)
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 7.1 | Eligibility gate | policy validator | native, shortcut, collision, missing access marker refused |
-| 7.2 | Per-target bisync state/log/lock | `sync_bisync.py` | parallel targets cannot overwrite state; same target cannot overlap |
-| 7.3 | Overlapping local-root detector | target validation | same/nested roots rejected across targets |
-| 7.4 | Daemon conflict scoped by root | sync backend | active Yandex daemon blocks only intersecting rclone root |
-| 7.5 | Filter hash/resync gate | bisync | changed scope cannot normal-run before resync |
-| 7.6 | Delete/access safeguards | bisync | marker + max-delete + preview mandatory |
-| 7.7 | Rename strategy capability-aware | sync rename | server-side move only when provider advertises it |
+| 7.1 | Eligibility gate ✅ | policy validator | native, shortcut, collision, missing access marker refused |
+| 7.2 | Per-target bisync state/log/lock ✅ | `sync_bisync.py` | parallel targets cannot overwrite state; same target cannot overlap |
+| 7.3 | Overlapping local-root detector ✅ | target validation | same/nested roots rejected across targets |
+| 7.4 | Daemon conflict scoped by root ✅ | sync backend | active Yandex daemon blocks only intersecting rclone root |
+| 7.5 | Filter hash/resync gate ✅ | bisync | changed scope cannot normal-run before resync |
+| 7.6 | Delete/access safeguards ✅ | bisync | marker + max-delete + preview mandatory |
+| 7.7 | Rename strategy capability-aware ✅ | sync rename | server-side move only when provider advertises it |
 | 7.8 | Disposable live round-trip | private acceptance | create/edit/rename/delete fixture; no unrelated changes |
 
 **Exit:** bidirectional mode доступен только для доказуемо материализируемых

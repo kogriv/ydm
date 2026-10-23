@@ -651,16 +651,54 @@ def backend_from_args(args) -> SyncBackend:
     )
 
 
+def daemon_sync_root(config_path: str = "~/.config/yandex-disk/config.cfg") -> Optional[str]:
+    """Return the daemon's canonical mirror root without contacting the daemon."""
+    resolved = os.path.expanduser(config_path)
+    try:
+        with open(resolved, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                if raw.startswith("dir="):
+                    value = raw.split("=", 1)[1].strip()
+                    return os.path.realpath(os.path.expanduser(value)) if value else None
+    except OSError:
+        return None
+    return None
+
+
+def roots_overlap(first: str, second: str) -> bool:
+    left = os.path.normcase(os.path.realpath(os.path.expanduser(first)))
+    right = os.path.normcase(os.path.realpath(os.path.expanduser(second)))
+    try:
+        shared = os.path.commonpath((left, right))
+    except ValueError:
+        return False
+    return shared in {left, right}
+
+
+def daemon_conflict_error(local_root: str,
+                          config_path: str = "~/.config/yandex-disk/config.cfg") -> Optional[str]:
+    """Block rclone only when an active daemon owns the same filesystem tree."""
+    if not daemon_is_active():
+        return None
+    daemon_root = daemon_sync_root(config_path)
+    if daemon_root is None:
+        return "yandex-disk daemon is active but its sync root cannot be verified"
+    if roots_overlap(local_root, daemon_root):
+        return (
+            "yandex-disk daemon is active on an overlapping local root; stop it "
+            "or choose a disjoint target root"
+        )
+    return None
+
+
 def ensure_backend_no_daemon_conflict(backend: SyncBackend) -> None:
-    """If user chose rclone backend while yandex-disk daemon is active, warn/stop."""
-    if backend.kind == "rclone" and daemon_is_active():
+    """Refuse only an active daemon whose mirror overlaps this rclone root."""
+    if backend.kind == "rclone":
+        error = daemon_conflict_error(backend.local_root)
+        if error is None:
+            return
         print(
-            "WARNING: yandex-disk daemon is active. Using rclone backend alongside it "
-            "will cause sync conflicts and may lead to data loss.",
+            f"WARNING: {error}.",
             file=sys.stderr,
         )
-        # In interactive mode we would prompt; in library mode we raise.
-        raise BackendError(
-            "yandex-disk daemon is active. Stop it first (yandex-disk stop) "
-            "or choose --backend daemon."
-        )
+        raise BackendError(error)

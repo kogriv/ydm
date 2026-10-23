@@ -42,6 +42,8 @@ from tools.sync_policy import (  # noqa: E402
     normalize_entry,
 )
 from ydm import DEFAULT_CONFIG  # noqa: E402
+from tools.providers import provider_for  # noqa: E402
+from tools.sync_policy import configure_target_args  # noqa: E402
 
 
 SCHEMA = "ydm_sync_rename:v1"
@@ -641,6 +643,10 @@ def run_followup_bisync(args: argparse.Namespace) -> Optional[CommandResult]:
     ]
     if not args.check_access:
         cmd.append("--no-check-access")
+    if getattr(args, "target_managed", False):
+        cmd.extend(["--target", args.target])
+        if getattr(args, "targets_file", None):
+            cmd.extend(["--targets-file", args.targets_file])
     if args.followup == "run" and not args.notify_on_error:
         cmd.append("--no-notify-on-error")
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -680,6 +686,20 @@ def preflight(args: argparse.Namespace) -> dict:
         payload["checks"].append({"name": name, "ok": ok, "detail": None if ok else detail})
         if not ok and payload["error"] is None:
             payload["error"] = str(detail or name)
+
+    if getattr(args, "target_managed", False):
+        try:
+            supported = provider_for(args.provider).capabilities.server_side_move
+        except ValueError as exc:
+            check("provider_capability", False, str(exc))
+            return payload
+        check(
+            "provider_server_side_move",
+            supported,
+            f"Provider {args.provider} does not support the server-side rename strategy",
+        )
+        if payload["error"]:
+            return payload
 
     if not old_entry or not new_entry:
         check("path_not_root", False, "Refusing to rename the sync root itself.")
@@ -1125,6 +1145,11 @@ def cmd_apply_detected(args: argparse.Namespace) -> dict:
         "warnings": [],
         "error": None,
     }
+    if getattr(args, "target_managed", False) and not provider_for(
+            args.provider).capabilities.server_side_move:
+        payload["error"] = (
+            f"Provider {args.provider} does not support the server-side rename strategy")
+        return payload
     if not candidate:
         payload["error"] = f"Candidate not found: {args.candidate_id}"
         return payload
@@ -1473,6 +1498,8 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--policy-path", default=default_policy_path())
         sub.add_argument("--rename-policy-path", default=default_rename_policy_path())
         sub.add_argument("--bisync-filter-path", default=None)
+        sub.add_argument("--target", default=None)
+        sub.add_argument("--targets-file", default=None)
 
     def rename_flags(sub):
         common_flags(sub)
@@ -1539,6 +1566,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    try:
+        configure_target_args(args)
+        if getattr(args, "target_managed", False):
+            args.bisync_filter_path = args.target_context.bisync_filter_path
+    except Exception as exc:
+        render({"schema": SCHEMA, "action": args.command, "dry_run": True,
+                "error": str(exc)}, args.format)
+        return
     if args.command == "plan":
         payload = cmd_plan(args)
     elif args.command == "apply":
