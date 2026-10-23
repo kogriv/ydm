@@ -1361,7 +1361,8 @@ class TestDuplicates(AnalyzerTestCase):
         # normal duplicate inserts -- drop it to simulate a legacy
         # pre-index DB, exactly the scenario `report clean-duplicates`
         # was built for (see CHANGELOG.md).
-        self.conn.execute("DROP INDEX idx_files_unique")
+        # v2 keeps path uniqueness only for legacy rows with no object ID.
+        self.conn.execute("DROP INDEX idx_files_path_legacy")
         self.conn.executemany(
             "INSERT INTO files (scan_id, parent_path, name, type, size, md5) VALUES (?, ?, ?, ?, ?, ?)",
             [

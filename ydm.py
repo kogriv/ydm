@@ -255,6 +255,17 @@ class _SharedConnection:
 class StorageManager:
     """Handles all database operations (SQLite)."""
 
+    SCHEMA_VERSION = 2
+    _SCAN_COLUMNS = (
+        "id, timestamp, scan_type, status, duration, scan_root, scan_depth, "
+        "target_name, provider, inventory_kind, remote_name, schema_version"
+    )
+    _FILE_COLUMNS = (
+        "scan_id, parent_path, name, type, size, md5, created, modified, "
+        "object_id, parent_id, mime_type, hash_name, content_hash, is_native, "
+        "is_shortcut, metadata_json"
+    )
+
     def __init__(self, db_path, use_temp_storage=True, config=None):
         self.final_db_path = db_path  # Финальное место на диске
         self.use_temp = use_temp_storage
@@ -278,6 +289,28 @@ class StorageManager:
         #: Incremented on entering each outermost read scope, so that a cache
         #: filled in one scope is never mistaken for one filled in the next.
         self._read_scope_id = 0
+        self._schema_recovery_in_progress = False
+
+    @classmethod
+    def _schema_version(cls, path):
+        """Read the SQLite schema marker without granting a future DB writes."""
+        if not os.path.exists(path):
+            return 0
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+
+    @classmethod
+    def _assert_supported_schema(cls, path):
+        version = cls._schema_version(path)
+        if version > cls.SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Unsupported future database schema v{version}; "
+                f"this build supports up to v{cls.SCHEMA_VERSION}"
+            )
+        return version
 
     @contextlib.contextmanager
     def reuse_connection(self):
@@ -354,6 +387,11 @@ class StorageManager:
         """
         if self._shared_connection is not None:
             return self._shared_connection
+        # Do this before opening a writable handle.  A newer database is
+        # readable only by a newer program and must never be "migrated" back.
+        self._assert_supported_schema(self.db_path)
+        if self.temp_mode:
+            self._assert_supported_schema(self.final_db_path)
         conn = sqlite3.connect(self.db_path)
         # Оптимизация для скорости при работе в памяти
         if self.temp_mode:
@@ -364,7 +402,7 @@ class StorageManager:
             conn.execute("PRAGMA journal_mode=WAL")      # Write-Ahead Logging
 
         # Level 2: Auto-recovery if schema is lost during active scan
-        if self.temp_mode:
+        if self.temp_mode and not self._schema_recovery_in_progress:
             try:
                 cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scan_progress'")
                 if not cursor.fetchone():
@@ -372,16 +410,20 @@ class StorageManager:
                     print(f"CRITICAL: tmpfs DB schema lost! Attempting recovery from disk checkpoint...", file=sys.stderr)
                     conn.close()
 
-                    # Try to recover using global scan_id if available
-                    global _scan_id_for_signal
-                    if _scan_id_for_signal:
-                        # Restore from last checkpoint on disk
-                        self.restore_from_disk(_scan_id_for_signal)
-                        print(f"Recovery complete. Continuing scan {_scan_id_for_signal} from last checkpoint.", file=sys.stderr)
-                    else:
-                        # No active scan - just reinitialize
-                        self.init_db()
-                        print(f"No active scan found. Reinitialized empty schema.", file=sys.stderr)
+                    # init_db() itself uses get_connection().  Guard the
+                    # nested call so a missing tmpfs DB does not recursively
+                    # attempt recovery before the schema can be created.
+                    self._schema_recovery_in_progress = True
+                    try:
+                        global _scan_id_for_signal
+                        if _scan_id_for_signal:
+                            self.restore_from_disk(_scan_id_for_signal)
+                            print(f"Recovery complete. Continuing scan {_scan_id_for_signal} from last checkpoint.", file=sys.stderr)
+                        else:
+                            self.init_db()
+                            print(f"No active scan found. Reinitialized empty schema.", file=sys.stderr)
+                    finally:
+                        self._schema_recovery_in_progress = False
 
                     # Reopen connection after recovery
                     conn = sqlite3.connect(self.db_path)
@@ -461,10 +503,11 @@ class StorageManager:
             
             temp_conn.execute(f"ATTACH DATABASE '{self.final_db_path}' AS disk")
             
-            # Copy scans (update existing using REPLACE to avoid attached DB upsert limit)
-            temp_conn.execute("""
-                INSERT OR REPLACE INTO disk.scans 
-                SELECT * FROM main.scans
+            # Explicit columns make checkpointing safe across v1 -> v2 and
+            # preserve provider provenance on a tmpfs resume.
+            temp_conn.execute(f"""
+                INSERT OR REPLACE INTO disk.scans ({self._SCAN_COLUMNS})
+                SELECT {self._SCAN_COLUMNS} FROM main.scans
             """)
             
             # Copy disk_info (update existing)
@@ -473,12 +516,11 @@ class StorageManager:
                 SELECT * FROM main.disk_info
             """)
             
-            # Copy files (without id - let target DB auto-increment)
-            # Use INSERT OR IGNORE to prevent duplicates when checkpoint runs multiple times
-            temp_conn.execute("""
-                INSERT OR IGNORE INTO disk.files 
-                (scan_id, parent_path, name, type, size, md5, created, modified)
-                SELECT scan_id, parent_path, name, type, size, md5, created, modified FROM main.files
+            # `id` is intentionally omitted: disk owns its row ids.  The two
+            # partial identity indexes make repeating this copy idempotent.
+            temp_conn.execute(f"""
+                INSERT OR IGNORE INTO disk.files ({self._FILE_COLUMNS})
+                SELECT {self._FILE_COLUMNS} FROM main.files
             """)
             
             # Copy scan_progress (update statuses)
@@ -514,6 +556,96 @@ class StorageManager:
             conn.execute("ALTER TABLE scans ADD COLUMN scan_root TEXT")
         if "scan_depth" not in existing:
             conn.execute("ALTER TABLE scans ADD COLUMN scan_depth INTEGER")
+
+    @classmethod
+    def _migrate_schema(cls, conn, fault_inject=None):
+        """Upgrade a legacy monitor DB to v2 in one idempotent transaction.
+
+        `fault_inject` is intentionally a tiny test seam: tests can prove that
+        an exception before commit leaves the old schema and index intact.
+        """
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > cls.SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Unsupported future database schema v{version}; "
+                f"this build supports up to v{cls.SCHEMA_VERSION}"
+            )
+        if version == cls.SCHEMA_VERSION:
+            # `user_version` is a marker, not an excuse to trust a manually
+            # rebuilt or partially restored table.  Existing repair tooling
+            # can recreate `scans` while retaining the old marker.
+            scans = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+            files = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
+            required_scans = {"scan_root", "scan_depth", "target_name", "provider",
+                              "inventory_kind", "remote_name", "schema_version"}
+            required_files = {"object_id", "parent_id", "mime_type", "hash_name",
+                              "content_hash", "is_native", "is_shortcut", "metadata_json"}
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list(files)")}
+            if (required_scans <= scans and required_files <= files and
+                    {"idx_files_object_id", "idx_files_path_legacy"} <= indexes):
+                return
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cls._ensure_scan_scope_columns(conn)
+            # Some very old tool-created DBs contain only `scans`.  A schema
+            # migration must make those usable too, rather than assuming init
+            # was run by the CLI first.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id INTEGER NOT NULL, parent_path TEXT NOT NULL,
+                    name TEXT NOT NULL, type TEXT NOT NULL, size INTEGER,
+                    md5 TEXT, created DATETIME, modified DATETIME,
+                    object_id TEXT, parent_id TEXT, mime_type TEXT,
+                    hash_name TEXT, content_hash TEXT,
+                    is_native INTEGER NOT NULL DEFAULT 0,
+                    is_shortcut INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT,
+                    FOREIGN KEY(scan_id) REFERENCES scans(id)
+                )
+            """)
+            scan_columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+            for name, declaration in (
+                ("target_name", "TEXT"), ("provider", "TEXT"),
+                ("inventory_kind", "TEXT"), ("remote_name", "TEXT"),
+                ("schema_version", "INTEGER NOT NULL DEFAULT 2"),
+            ):
+                if name not in scan_columns:
+                    conn.execute(f"ALTER TABLE scans ADD COLUMN {name} {declaration}")
+
+            file_columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
+            for name, declaration in (
+                ("object_id", "TEXT"), ("parent_id", "TEXT"),
+                ("mime_type", "TEXT"), ("hash_name", "TEXT"),
+                ("content_hash", "TEXT"), ("is_native", "INTEGER NOT NULL DEFAULT 0"),
+                ("is_shortcut", "INTEGER NOT NULL DEFAULT 0"), ("metadata_json", "TEXT"),
+            ):
+                if name not in file_columns:
+                    conn.execute(f"ALTER TABLE files ADD COLUMN {name} {declaration}")
+            conn.execute(
+                "UPDATE files SET hash_name='md5', content_hash=md5 "
+                "WHERE md5 IS NOT NULL AND hash_name IS NULL"
+            )
+            if fault_inject:
+                fault_inject("columns_added", conn)
+            # Build the replacement indexes before removing the legacy one;
+            # if either creation fails the rollback retains uniqueness.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_object_id "
+                "ON files(scan_id, object_id) WHERE object_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_path_legacy "
+                "ON files(scan_id, parent_path, name) WHERE object_id IS NULL"
+            )
+            if fault_inject:
+                fault_inject("indexes_created", conn)
+            conn.execute("DROP INDEX IF EXISTS idx_files_unique")
+            conn.execute("PRAGMA user_version=2")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _init_final_db(self):
         """Initialize final DB schema if it doesn't exist."""
@@ -580,7 +712,7 @@ class StorageManager:
             
             for statement in schema:
                 conn.execute(statement)
-            self._ensure_scan_scope_columns(conn)
+            self._migrate_schema(conn)
             conn.commit()
             conn.close()
         except Exception as e:
@@ -596,20 +728,23 @@ class StorageManager:
             return  # Нет финальной БД
         
         try:
-            # Подключиться к временной БД
+            # Initialize tmpfs schema before opening the copy connection.  A
+            # direct restore has no outer get_connection() recovery guard.
+            was_recovering = self._schema_recovery_in_progress
+            self._schema_recovery_in_progress = True
+            try:
+                self.init_db()
+            finally:
+                self._schema_recovery_in_progress = was_recovering
             temp_conn = sqlite3.connect(self.db_path)
-            
-            # CRITICAL: Initialize tmpfs schema BEFORE copying data
-            # This was missing and caused "no such table" error during checkpoint
-            self.init_db()
             
             # Attach финальной БД
             temp_conn.execute(f"ATTACH DATABASE '{self.final_db_path}' AS disk")
             
             # Копировать данные конкретного сеанса
-            temp_conn.execute("""
-                INSERT OR IGNORE INTO main.scans 
-                SELECT * FROM disk.scans WHERE id = ?
+            temp_conn.execute(f"""
+                INSERT OR IGNORE INTO main.scans ({self._SCAN_COLUMNS})
+                SELECT {self._SCAN_COLUMNS} FROM disk.scans WHERE id = ?
             """, (scan_id,))
             
             temp_conn.execute("""
@@ -617,9 +752,9 @@ class StorageManager:
                 SELECT * FROM disk.disk_info WHERE scan_id = ?
             """, (scan_id,))
             
-            temp_conn.execute("""
-                INSERT OR IGNORE INTO main.files 
-                SELECT * FROM disk.files WHERE scan_id = ?
+            temp_conn.execute(f"""
+                INSERT OR IGNORE INTO main.files ({self._FILE_COLUMNS})
+                SELECT {self._FILE_COLUMNS} FROM disk.files WHERE scan_id = ?
             """, (scan_id,))
             
             temp_conn.execute("""
@@ -705,7 +840,7 @@ class StorageManager:
                 cursor = conn.cursor()
                 for statement in schema:
                     cursor.execute(statement)
-                self._ensure_scan_scope_columns(conn)
+                self._migrate_schema(conn)
                 conn.commit()
             finally:
                 conn.close()
@@ -751,7 +886,9 @@ class StorageManager:
         
         return crashed
 
-    def start_scan(self, scan_type, scan_root=None, scan_depth=None):
+    def start_scan(self, scan_type, scan_root=None, scan_depth=None, *,
+                   target_name=None, provider=None, inventory_kind=None,
+                   remote_name=None):
         """Creates a new scan record with 'started' status.
 
         `scan_root` and `scan_depth` record what the scan was *asked* to cover.
@@ -770,9 +907,11 @@ class StorageManager:
         # Если tmpfs режим - используем явный scan_id
         if self.temp_mode:
             cursor.execute(
-                "INSERT INTO scans (id, scan_type, status, duration, scan_root, scan_depth)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (next_scan_id, scan_type, 'started', 0, scan_root, scan_depth)
+                "INSERT INTO scans (id, scan_type, status, duration, scan_root, scan_depth, "
+                "target_name, provider, inventory_kind, remote_name, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (next_scan_id, scan_type, 'started', 0, scan_root, scan_depth,
+                 target_name, provider, inventory_kind, remote_name, self.SCHEMA_VERSION)
             )
             scan_id = next_scan_id
 
@@ -781,11 +920,13 @@ class StorageManager:
                 if not os.path.exists(self.final_db_path):
                     self._init_final_db()
                 disk_conn = sqlite3.connect(self.final_db_path)
-                self._ensure_scan_scope_columns(disk_conn)
+                self._migrate_schema(disk_conn)
                 disk_conn.execute(
-                    "INSERT OR IGNORE INTO scans (id, scan_type, status, duration, scan_root, scan_depth)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
-                    (next_scan_id, scan_type, 'started', 0, scan_root, scan_depth)
+                    "INSERT OR IGNORE INTO scans (id, scan_type, status, duration, scan_root, scan_depth, "
+                    "target_name, provider, inventory_kind, remote_name, schema_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (next_scan_id, scan_type, 'started', 0, scan_root, scan_depth,
+                     target_name, provider, inventory_kind, remote_name, self.SCHEMA_VERSION)
                 )
                 disk_conn.commit()
                 disk_conn.close()
@@ -799,11 +940,13 @@ class StorageManager:
             # init_db() — so without this, `scan_root` reaches an unmigrated
             # `scans` table and every tool-driven scan dies on a database that
             # only ydm.py had ever opened for writing.
-            self._ensure_scan_scope_columns(conn)
+            self._migrate_schema(conn)
             cursor.execute(
-                "INSERT INTO scans (scan_type, status, duration, scan_root, scan_depth)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (scan_type, 'started', 0, scan_root, scan_depth)
+                "INSERT INTO scans (scan_type, status, duration, scan_root, scan_depth, "
+                "target_name, provider, inventory_kind, remote_name, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (scan_type, 'started', 0, scan_root, scan_depth,
+                 target_name, provider, inventory_kind, remote_name, self.SCHEMA_VERSION)
             )
             scan_id = cursor.lastrowid
         
@@ -846,20 +989,48 @@ class StorageManager:
         conn.commit()
 
     def save_files_batch(self, files_data):
-        """Bulk insert files."""
+        """Bulk insert legacy tuples or provider-aware mapping records.
+
+        Legacy callers retain their eight-value tuple shape.  New scanners may
+        pass mappings with object identity and typed hashes; `md5` remains a
+        compatibility projection only when the typed hash really is MD5.
+        """
         if not files_data: return
+        rows = []
+        for item in files_data:
+            if isinstance(item, dict):
+                hash_name = item.get("hash_name")
+                content_hash = item.get("content_hash")
+                md5 = item.get("md5")
+                if hash_name == "md5" and md5 is None:
+                    md5 = content_hash
+                metadata = item.get("metadata_json", item.get("metadata"))
+                if metadata is not None and not isinstance(metadata, str):
+                    metadata = json.dumps(metadata, sort_keys=True)
+                rows.append((
+                    item["scan_id"], item["parent_path"], item["name"], item["type"],
+                    item.get("size"), md5, item.get("created"), item.get("modified"),
+                    item.get("object_id"), item.get("parent_id"), item.get("mime_type"),
+                    hash_name, content_hash, int(bool(item.get("is_native", False))),
+                    int(bool(item.get("is_shortcut", False))), metadata,
+                ))
+            else:
+                # historical tuple order is ... md5, modified, created.
+                scan_id, parent, name, item_type, size, md5, modified, created = item
+                rows.append((scan_id, parent, name, item_type, size, md5, created, modified,
+                             None, None, None,
+                             "md5" if md5 is not None else None, md5,
+                             0, 0, None))
         conn = self.get_connection()
         conn.executemany(
-            """INSERT INTO files 
-            (scan_id, parent_path, name, type, size, md5, modified, created) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            files_data
+            f"INSERT INTO files ({self._FILE_COLUMNS}) VALUES ({','.join('?' for _ in range(16))})",
+            rows,
         )
         conn.commit()
         conn.close()
         
         # Обновить счетчик для checkpoint
-        self.last_checkpoint_files += len(files_data)
+        self.last_checkpoint_files += len(rows)
 
     def get_pending_folders(self, scan_id):
         """Gets list of folders to scan (pending + in_progress)."""
@@ -1199,7 +1370,7 @@ class RcloneClient(CloudResourceClient):
         remote_path = f"{self.remote}:" if path in ("", "/") else f"{self.remote}:{path}"
         try:
             result = subprocess.run(
-                ["rclone", "lsjson", remote_path, "--hash"],
+                ["rclone", "lsjson", remote_path, "--hash", "--metadata"],
                 capture_output=True, text=True, check=True
             )
             entries = json.loads(result.stdout)
@@ -1218,11 +1389,23 @@ class RcloneClient(CloudResourceClient):
                 frac = frac_and_zone.rstrip("Z")[:6]
                 mod_time = f"{head}.{frac}Z"
             is_dir = entry.get("IsDir", False)
+            hashes = entry.get("Hashes") or {}
+            hash_name = "md5" if hashes.get("md5") else (sorted(hashes)[0] if hashes else None)
+            content_hash = hashes.get(hash_name) if hash_name else None
+            metadata = entry.get("Metadata") or {}
             items.append({
                 "name": entry["Name"],
                 "type": "dir" if is_dir else "file",
                 "size": 0 if is_dir else entry.get("Size", 0),
-                "md5": (entry.get("Hashes") or {}).get("md5"),
+                "md5": hashes.get("md5"),
+                "object_id": entry.get("ID"),
+                "parent_id": entry.get("ParentID"),
+                "mime_type": entry.get("MimeType"),
+                "hash_name": hash_name,
+                "content_hash": content_hash,
+                "is_native": bool(entry.get("IsNative", False)),
+                "is_shortcut": bool(entry.get("IsShortcut", False)),
+                "metadata": metadata,
                 "created": mod_time,
                 "modified": mod_time,
             })
@@ -1338,16 +1521,27 @@ class CloudScanner:
                         created = datetime.now()
                         modified = datetime.now()
 
-                    batch.append((
-                        scan_id,
-                        parent, 
-                        name,
-                        item['type'],
-                        item.get('size', 0),
-                        item.get('md5', None),
-                        created,
-                        modified
-                    ))
+                    # Mapping records retain provider identity and typed hash
+                    # metadata; StorageManager still accepts old tuples from
+                    # local and auxiliary scanners.
+                    batch.append({
+                        "scan_id": scan_id,
+                        "parent_path": parent,
+                        "name": name,
+                        "type": item['type'],
+                        "size": item.get('size', 0),
+                        "md5": item.get('md5'),
+                        "created": created,
+                        "modified": modified,
+                        "object_id": item.get('object_id'),
+                        "parent_id": item.get('parent_id'),
+                        "mime_type": item.get('mime_type'),
+                        "hash_name": item.get('hash_name'),
+                        "content_hash": item.get('content_hash'),
+                        "is_native": item.get('is_native', False),
+                        "is_shortcut": item.get('is_shortcut', False),
+                        "metadata": item.get('metadata'),
+                    })
                     
                     if item['type'] == 'dir':
                         sub_path = (parent + '/' + name) if parent else ("/" + name)
@@ -2958,14 +3152,14 @@ class Analyzer:
         if scan_id:
             count_query = """
                 SELECT COUNT(*) - COUNT(DISTINCT scan_id || '|' || parent_path || '|' || name) as duplicate_count
-                FROM files WHERE scan_id = ?
+                FROM files WHERE scan_id = ? AND object_id IS NULL
             """
             total_query = "SELECT COUNT(*) FROM files WHERE scan_id = ?"
             params = (scan_id,)
         else:
             count_query = """
                 SELECT COUNT(*) - COUNT(DISTINCT scan_id || '|' || parent_path || '|' || name) as duplicate_count
-                FROM files
+                FROM files WHERE object_id IS NULL
             """
             total_query = "SELECT COUNT(*) FROM files"
             params = ()
@@ -2977,10 +3171,10 @@ class Analyzer:
         if scan_id:
             delete_query = """
                 DELETE FROM files 
-                WHERE scan_id = ? AND id NOT IN (
+                WHERE scan_id = ? AND object_id IS NULL AND id NOT IN (
                     SELECT MIN(id) 
                     FROM files 
-                    WHERE scan_id = ?
+                    WHERE scan_id = ? AND object_id IS NULL
                     GROUP BY scan_id, parent_path, name
                 )
             """
@@ -2988,7 +3182,7 @@ class Analyzer:
         else:
             delete_query = """
                 DELETE FROM files 
-                WHERE id NOT IN (
+                WHERE object_id IS NULL AND id NOT IN (
                     SELECT MIN(id) 
                     FROM files 
                     GROUP BY scan_id, parent_path, name
@@ -3452,6 +3646,10 @@ class YDM_CLI:
                         "cloud",
                         scan_root=self.args.path or "/",
                         scan_depth=scan_depth,
+                        target_name="legacy",
+                        provider="yandex",
+                        inventory_kind=self.args.backend,
+                        remote_name=(getattr(client, "remote", None)),
                     )
                     print(f"Starting new cloud scan {scan_id}...", file=sys.stderr)
                     if scan_depth is not None:
