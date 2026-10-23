@@ -1104,7 +1104,7 @@ class StorageManager:
         conn.row_factory = sqlite3.Row
         
         scan = conn.execute(
-            "SELECT id, timestamp, scan_type, status, duration FROM scans WHERE id = ?",
+            "SELECT id, timestamp, scan_type, status, duration, target_name, provider, inventory_kind, remote_name FROM scans WHERE id = ?",
             (scan_id,)
         ).fetchone()
         
@@ -1129,6 +1129,10 @@ class StorageManager:
             "type": scan["scan_type"],
             "status": scan["status"],
             "duration": scan["duration"],
+            "target": scan["target_name"],
+            "provider": scan["provider"],
+            "inventory_kind": scan["inventory_kind"],
+            "remote": scan["remote_name"],
             "files_count": files_count,
             "total_size_bytes": total_size,
             "progress": self.get_scan_stats(scan_id)
@@ -1140,7 +1144,7 @@ class StorageManager:
         conn.row_factory = sqlite3.Row
         
         scans = conn.execute(
-            "SELECT id, timestamp, scan_type, status, duration FROM scans ORDER BY id DESC LIMIT ?",
+            "SELECT id, timestamp, scan_type, status, duration, target_name, provider, inventory_kind, remote_name FROM scans ORDER BY id DESC LIMIT ?",
             (limit,)
         ).fetchall()
         
@@ -1159,6 +1163,10 @@ class StorageManager:
                 "type": scan["scan_type"],
                 "status": scan["status"],
                 "duration": scan["duration"],
+                "target": scan["target_name"],
+                "provider": scan["provider"],
+                "inventory_kind": scan["inventory_kind"],
+                "remote": scan["remote_name"],
                 "files_count": files_count,
                 "progress": progress
             })
@@ -1599,7 +1607,8 @@ class Analyzer:
         conn.row_factory = sqlite3.Row
         
         scans = conn.execute("""
-            SELECT id, timestamp, scan_type, status, duration 
+            SELECT id, timestamp, scan_type, status, duration,
+                   target_name, provider, inventory_kind, remote_name
             FROM scans 
             ORDER BY id DESC LIMIT 5
         """).fetchall()
@@ -2517,8 +2526,8 @@ class Analyzer:
         """Clears the composite scan cache."""
         self._composite_cache.clear()
 
-    def _composite_cloud_files(self, composite):
-        """{(compare_path, name): size} for the composite cloud snapshot.
+    def _composite_cloud_records(self, composite):
+        """Provider-aware cloud rows for the composite cloud snapshot.
 
         The composite resolves per folder: each folder is served by the newest
         scan that covered it, and by the base scan otherwise. The previous
@@ -2536,42 +2545,59 @@ class Analyzer:
 
         conn = self.storage.get_connection()
         try:
-            files = {}
-            for parent, name, size in conn.execute(
-                "SELECT parent_path, name, size FROM files "
+            files = []
+            for row in conn.execute(
+                "SELECT parent_path, name, size, md5, hash_name, content_hash, modified, "
+                "is_native, is_shortcut, object_id, mime_type FROM files "
                 "WHERE scan_id = ? AND type = 'file'",
                 (base_scan_id,),
             ):
-                if parent in folder_updates:
+                if row[0] in folder_updates:
                     continue  # a newer scan owns this folder
-                files[(normalize_compare_path(parent), name)] = size
+                files.append(self._file_record(row))
 
             for scan_id, folders in by_scan.items():
-                for parent, name, size in conn.execute(
-                    "SELECT parent_path, name, size FROM files "
+                for row in conn.execute(
+                    "SELECT parent_path, name, size, md5, hash_name, content_hash, modified, "
+                    "is_native, is_shortcut, object_id, mime_type FROM files "
                     "WHERE scan_id = ? AND type = 'file'",
                     (scan_id,),
                 ):
-                    if parent in folders:
-                        files[(normalize_compare_path(parent), name)] = size
+                    if row[0] in folders:
+                        files.append(self._file_record(row))
         finally:
             conn.close()
         return files
 
-    def _scan_files(self, scan_id):
-        """{(compare_path, name): size} for a single scan."""
+    def _scan_records(self, scan_id):
+        """Return file records without collapsing same-path cloud siblings."""
         conn = self.storage.get_connection()
         try:
-            return {
-                (normalize_compare_path(parent), name): size
-                for parent, name, size in conn.execute(
-                    "SELECT parent_path, name, size FROM files "
-                    "WHERE scan_id = ? AND type = 'file'",
-                    (scan_id,),
-                )
-            }
+            return [self._file_record(row) for row in conn.execute(
+                "SELECT parent_path, name, size, md5, hash_name, content_hash, modified, "
+                "is_native, is_shortcut, object_id, mime_type FROM files "
+                "WHERE scan_id = ? AND type = 'file'", (scan_id,))]
         finally:
             conn.close()
+
+    @staticmethod
+    def _file_record(row):
+        parent, name, size, md5, hash_name, content_hash, modified, native, shortcut, object_id, mime = row
+        return {"parent": normalize_compare_path(parent), "name": name, "size": size,
+                "hash_name": hash_name or ("md5" if md5 else None),
+                "content_hash": content_hash or md5, "modified": modified,
+                "is_native": bool(native), "is_shortcut": bool(shortcut),
+                "object_id": object_id, "mime_type": mime}
+
+    # Kept for existing readers/tests which use this small path->size view.
+    # Provider-aware reports use the record methods above and never collapse
+    # Google same-name siblings.
+    def _scan_files(self, scan_id):
+        return {(row["parent"], row["name"]): row["size"] for row in self._scan_records(scan_id)}
+
+    def _composite_cloud_files(self, composite):
+        return {(row["parent"], row["name"]): row["size"]
+                for row in self._composite_cloud_records(composite)}
 
     def _diff_file_sets(self, cloud_files, local_id, exclude_dirs, compare_scans, extra=None):
         """The one place cloud is compared with local.
@@ -2583,22 +2609,54 @@ class Analyzer:
         matched nothing at all and every file was reported missing on both
         sides. normalize_compare_path() settles the convention in one place.
         """
-        local_files = self._scan_files(local_id)
+        local_files = self._scan_records(local_id)
+        cloud_by_path = {}
+        local_by_path = {}
+        for row in cloud_files:
+            cloud_by_path.setdefault((row["parent"], row["name"]), []).append(row)
+        for row in local_files:
+            local_by_path.setdefault((row["parent"], row["name"]), []).append(row)
 
         missing_local = []
         excluded = 0
-        for (parent, name), size in cloud_files.items():
-            if (parent, name) in local_files:
+        conflicts = []
+        comparisons = []
+        for (parent, name), cloud_rows in cloud_by_path.items():
+            path = f"/{parent}/{name}".replace("//", "/")
+            if len(cloud_rows) > 1:
+                conflicts.append({"path": path, "status": "materialization_conflict",
+                                  "object_ids": [row["object_id"] for row in cloud_rows]})
+                continue
+            cloud = cloud_rows[0]
+            local_rows = local_by_path.get((parent, name), [])
+            if local_rows:
+                local = local_rows[0]
+                if cloud["is_native"] or cloud["is_shortcut"]:
+                    comparisons.append({"path": path, "status": "uncomparable",
+                                        "reason": "native_document" if cloud["is_native"] else "shortcut"})
+                elif cloud["hash_name"] and local["hash_name"]:
+                    if cloud["hash_name"] == local["hash_name"]:
+                        comparisons.append({"path": path, "status": "strong_match" if cloud["content_hash"] == local["content_hash"] else "strong_mismatch", "hash_type": cloud["hash_name"]})
+                    else:
+                        comparisons.append({"path": path, "status": "uncomparable", "reason": "hash_type_mismatch"})
+                elif cloud["size"] is not None and local["size"] is not None:
+                    comparisons.append({"path": path, "status": "weak_match" if (cloud["size"], cloud["modified"]) == (local["size"], local["modified"]) else "weak_mismatch", "reason": "size_modified"})
+                else:
+                    comparisons.append({"path": path, "status": "uncomparable", "reason": "no_common_comparator"})
+                continue
+            if cloud["is_native"] or cloud["is_shortcut"]:
+                comparisons.append({"path": path, "status": "uncomparable",
+                                    "reason": "native_document" if cloud["is_native"] else "shortcut"})
                 continue
             if is_path_excluded(f"{parent}/{name}".strip("/"), exclude_dirs):
                 excluded += 1
                 continue
-            missing_local.append((parent, name, size))
+            missing_local.append((parent, name, cloud["size"]))
 
         missing_cloud = []
         local_ignored = 0
-        for (parent, name), size in local_files.items():
-            if (parent, name) in cloud_files:
+        for (parent, name), rows in local_by_path.items():
+            if (parent, name) in cloud_by_path:
                 continue
             if name.startswith(".sync") or parent == ".sync" or parent.startswith(".sync/"):
                 # The daemon's own working directory: local by design, never
@@ -2609,7 +2667,7 @@ class Analyzer:
                 # invisible for months.
                 local_ignored += 1
                 continue
-            missing_cloud.append((parent, name, size))
+            missing_cloud.append((parent, name, rows[0]["size"]))
 
         missing_local.sort()
         missing_cloud.sort()
@@ -2618,13 +2676,19 @@ class Analyzer:
             "compare_scans": compare_scans,
             "cloud_files_count": len(cloud_files),
             "local_files_count": len(local_files),
-            "matched_count": len(set(cloud_files) & set(local_files)),
+            "matched_count": len(set(cloud_by_path) & set(local_by_path)),
             "excluded_from_sync_count": excluded,
             "local_ignored_count": local_ignored,
             "missing_local_count": len(missing_local),
             "missing_cloud_count": len(missing_cloud),
             "missing_local_sample": [f"/{p}/{n}".replace("//", "/") for p, n, _ in missing_local[:20]],
             "missing_cloud_sample": [f"/{p}/{n}".replace("//", "/") for p, n, _ in missing_cloud[:20]],
+            "materialization_conflicts": conflicts,
+            "materialization_conflict_count": len(conflicts),
+            "comparisons": comparisons[:100],
+            "strong_comparison_count": sum(c["status"].startswith("strong_") for c in comparisons),
+            "weak_comparison_count": sum(c["status"].startswith("weak_") for c in comparisons),
+            "uncomparable_count": sum(c["status"] == "uncomparable" for c in comparisons),
         }
         if extra:
             result.update(extra)
@@ -2641,7 +2705,7 @@ class Analyzer:
         # compared" means exactly what this diff means by not comparing it.
         freshness = self.snapshot_freshness(composite, exclude_dirs=exclude_dirs)
         return self._diff_file_sets(
-            self._composite_cloud_files(composite),
+            self._composite_cloud_records(composite),
             local_id,
             exclude_dirs,
             compare_scans={
@@ -2663,7 +2727,7 @@ class Analyzer:
     def _compare_simple_scan(self, cloud_id, local_id, exclude_dirs):
         """Compares one cloud scan with one local scan, no composite involved."""
         return self._diff_file_sets(
-            self._scan_files(cloud_id),
+            self._scan_records(cloud_id),
             local_id,
             exclude_dirs,
             compare_scans={"cloud": cloud_id, "local": local_id},
@@ -2777,6 +2841,19 @@ class Analyzer:
             "long_paths": long_paths[:100]  # Return top 100
         }
 
+    def get_inventory_tree(self, scan_id):
+        """Read-only cloud inventory tree; deliberately needs no local root."""
+        conn = self.storage.get_connection()
+        rows = conn.execute(
+            "SELECT parent_path, name, type, object_id, mime_type, is_native, is_shortcut "
+            "FROM files WHERE scan_id=? ORDER BY parent_path, name, id", (scan_id,)
+        ).fetchall()
+        return {"scan_id": scan_id, "local_root_required": False,
+                "entries": [{"path": f"{parent}/{name}".strip("/"), "type": item_type,
+                             "object_id": object_id, "mime_type": mime_type,
+                             "is_native": bool(native), "is_shortcut": bool(shortcut)}
+                            for parent, name, item_type, object_id, mime_type, native, shortcut in rows]}
+
     def analyze_scan(self, scan_id):
         """Quick integrity check for scan data."""
         conn = self.storage.get_connection()
@@ -2842,32 +2919,40 @@ class Analyzer:
         }
 
     def get_duplicates(self, scan_id, by_hash=True):
-        """Find duplicate files by MD5 hash or by size+name."""
+        """Find duplicates only within the same declared content-hash type."""
         conn = self.storage.get_connection()
         
         if by_hash:
-            # Find by MD5 hash
             duplicates = conn.execute(
-                """SELECT md5, COUNT(*) as count, 
+                """SELECT COALESCE(hash_name, CASE WHEN md5 IS NOT NULL THEN 'md5' END) AS hash_type,
+                COALESCE(content_hash, md5) AS hash_value, COUNT(*) as count,
                 GROUP_CONCAT(parent_path || '/' || name, '|') as paths,
                 SUM(size) as total_size
                 FROM files 
-                WHERE scan_id = ? AND md5 IS NOT NULL AND md5 != ''
-                GROUP BY md5 
+                WHERE scan_id = ? AND COALESCE(content_hash, md5) IS NOT NULL
+                  AND COALESCE(content_hash, md5) != ''
+                GROUP BY hash_type, hash_value
                 HAVING count > 1
                 ORDER BY total_size DESC""",
                 (scan_id,)
             ).fetchall()
+            unhashable = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE scan_id=? AND type='file' "
+                "AND (COALESCE(content_hash, md5) IS NULL OR COALESCE(content_hash, md5)='')",
+                (scan_id,),
+            ).fetchone()[0]
             
             result = {
                 "scan_id": scan_id,
-                "method": "MD5 hash",
+                "method": "typed content hash",
+                "unhashable_count": unhashable,
                 "duplicates": []
             }
             
-            for md5, count, paths_str, total_size in duplicates:
+            for hash_type, hash_value, count, paths_str, total_size in duplicates:
                 result["duplicates"].append({
-                    "hash": md5,
+                    "hash_type": hash_type,
+                    "hash": hash_value,
                     "file_count": count,
                     "total_size": total_size,
                     "files": paths_str.split("|")
@@ -3270,6 +3355,9 @@ class YDM_CLI:
             "scan-list",
             "scan-progress",
             "long-paths",
+            "tree",
+            "revisions",
+            "trash",
             "analyze-scan",
             "duplicates",
             "clean-duplicates",
@@ -3942,6 +4030,23 @@ class YDM_CLI:
                     return True
                 result = analyzer.get_long_paths(self.args.scan_id, self.args.limit_chars)
                 self.render(result)
+                return True
+            if self.args.type == "tree":
+                if not self.args.scan_id:
+                    self.render("Error: --scan-id required for tree", success=False)
+                    return True
+                self.render(analyzer.get_inventory_tree(self.args.scan_id))
+                return True
+            if self.args.type in {"revisions", "trash"}:
+                capability = "revisions" if self.args.type == "revisions" else "trash_listing"
+                provider_name = (self.target_context.provider if self.target_context else "yandex")
+                adapter = provider_for(provider_name)
+                if not getattr(adapter.capabilities, capability):
+                    self.render({"error": "unsupported_capability", "operation": self.args.type,
+                                 "provider": provider_name, "capability": capability}, success=False)
+                    return True
+                self.render({"error": "report_not_implemented", "operation": self.args.type,
+                             "provider": provider_name}, success=False)
                 return True
             if self.args.type == "analyze-scan":
                 if not self.args.scan_id:
