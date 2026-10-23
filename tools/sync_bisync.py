@@ -31,6 +31,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
+import sqlite3
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -50,6 +51,11 @@ from tools.sync_common import (  # noqa: E402
     run_local_scan,
     save_bisync_state,
     var_path,
+)
+from tools.sync_policy import (  # noqa: E402
+    cloud_files_for_path,
+    configure_target_args,
+    validate_policy_binding,
 )
 from ydm import DEFAULT_CONFIG  # noqa: E402
 
@@ -161,11 +167,11 @@ def ensure_check_access_file(local_root: str) -> str:
     return path
 
 
-def write_last_log(result) -> None:
+def write_last_log(result, path: str | None = None) -> None:
     """Full captured output of the most recent rclone bisync invocation —
     overwritten each run (debugging aid), distinct from the durable
     append-only var/bisync.log summary."""
-    path = var_path("bisync_last.log")
+    path = path or var_path("bisync_last.log")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as handle:
         handle.write(
@@ -174,6 +180,81 @@ def write_last_log(result) -> None:
             f"returncode: {result.returncode}\n\n"
             f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n"
         )
+
+
+def configure_target(args: argparse.Namespace) -> None:
+    """Resolve target paths once, preserving no-target legacy defaults."""
+    configure_target_args(args)
+    if not getattr(args, "target_managed", False):
+        return
+    # Policy helpers intentionally only know the two filter paths.  Bisync's
+    # state, audit log, captured log and lock must be equally isolated.
+    from tools.targets import context_for, resolve_target
+    context = resolve_target(cli_target=args.target, targets_path=getattr(args, "targets_file", None))
+    if context is None:  # defensive: configure_target_args already rejects this
+        raise RuntimeError("target context disappeared during configuration")
+    args.bisync_state_path = context.bisync_state_path
+    args.bisync_log_path = context.bisync_log_path
+    args.bisync_last_log_path = os.path.join(context.state_dir, "bisync_last.log")
+    args.bisync_lock_path = os.path.join(context.locks_dir, "bisync.lock")
+
+
+def _runtime_paths(args: argparse.Namespace) -> tuple[str | None, str, str, str]:
+    if getattr(args, "target_managed", False):
+        return (args.bisync_state_path, args.bisync_log_path,
+                args.bisync_last_log_path, args.bisync_lock_path)
+    return (None, var_path("bisync.log"), var_path("bisync_last.log"), LOCK_PATH)
+
+
+def _inventory_complete(db_path: str, scan_id: int) -> bool:
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT status FROM scans WHERE id = ?", (scan_id,)).fetchone()
+            if not row or row[0] != "success":
+                return False
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM scan_progress WHERE scan_id = ? AND status != 'completed'", (scan_id,)
+            ).fetchone()[0]
+            return pending == 0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
+def bidirectional_eligibility_error(args: argparse.Namespace, policy: dict | None) -> str | None:
+    """Fail closed before an executable target-managed bisync invocation."""
+    if not getattr(args, "target_managed", False):
+        return None
+    if not policy:
+        return "Bidirectional eligibility requires a target-bound policy inventory"
+    binding_error = validate_policy_binding(args, policy)
+    if binding_error:
+        return binding_error
+    marker = os.path.join(os.path.expanduser(args.local_root), CHECK_ACCESS_FILENAME)
+    if not os.path.isfile(marker):
+        return f"Bidirectional eligibility requires local access marker: {marker}"
+    for entry, meta in policy.get("paths", {}).items():
+        if meta.get("mode") != "bidirectional":
+            continue
+        try:
+            scan_id, exists, files = cloud_files_for_path(args.db_path, f"/{entry}" if entry else "/")
+        except Exception:
+            return f"Bidirectional inventory is missing or unreadable for /{entry}"
+        if not exists or not _inventory_complete(args.db_path, scan_id):
+            return f"Bidirectional inventory is incomplete or missing for /{entry}"
+        materialized = {}
+        for item in files:
+            if item.is_native:
+                return f"Bidirectional eligibility rejects native document: {item.rel_path}"
+            if item.is_shortcut:
+                return f"Bidirectional eligibility rejects shortcut: {item.rel_path}"
+            previous = materialized.get(item.sanitized_rel_path)
+            if previous and (previous.rel_path != item.rel_path or previous.object_id != item.object_id):
+                return f"Bidirectional eligibility rejects materialization collision under /{entry}"
+            materialized[item.sanitized_rel_path] = item
+    return None
 
 
 def cmd_resync(args: argparse.Namespace) -> dict:

@@ -56,6 +56,16 @@ def _path(value: Any, path: str) -> str:
     return os.path.normpath(os.path.expanduser(raw))
 
 
+def _canonical_path(path: str) -> str:
+    """Resolve aliases before comparing configured filesystem roots.
+
+    ``realpath`` also resolves the existing portion of a path, which is what
+    we need for a target directory that has not been created yet but whose
+    parent is a symlink.
+    """
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
 @dataclass(frozen=True)
 class TargetConfig:
     """Validated target definition from a ``ydm_targets:v1`` document."""
@@ -211,6 +221,16 @@ def load_targets_file(path: str) -> TargetsFile:
                 raise _error(
                     f"$.targets.{right.name}.state_dir",
                     f"must not equal or be nested with $.targets.{left.name}.state_dir",
+                )
+            left_root, right_root = _canonical_path(left.local_root), _canonical_path(right.local_root)
+            try:
+                shared_root = os.path.commonpath((left_root, right_root))
+            except ValueError:
+                continue
+            if shared_root in {left_root, right_root}:
+                raise _error(
+                    f"$.targets.{right.name}.local_root",
+                    f"must not equal or be nested with $.targets.{left.name}.local_root",
                 )
     default_target = root.get("default_target")
     if default_target is not None:

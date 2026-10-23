@@ -741,8 +741,8 @@ def bisync_state_path() -> str:
     return var_path("bisync_state.json")
 
 
-def load_bisync_state() -> Dict[str, object]:
-    path = bisync_state_path()
+def load_bisync_state(path: Optional[str] = None) -> Dict[str, object]:
+    path = path or bisync_state_path()
     if not os.path.exists(path):
         return {
             "last_resync_filter_hash": None,
@@ -762,8 +762,8 @@ def load_bisync_state() -> Dict[str, object]:
         }
 
 
-def save_bisync_state(state: Dict[str, object]) -> None:
-    path = bisync_state_path()
+def save_bisync_state(state: Dict[str, object], path: Optional[str] = None) -> None:
+    path = path or bisync_state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as handle:
         json.dump(state, handle, ensure_ascii=False, indent=2)
