@@ -44,7 +44,8 @@ from tools.sync_backends import (  # noqa: E402
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
 
 
-SCHEMA = "ydm_sync_policy:v1"
+SCHEMA = "ydm_sync_policy:v2"
+LEGACY_SCHEMA = "ydm_sync_policy:v1"
 RISK_SCHEMA = "ydm_sync_risk:v1"
 CHECK_ACCESS_FILENAME = "RCLONE_TEST"
 ANDROID_FORBIDDEN_CHARS = set('<>:"|?*\\')
@@ -114,8 +115,14 @@ def load_policy(path: str) -> Optional[dict]:
         return None
     with open(resolved, "r") as handle:
         payload = json.load(handle)
-    if payload.get("schema") != SCHEMA:
+    if payload.get("schema") not in {SCHEMA, LEGACY_SCHEMA}:
         raise ValueError(f"Unsupported policy schema: {payload.get('schema')}")
+    if payload.get("schema") == LEGACY_SCHEMA:
+        # Keep old installations readable; binding is enforced only when a
+        # target-aware caller supplies a target context.
+        payload["schema"] = SCHEMA
+        payload.setdefault("target", None)
+        payload.setdefault("provider", None)
     return payload
 
 
@@ -131,15 +138,34 @@ def write_policy(path: str, policy: dict) -> None:
         handle.write("\n")
 
 
-def empty_policy(local_root: str, remote: str) -> dict:
+def empty_policy(local_root: str, remote: str, *, target: Optional[str] = None,
+                 provider: Optional[str] = None) -> dict:
     return {
         "schema": SCHEMA,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
         "local_root": local_root,
         "remote": remote,
+        "target": target,
+        "provider": provider,
         "paths": {},
     }
+
+
+def validate_policy_binding(args: argparse.Namespace, policy: dict) -> Optional[str]:
+    """Prevent a policy for one target/root/remote being applied to another."""
+    # A migrated legacy v1 policy has no target identity. Preserve historical
+    # behaviour; target-managed v2 policies are immutable bindings.
+    if policy.get("target") is None and policy.get("provider") is None:
+        return None
+    for key, actual in (("target", getattr(args, "target", None)),
+                        ("provider", getattr(args, "provider", None)),
+                        ("remote", getattr(args, "remote", None)),
+                        ("local_root", getattr(args, "local_root", None))):
+        expected = policy.get(key)
+        if actual is not None and expected is not None and expected != actual:
+            return f"Policy {key} mismatch: policy={expected!r}, active={actual!r}"
+    return None
 
 
 def policy_paths_by_mode(policy: dict, mode: str) -> List[str]:
@@ -516,7 +542,7 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
     bisync_paths = effective_bisync_paths(policy)
     download_path = args.download_filter_path or download_filter_path(args.local_root)
     bisync_path = args.bisync_filter_path or bisync_filter_path(args.local_root)
-    validation_error = validate_native_policy(args, policy)
+    validation_error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
     result = {
         "schema": SCHEMA,
         "action": "render-filters",
@@ -534,6 +560,21 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         write_filter_file(download_path, download_paths)
         write_filter_file(bisync_path, bisync_paths, check_access=True)
     return result
+
+
+def download_plan(args: argparse.Namespace, policy: dict) -> dict:
+    """Exact, non-mutating plan for selective download-only materialization."""
+    error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
+    paths = policy_paths_by_mode(policy, "download_only")
+    target = f"{args.remote}:"
+    return {
+        "schema": "ydm_download_plan:v1", "action": "download-plan", "dry_run": True,
+        "target": policy.get("target"), "provider": policy.get("provider"),
+        "remote": args.remote, "local_root": args.local_root,
+        "source": target, "destination": args.local_root, "paths": paths,
+        "filter_path": args.download_filter_path or download_filter_path(args.local_root),
+        "error": error,
+    }
 
 
 def validate_native_policy(args: argparse.Namespace, policy: dict) -> Optional[str]:
@@ -797,6 +838,8 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--db-path", default=str(ROOT_DIR / "monitor.db"))
         sub.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
+        sub.add_argument("--target", default=None)
+        sub.add_argument("--provider", default=None)
         sub.add_argument("--policy-path", default=default_policy_path())
         sub.add_argument("--legacy-filter-path", default=None)
         sub.add_argument("--download-filter-path", default=None)
@@ -829,6 +872,9 @@ def parse_args() -> argparse.Namespace:
     render_filters_parser = subparsers.add_parser("render-filters")
     common_flags(render_filters_parser)
     render_filters_parser.add_argument("--apply", action="store_true")
+
+    plan = subparsers.add_parser("download-plan")
+    common_flags(plan)
 
     add = subparsers.add_parser("add")
     add.add_argument("--path", required=True)
@@ -899,6 +945,12 @@ def main() -> None:
                 if args.apply:
                     backend_payload = _apply_backend_policy(args, policy)
                     payload["backend_apply"] = backend_payload
+        elif args.command == "download-plan":
+            policy = load_policy(args.policy_path)
+            payload = (download_plan(args, policy) if policy else {
+                "schema": "ydm_download_plan:v1", "action": "download-plan", "dry_run": True,
+                "error": f"Policy not found: {args.policy_path}",
+            })
         elif args.command == "add":
             payload = add_policy_path(args)
             if args.apply and payload.get("error") is None:
