@@ -150,9 +150,9 @@ paths и не может незаметно выбрать другой target.
 | 9.2 | Google server-side move/rename ✅ | provider adapter | ID continuity checked in disposable fixture |
 | 9.3 | Evaluate Google delta API ✅ | [`GOOGLE_DRIVE_EVALUATION.md`](./GOOGLE_DRIVE_EVALUATION.md) | measurement before implementation decision |
 | 9.4 | Evaluate Shared Drives ✅ | [`GOOGLE_DRIVE_EVALUATION.md`](./GOOGLE_DRIVE_EVALUATION.md) | root/permissions/shortcuts documented |
-| 9.5 | Secret/privacy scan of publishable commits | release checklist | diff + messages + filenames + fixtures inspected |
-| 9.6 | Clean-checkout promotion rehearsal | private workflow | selected commits apply and tests pass without private overlay |
-| 9.7 | Public docs migration | README/architecture/changelog | only after feature gates and sanitized evidence |
+| 9.5 | Secret/privacy scan of publishable commits ✅ | release checklist | diff + messages + filenames + fixtures inspected |
+| 9.6 | Clean-checkout promotion rehearsal ✅ | private workflow | selected commits apply and tests pass without private overlay |
+| 9.7 | Public docs migration ✅ | README/architecture/changelog | only after feature gates and sanitized evidence |
 
 **Exit:** publishable core отделён от private deployment evidence; provider
 extensions не размывают safety contracts.
