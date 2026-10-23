@@ -58,6 +58,13 @@ def _policy_ns(cfg: MenuConfig, **extra) -> argparse.Namespace:
         "backend": backend_arg,
         "exclude_config": cfg.exclude_config,
         "apply": False,
+        "target_managed": cfg.target_managed,
+        "target": cfg.target,
+        "provider": cfg.provider,
+        "inventory_kind": cfg.inventory_kind,
+        "sync_kind": cfg.sync_kind,
+        "target_context": cfg.target_context,
+        "targets_file": cfg.targets_file,
     }
     base.update(extra)
     return argparse.Namespace(**base)
@@ -93,6 +100,13 @@ def _bisync_ns(cfg: MenuConfig, command: str = "run", **extra) -> argparse.Names
         "stream": False,
         "backend": backend_arg,
         "exclude_config": cfg.exclude_config,
+        "target_managed": cfg.target_managed,
+        "target": cfg.target,
+        "provider": cfg.provider,
+        "inventory_kind": cfg.inventory_kind,
+        "sync_kind": cfg.sync_kind,
+        "target_context": cfg.target_context,
+        "targets_file": cfg.targets_file,
     })
     base.update(extra)
     return argparse.Namespace(**base)

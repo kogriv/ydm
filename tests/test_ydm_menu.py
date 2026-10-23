@@ -131,6 +131,42 @@ class MenuPromptTests(unittest.TestCase):
 
 
 class MenuConfigTests(MenuTestCase):
+    def test_target_context_is_authoritative_and_visible(self):
+        from tools.ydm_menu_actions import _bisync_ns, _policy_ns
+        from tools.ydm_menu_screens import render_header
+
+        target_root = os.path.join(self.tmpdir, "google")
+        state = os.path.join(self.tmpdir, "google-state")
+        os.makedirs(target_root)
+        targets_file = os.path.join(self.tmpdir, "targets.json")
+        with open(targets_file, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "ydm_targets:v1", "default_target": "drive",
+                "targets": {"drive": {
+                    "provider": "google_drive",
+                    "inventory": {"kind": "rclone", "remote": "google-test"},
+                    "sync": {"kind": "rclone", "remote": "google-test"},
+                    "local_root": target_root, "state_dir": state,
+                    "config_profile": "test", "native_docs": "metadata",
+                }},
+            }, handle)
+        cfg = MenuConfig.from_env_and_args(
+            target="drive", targets_file=targets_file,
+            # These must not be able to retarget one action after resolution.
+            db_path="/tmp/wrong-db", local_root="/tmp/wrong-root",
+            remote="wrong-remote", backend="daemon", plain=True,
+        )
+        self.assertEqual(cfg.db_path, os.path.join(state, "monitor.db"))
+        self.assertEqual(cfg.local_root, target_root)
+        self.assertEqual(cfg.remote, "google-test")
+        self.assertEqual(cfg.backend_kind, "rclone")
+        self.assertIn("Target: drive   provider: google_drive", "\n".join(
+            render_header(cfg, load_status(cfg))))
+        for ns in (_policy_ns(cfg), _bisync_ns(cfg)):
+            self.assertTrue(ns.target_managed)
+            self.assertEqual(ns.target, "drive")
+            self.assertIs(ns.target_context, cfg.target_context)
+
     def test_every_path_the_fixture_hands_out_is_its_own(self):
         """The guard that keeps this file from drifting back.
 

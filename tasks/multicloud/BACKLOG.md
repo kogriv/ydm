@@ -131,9 +131,9 @@ gate.
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 8.1 | Target selector/header | `ydm_menu.py` | active target/provider всегда видимы |
-| 8.2 | Immutable target through actions | menu modules | action не выполняет повторный auto-detect |
-| 8.3 | Target-aware sync tree | `sync_tree.py` | policy/local/cloud читаются из одного context |
+| 8.1 | Target selector/header ✅ | `ydm_menu.py` | active target/provider всегда видимы |
+| 8.2 | Immutable target through actions ✅ | menu modules | action не выполняет повторный auto-detect |
+| 8.3 | Target-aware sync tree ✅ | `sync_tree.py` | policy/local/cloud читаются из одного context |
 | 8.4 | Target-aware aliases | `tools/aliases.sh` | explicit target; no host paths in repo |
 | 8.5 | Scheduler instance per target | termux/systemd helpers | separate job, lock, log and notification ID |
 | 8.6 | Status separates reachability/inventory/sync | status/menu | четыре состояния не схлопнуты в `OK/error` |

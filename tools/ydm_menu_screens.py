@@ -37,6 +37,8 @@ def render_header(cfg: MenuConfig, status: MenuStatus) -> List[str]:
     lines = ["YDM Sync"]
     if not cfg.plain:
         lines.append(_line("─", cfg.width))
+    if cfg.target_managed:
+        lines.append(f"Target: {cfg.target}   provider: {cfg.provider}")
     lines.append(f"Backend: {cfg.backend_name}")
     if cfg.backend_error:
         lines.append(f"WARN: {_truncate(cfg.backend_error, cfg.width - 6)}")

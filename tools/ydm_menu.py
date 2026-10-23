@@ -709,6 +709,8 @@ def parse_args() -> argparse.Namespace:
     # want to redirect was the one they could not.
     parser.add_argument("--exclude-config", default=None)
     parser.add_argument("--remote", default=None)
+    parser.add_argument("--target", default=None)
+    parser.add_argument("--targets-file", default=None)
     parser.add_argument(
         "--backend",
         choices=["daemon", "rclone", "auto"],
@@ -739,6 +741,8 @@ def main() -> int:
         exclude_config=args.exclude_config,
         remote=args.remote,
         backend=args.backend,
+        target=args.target,
+        targets_file=args.targets_file,
         plain=args.plain,
     )
     if args.command == "orphans":
