@@ -356,7 +356,15 @@ def delete_local_entry_contents(local_root: str, entry: str) -> Dict[str, object
     """Empties <local_root>/<entry> (keeps the now-empty directory itself),
     matching the verify-then-delete-contents pattern already used elsewhere
     in this project's local-copy cleanups."""
-    target = os.path.join(os.path.expanduser(local_root), entry)
+    root = os.path.realpath(os.path.expanduser(local_root))
+    target = os.path.abspath(os.path.join(root, entry))
+    try:
+        if os.path.commonpath((root, target)) != root:
+            return {"deleted": False, "reason": "path escapes local root", "path": target, "files_removed": 0}
+    except ValueError:
+        return {"deleted": False, "reason": "path escapes local root", "path": target, "files_removed": 0}
+    if os.path.islink(target):
+        return {"deleted": False, "reason": "refusing symlink target", "path": target, "files_removed": 0}
     if not os.path.exists(target):
         return {"deleted": False, "reason": "not found", "path": target, "files_removed": 0}
 

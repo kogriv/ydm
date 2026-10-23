@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import sys
+import subprocess
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -42,6 +43,7 @@ from tools.sync_backends import (  # noqa: E402
     detect_backend,
 )
 from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
+from tools.targets import resolve_target, TargetConfigError  # noqa: E402
 
 
 SCHEMA = "ydm_sync_policy:v2"
@@ -139,15 +141,18 @@ def write_policy(path: str, policy: dict) -> None:
 
 
 def empty_policy(local_root: str, remote: str, *, target: Optional[str] = None,
-                 provider: Optional[str] = None) -> dict:
+                 provider: Optional[str] = None, inventory_kind: Optional[str] = None,
+                 sync_kind: Optional[str] = None) -> dict:
     return {
         "schema": SCHEMA,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
-        "local_root": local_root,
+        "local_root": os.path.realpath(os.path.expanduser(local_root)),
         "remote": remote,
         "target": target,
         "provider": provider,
+        "inventory_kind": inventory_kind,
+        "sync_kind": sync_kind,
         "paths": {},
     }
 
@@ -156,16 +161,42 @@ def validate_policy_binding(args: argparse.Namespace, policy: dict) -> Optional[
     """Prevent a policy for one target/root/remote being applied to another."""
     # A migrated legacy v1 policy has no target identity. Preserve historical
     # behaviour; target-managed v2 policies are immutable bindings.
-    if policy.get("target") is None and policy.get("provider") is None:
+    managed = bool(getattr(args, "target_managed", False))
+    if policy.get("target") is None and policy.get("provider") is None and not managed:
         return None
+    required = ("target", "provider", "remote", "local_root", "inventory_kind", "sync_kind")
+    if managed and any(policy.get(key) in (None, "") for key in required):
+        return "Policy binding is incomplete for target-managed invocation"
     for key, actual in (("target", getattr(args, "target", None)),
                         ("provider", getattr(args, "provider", None)),
                         ("remote", getattr(args, "remote", None)),
-                        ("local_root", getattr(args, "local_root", None))):
+                        ("local_root", os.path.realpath(os.path.expanduser(getattr(args, "local_root", ""))) if getattr(args, "local_root", None) else None),
+                        ("inventory_kind", getattr(args, "inventory_kind", None)),
+                        ("sync_kind", getattr(args, "sync_kind", None))):
         expected = policy.get(key)
         if actual is not None and expected is not None and expected != actual:
             return f"Policy {key} mismatch: policy={expected!r}, active={actual!r}"
     return None
+
+
+def configure_target_args(args: argparse.Namespace) -> None:
+    """Resolve one immutable target and derive every writable state path."""
+    if not getattr(args, "target", None) and not getattr(args, "targets_file", None):
+        args.target_managed = False
+        return
+    context = resolve_target(cli_target=getattr(args, "target", None),
+                             targets_path=getattr(args, "targets_file", None))
+    if context is None:
+        raise TargetConfigError("target-managed invocation requires a targets file")
+    cfg = context.config
+    args.target_managed = True
+    args.target, args.provider = cfg.name, cfg.provider
+    args.inventory_kind, args.sync_kind = cfg.inventory_kind, cfg.sync_kind
+    args.remote, args.local_root, args.db_path = cfg.remote, cfg.local_root, context.db_path
+    args.policy_path = context.policy_path
+    args.download_filter_path, args.bisync_filter_path = context.download_filter_path, context.bisync_filter_path
+    # sync.kind is authoritative: Google never falls through daemon autodetect.
+    args.backend = "rclone" if cfg.sync_kind == "rclone" else "daemon"
 
 
 def policy_paths_by_mode(policy: dict, mode: str) -> List[str]:
@@ -567,14 +598,65 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
     error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
     paths = policy_paths_by_mode(policy, "download_only")
     target = f"{args.remote}:"
+    eligibility, excluded, seen = [], [], {}
+    for entry in paths:
+        if not os.path.exists(args.db_path):
+            # A plan remains offline and useful before the first scan; apply
+            # will still be blocked by normal inventory validation in callers.
+            eligibility.append({"path": entry, "object_id": None, "scan_id": None})
+            continue
+        try:
+            scan_id, exists, files = cloud_files_for_path(args.db_path, f"/{entry}" if entry else "/")
+        except Exception:
+            excluded.append({"path": entry, "reason": "incomplete_or_missing_inventory"})
+            continue
+        if not exists:
+            excluded.append({"path": entry, "reason": "incomplete_or_missing_inventory"})
+            continue
+        for item in files:
+            reason = None
+            if item.is_native:
+                reason = "native_document"
+            elif item.is_shortcut:
+                reason = "shortcut"
+            elif item.sanitized_rel_path in seen and seen[item.sanitized_rel_path] != item.object_id:
+                reason = "materialization_collision"
+            if reason:
+                excluded.append({"path": item.rel_path, "reason": reason, "scan_id": scan_id})
+            else:
+                seen[item.sanitized_rel_path] = item.object_id
+                eligibility.append({"path": item.rel_path, "object_id": item.object_id, "scan_id": scan_id})
     return {
         "schema": "ydm_download_plan:v1", "action": "download-plan", "dry_run": True,
         "target": policy.get("target"), "provider": policy.get("provider"),
         "remote": args.remote, "local_root": args.local_root,
         "source": target, "destination": args.local_root, "paths": paths,
         "filter_path": args.download_filter_path or download_filter_path(args.local_root),
+        "eligible": eligibility, "excluded": excluded,
         "error": error,
     }
+
+
+def download_apply(args: argparse.Namespace, policy: dict) -> dict:
+    """Download-only materialization: rclone copy is the sole write primitive."""
+    plan = download_plan(args, policy)
+    plan["action"] = "download-apply"
+    plan["dry_run"] = not args.apply
+    if plan["error"] or not args.apply:
+        return plan
+    # Filters were rendered by the same target-bound policy.  No delete or
+    # reverse-transfer flags are permitted in this command.
+    render_result = render_filters(args, policy)
+    if render_result["error"]:
+        plan["error"] = render_result["error"]
+        return plan
+    cmd = ["rclone", "copy", f"{args.remote}:", args.local_root,
+           "--filter-from", render_result["download_filter_path"]]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    plan.update({"command": cmd, "returncode": proc.returncode,
+                 "stdout": proc.stdout, "stderr": proc.stderr,
+                 "error": None if proc.returncode == 0 else f"rclone copy failed (rc={proc.returncode})"})
+    return plan
 
 
 def validate_native_policy(args: argparse.Namespace, policy: dict) -> Optional[str]:
@@ -657,7 +739,10 @@ def status_payload(args: argparse.Namespace) -> dict:
 
 
 def add_policy_path(args: argparse.Namespace) -> dict:
-    policy = load_policy(args.policy_path) or empty_policy(args.local_root, args.remote)
+    policy = load_policy(args.policy_path) or empty_policy(
+        args.local_root, args.remote, target=getattr(args, "target", None),
+        provider=getattr(args, "provider", None), inventory_kind=getattr(args, "inventory_kind", None),
+        sync_kind=getattr(args, "sync_kind", None))
     entry = normalize_entry(args.path)
     risk = inspect_path(args.db_path, args.local_root, f"/{entry}")
     requested_mode = args.mode
@@ -839,6 +924,7 @@ def parse_args() -> argparse.Namespace:
         sub.add_argument("--local-root", default=DEFAULT_CONFIG["local_root"])
         sub.add_argument("--remote", default=DEFAULT_CONFIG["rclone_remote"])
         sub.add_argument("--target", default=None)
+        sub.add_argument("--targets-file", default=None)
         sub.add_argument("--provider", default=None)
         sub.add_argument("--policy-path", default=default_policy_path())
         sub.add_argument("--legacy-filter-path", default=None)
@@ -875,6 +961,9 @@ def parse_args() -> argparse.Namespace:
 
     plan = subparsers.add_parser("download-plan")
     common_flags(plan)
+    apply_download = subparsers.add_parser("download-apply")
+    common_flags(apply_download)
+    apply_download.add_argument("--apply", action="store_true")
 
     add = subparsers.add_parser("add")
     add.add_argument("--path", required=True)
@@ -918,6 +1007,12 @@ def _apply_backend_policy(args: argparse.Namespace, policy: dict) -> dict:
 
 def main() -> None:
     args = parse_args()
+    try:
+        configure_target_args(args)
+    except (TargetConfigError, OSError) as exc:
+        render({"schema": SCHEMA, "action": args.command, "dry_run": True,
+                "policy_path": getattr(args, "policy_path", None), "error": str(exc)}, args.format, args.text_header)
+        return
     args.local_root = require_local_root(args.local_root, tool="sync_policy.py")
     try:
         if args.command == "status":
@@ -951,6 +1046,11 @@ def main() -> None:
                 "schema": "ydm_download_plan:v1", "action": "download-plan", "dry_run": True,
                 "error": f"Policy not found: {args.policy_path}",
             })
+        elif args.command == "download-apply":
+            policy = load_policy(args.policy_path)
+            payload = (download_apply(args, policy) if policy else {
+                "schema": "ydm_download_plan:v1", "action": "download-apply", "dry_run": not args.apply,
+                "error": f"Policy not found: {args.policy_path}"})
         elif args.command == "add":
             payload = add_policy_path(args)
             if args.apply and payload.get("error") is None:

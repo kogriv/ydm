@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -231,6 +232,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # This legacy editor owns only legacy filter files.  Refuse a target
+    # selection before opening a DB, writing a filter, or spawning rclone.
+    if os.environ.get("YDM_TARGET") or os.environ.get("YDM_TARGETS_FILE"):
+        result = ActionResult(action=args.command, path=getattr(args, "path", ""), dry_run=True,
+                              before=[], after=[], error="target-managed invocation is unsupported; use sync_policy.py")
+        render(result, args.format, args.text_header)
+        return
     args.local_root = require_local_root(args.local_root, tool="sync_filters.py")
     filter_path = args.filter_path or legacy_filter_path(args.local_root)
     filters_result = load_sync_filters(filter_path)
