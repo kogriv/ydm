@@ -70,6 +70,10 @@ class CloudFile:
     parent_path: str
     name: str
     size: int
+    object_id: Optional[str] = None
+    mime_type: Optional[str] = None
+    is_native: bool = False
+    is_shortcut: bool = False
 
     @property
     def rel_path(self) -> str:
@@ -314,10 +318,11 @@ def cloud_files_for_path(db_path: str, path: str) -> Tuple[int, bool, List[Cloud
     try:
         rows = conn.execute(
             """
-            SELECT parent_path, name, COALESCE(size, 0)
+            SELECT parent_path, name, COALESCE(size, 0), object_id, mime_type,
+                   COALESCE(is_native, 0), COALESCE(is_shortcut, 0)
             FROM files
             WHERE scan_id = ?
-              AND type = 'file'
+              AND type IN ('file', 'shortcut')
               AND (? = '/' OR parent_path = ? OR parent_path LIKE ?)
             ORDER BY parent_path, name
             """,
@@ -325,7 +330,9 @@ def cloud_files_for_path(db_path: str, path: str) -> Tuple[int, bool, List[Cloud
         ).fetchall()
     finally:
         conn.close()
-    return scan_id, exists, [CloudFile(parent_path=row[0], name=row[1], size=int(row[2])) for row in rows]
+    return scan_id, exists, [CloudFile(parent_path=row[0], name=row[1], size=int(row[2]),
+                                       object_id=row[3], mime_type=row[4],
+                                       is_native=bool(row[5]), is_shortcut=bool(row[6])) for row in rows]
 
 
 def inspect_path(db_path: str, local_root: str, path: str, *, max_examples: int = 5) -> dict:
@@ -333,6 +340,8 @@ def inspect_path(db_path: str, local_root: str, path: str, *, max_examples: int 
     scan_id, path_exists, files = cloud_files_for_path(db_path, f"/{entry}" if entry else "/")
 
     incompatible = [item for item in files if item.chars]
+    native = [item for item in files if item.is_native]
+    shortcuts = [item for item in files if item.is_shortcut]
     sanitized_seen: Dict[str, str] = {}
     collisions: List[dict] = []
     unicode_seen: Dict[str, str] = {}
@@ -373,6 +382,20 @@ def inspect_path(db_path: str, local_root: str, path: str, *, max_examples: int 
             "severity": "blocker",
             "count": len(incompatible),
             "examples": [item.rel_path for item in incompatible[:max_examples]],
+        })
+    if native:
+        risks.append({
+            "code": "native_documents",
+            "severity": "blocker",
+            "count": len(native),
+            "examples": [item.rel_path for item in native[:max_examples]],
+        })
+    if shortcuts:
+        risks.append({
+            "code": "shortcuts",
+            "severity": "blocker",
+            "count": len(shortcuts),
+            "examples": [item.rel_path for item in shortcuts[:max_examples]],
         })
     if collisions:
         risks.append({
@@ -491,6 +514,7 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
     bisync_paths = effective_bisync_paths(policy)
     download_path = args.download_filter_path or download_filter_path(args.local_root)
     bisync_path = args.bisync_filter_path or bisync_filter_path(args.local_root)
+    validation_error = validate_native_policy(args, policy)
     result = {
         "schema": SCHEMA,
         "action": "render-filters",
@@ -502,12 +526,32 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         "bisync_paths": bisync_paths,
         "download_filter": render_filter_text(download_paths),
         "bisync_filter": render_filter_text(bisync_paths, check_access=True),
-        "error": None,
+        "error": validation_error,
     }
-    if args.apply:
+    if args.apply and validation_error is None:
         write_filter_file(download_path, download_paths)
         write_filter_file(bisync_path, bisync_paths, check_access=True)
     return result
+
+
+def validate_native_policy(args: argparse.Namespace, policy: dict) -> Optional[str]:
+    """Reject native/shortcut materialization before policy or filters write.
+
+    Phase 5 only plans exports. It never transfers them, and an export is
+    always download-only because it is not equivalent to its native source.
+    """
+    for entry, meta in policy.get("paths", {}).items():
+        export_plan = meta.get("export_plan")
+        if export_plan and meta.get("mode") != "download_only":
+            return f"Export plan for /{entry} requires download_only mode"
+        if export_plan and export_plan.get("mode") != "download_only":
+            return f"Export plan for /{entry} must declare download_only mode"
+        if meta.get("mode") == "bidirectional":
+            _scan_id, _exists, files = cloud_files_for_path(args.db_path, f"/{entry}" if entry else "/")
+            unsafe = [item.rel_path for item in files if item.is_native or item.is_shortcut]
+            if unsafe:
+                return f"Bidirectional mode rejects native documents or shortcuts under /{entry}"
+    return None
 
 
 def status_payload(args: argparse.Namespace) -> dict:
@@ -558,6 +602,9 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         )
     elif requested_mode not in VALID_MODES:
         error = f"Invalid mode: {requested_mode}"
+    export_plan = getattr(args, "export_plan", None)
+    if export_plan and requested_mode != "download_only":
+        error = "Export plans require download_only mode"
 
     result = {
         "schema": SCHEMA,
@@ -571,6 +618,8 @@ def add_policy_path(args: argparse.Namespace) -> dict:
     }
     if args.apply and error is None:
         meta = {"mode": requested_mode}
+        if export_plan:
+            meta["export_plan"] = export_plan
         if requested_mode == "download_only" and risk["risks"]:
             meta["reason"] = risk["risks"][0]["code"]
             meta["risk_scan_id"] = risk["scan_id"]

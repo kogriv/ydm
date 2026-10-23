@@ -1515,6 +1515,8 @@ class CloudScanner:
                     if is_termination_requested():
                         flush_and_terminate(current_path, offset, total)
                     total_processed += 1
+                    if item.get("is_native") and self.config.get("native_docs", "metadata") == "skip":
+                        continue
                     name = item['name']
                     # Normalize path
                     parent = current_path
@@ -3415,6 +3417,7 @@ class YDM_CLI:
         if self.target_context:
             target = self.target_context.config
             self.args.config["local_root"] = target.local_root
+            self.args.config["native_docs"] = target.native_docs
             if target.inventory_remote:
                 self.args.config["rclone_remote"] = target.inventory_remote
             target_backend = "rclone" if target.inventory_kind == "rclone" else "api"

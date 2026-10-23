@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any, Mapping
 
 
@@ -45,6 +46,9 @@ class ProviderAdapter:
             "metadata": metadata,
         }
 
+    def export_plan(self, *, object_id: str, mime_type: str, artifact_root: str) -> dict[str, Any]:
+        raise ValueError(f"{self.name} does not support native-document export planning")
+
 
 class YandexProvider(ProviderAdapter):
     name = "yandex"
@@ -82,6 +86,31 @@ class GoogleDriveProvider(ProviderAdapter):
         if is_native:
             item["size"] = None
         return item
+
+    _EXPORT_FORMATS = {
+        "application/vnd.google-apps.document": ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "application/vnd.google-apps.spreadsheet": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "application/vnd.google-apps.presentation": ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    }
+
+    def export_plan(self, *, object_id: str, mime_type: str, artifact_root: str) -> dict[str, Any]:
+        if not object_id:
+            raise ValueError("native export requires a source object ID")
+        try:
+            extension, export_mime = self._EXPORT_FORMATS[mime_type]
+        except KeyError as exc:
+            raise ValueError(f"unsupported Google native MIME for export: {mime_type}") from exc
+        safe_id = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in object_id)
+        return {
+            "schema": "ydm_native_export_plan:v1",
+            "provider": self.name,
+            "source_object_id": object_id,
+            "source_mime_type": mime_type,
+            "format": extension,
+            "export_mime_type": export_mime,
+            "artifact_path": os.path.join(artifact_root, f"{safe_id}.{extension}"),
+            "mode": "download_only",
+        }
 
 
 _PROVIDERS = {"yandex": YandexProvider(), "google_drive": GoogleDriveProvider()}
