@@ -67,6 +67,8 @@ ydm-scan-cloud
 
 ## Связанные задачи
 
+- [`tasks/multicloud/`](../multicloud/) — отделяет provider, inventory transport
+  и sync engine и добавляет изолированные Yandex/Google targets.
 - [`tasks/ydm_menu/`](../ydm_menu/) — интерактивное меню
 - [`tasks/sync_tree/`](../sync_tree/) — policy-aware sync tree
 - [`tasks/rclone_backend/`](../rclone_backend/) — rclone backend details

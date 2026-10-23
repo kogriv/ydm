@@ -677,6 +677,9 @@ python3 ydm.py sync remove --path /Projects/2024 --apply
 
 ## 7. Связанные задачи
 
+- `tasks/multicloud/` — следующий архитектурный слой: отдельные targets,
+  provider object identity и безопасная поддержка Google Drive поверх того же
+  rclone transport без общей DB/policy/state.
 - `tasks/sync_manager/` — оригинальный дизайн управления синхронизацией
   (демон-based); этот таск переиспользует его модель (`tree`/`inspect`/
   `add`/`remove`, dry-run by default, JSON-схемы) под другой backend.
