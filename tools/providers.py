@@ -64,7 +64,7 @@ class GoogleDriveProvider(ProviderAdapter):
     name = "google_drive"
     capabilities = Capabilities(
         stable_object_id=True, duplicate_sibling_names=True,
-        content_hashes=frozenset(), native_documents=True, shortcuts=True,
+        content_hashes=frozenset({"md5"}), native_documents=True, shortcuts=True,
         revisions=False, trash_listing=False, server_side_move=False,
         bidirectional_sync=False,
     )

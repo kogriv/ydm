@@ -64,7 +64,7 @@ write-path, пока предыдущая не умеет корректно п�
 **Exit:** shallow Google scan завершается в отдельной DB и содержит IDs/MIME;
 искусственный listing failure не выглядит успешным пустым деревом.
 
-## Phase 4 — Read-only reports
+## Phase 4 — Read-only reports (implementation complete; live 4.7 pending)
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
@@ -79,7 +79,7 @@ write-path, пока предыдущая не умеет корректно п�
 **Exit:** Google Drive можно безопасно инвентаризировать и анализировать без
 создания локальной копии.
 
-## Phase 5 — Native documents and shortcuts
+## Phase 5 — Native documents and shortcuts ✅
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|

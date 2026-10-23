@@ -2551,7 +2551,7 @@ class Analyzer:
             for row in conn.execute(
                 "SELECT parent_path, name, size, md5, hash_name, content_hash, modified, "
                 "is_native, is_shortcut, object_id, mime_type FROM files "
-                "WHERE scan_id = ? AND type = 'file'",
+                "WHERE scan_id = ? AND type IN ('file', 'shortcut')",
                 (base_scan_id,),
             ):
                 if row[0] in folder_updates:
@@ -2562,7 +2562,7 @@ class Analyzer:
                 for row in conn.execute(
                     "SELECT parent_path, name, size, md5, hash_name, content_hash, modified, "
                     "is_native, is_shortcut, object_id, mime_type FROM files "
-                    "WHERE scan_id = ? AND type = 'file'",
+                    "WHERE scan_id = ? AND type IN ('file', 'shortcut')",
                     (scan_id,),
                 ):
                     if row[0] in folders:
@@ -2578,7 +2578,7 @@ class Analyzer:
             return [self._file_record(row) for row in conn.execute(
                 "SELECT parent_path, name, size, md5, hash_name, content_hash, modified, "
                 "is_native, is_shortcut, object_id, mime_type FROM files "
-                "WHERE scan_id = ? AND type = 'file'", (scan_id,))]
+                "WHERE scan_id = ? AND type IN ('file', 'shortcut')", (scan_id,))]
         finally:
             conn.close()
 
@@ -2587,9 +2587,25 @@ class Analyzer:
         parent, name, size, md5, hash_name, content_hash, modified, native, shortcut, object_id, mime = row
         return {"parent": normalize_compare_path(parent), "name": name, "size": size,
                 "hash_name": hash_name or ("md5" if md5 else None),
-                "content_hash": content_hash or md5, "modified": modified,
+                "content_hash": content_hash or md5,
+                "modified": Analyzer._normalized_evidence_timestamp(modified),
                 "is_native": bool(native), "is_shortcut": bool(shortcut),
                 "object_id": object_id, "mime_type": mime}
+
+    @staticmethod
+    def _normalized_evidence_timestamp(value):
+        """Normalize naive local and offset timestamps to the same UTC value."""
+        if value is None:
+            return None
+        parsed = value if isinstance(value, datetime) else None
+        if parsed is None:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return str(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone(timezone.utc).isoformat()
 
     # Kept for existing readers/tests which use this small path->size view.
     # Provider-aware reports use the record methods above and never collapse
@@ -2636,7 +2652,8 @@ class Analyzer:
                 if cloud["is_native"] or cloud["is_shortcut"]:
                     comparisons.append({"path": path, "status": "uncomparable",
                                         "reason": "native_document" if cloud["is_native"] else "shortcut"})
-                elif cloud["hash_name"] and local["hash_name"]:
+                elif (cloud["hash_name"] and local["hash_name"]
+                      and cloud["content_hash"] and local["content_hash"]):
                     if cloud["hash_name"] == local["hash_name"]:
                         comparisons.append({"path": path, "status": "strong_match" if cloud["content_hash"] == local["content_hash"] else "strong_mismatch", "hash_type": cloud["hash_name"]})
                     else:
@@ -2757,6 +2774,20 @@ class Analyzer:
             exclude_dirs = load_exclude_dirs()
 
         conn = self.storage.get_connection()
+
+        def incomplete(scan_id, status):
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM scan_progress WHERE scan_id=? AND status!='completed'",
+                (scan_id,),
+            ).fetchone()[0]
+            if status == "success" and pending == 0:
+                return None
+            return {
+                "error": "incomplete_scan",
+                "scan_id": scan_id,
+                "status": status,
+                "pending_folders": pending,
+            }
         
         # Определяем local scan ID (независимо от режима)
         if local_scan_id:
@@ -2786,6 +2817,9 @@ class Analyzer:
             ).fetchone()
             if not cloud_scan:
                 return {"error": f"Cloud scan {cloud_scan_id} not found or is not a cloud scan"}
+            readiness_error = incomplete(cloud_scan[0], cloud_scan[2])
+            if readiness_error:
+                return readiness_error
             cloud_id = cloud_scan_id
             # Простое сравнение
             return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
@@ -2796,9 +2830,14 @@ class Analyzer:
             composite = self.build_composite_scan()
             if "error" in composite:
                 # Не удалось построить композитный - fallback на последний скан
-                last_cloud = conn.execute("SELECT id FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1").fetchone()
+                last_cloud = conn.execute(
+                    "SELECT id, status FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
                 if not last_cloud:
                     return {"error": "No cloud scans found"}
+                readiness_error = incomplete(last_cloud[0], last_cloud[1])
+                if readiness_error:
+                    return readiness_error
                 cloud_id = last_cloud[0]
                 return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
             
@@ -2806,9 +2845,14 @@ class Analyzer:
             return self._compare_composite_scan(composite, local_id, exclude_dirs)
         else:
             # Композитный режим отключен - используем последний скан
-            last_cloud = conn.execute("SELECT id FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1").fetchone()
+            last_cloud = conn.execute(
+                "SELECT id, status FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
             if not last_cloud:
                 return {"error": "No cloud scans found"}
+            readiness_error = incomplete(last_cloud[0], last_cloud[1])
+            if readiness_error:
+                return readiness_error
             cloud_id = last_cloud[0]
             return self._compare_simple_scan(cloud_id, local_id, exclude_dirs)
 
@@ -2846,10 +2890,13 @@ class Analyzer:
     def get_inventory_tree(self, scan_id):
         """Read-only cloud inventory tree; deliberately needs no local root."""
         conn = self.storage.get_connection()
-        rows = conn.execute(
-            "SELECT parent_path, name, type, object_id, mime_type, is_native, is_shortcut "
-            "FROM files WHERE scan_id=? ORDER BY parent_path, name, id", (scan_id,)
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                "SELECT parent_path, name, type, object_id, mime_type, is_native, is_shortcut "
+                "FROM files WHERE scan_id=? ORDER BY parent_path, name, id", (scan_id,)
+            ).fetchall()
+        finally:
+            conn.close()
         return {"scan_id": scan_id, "local_root_required": False,
                 "entries": [{"path": f"{parent}/{name}".strip("/"), "type": item_type,
                              "object_id": object_id, "mime_type": mime_type,

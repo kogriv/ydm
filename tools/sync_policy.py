@@ -342,7 +342,7 @@ def inspect_path(db_path: str, local_root: str, path: str, *, max_examples: int 
     incompatible = [item for item in files if item.chars]
     native = [item for item in files if item.is_native]
     shortcuts = [item for item in files if item.is_shortcut]
-    sanitized_seen: Dict[str, str] = {}
+    sanitized_seen: Dict[str, CloudFile] = {}
     collisions: List[dict] = []
     unicode_seen: Dict[str, str] = {}
     unicode_collisions: List[dict] = []
@@ -350,13 +350,15 @@ def inspect_path(db_path: str, local_root: str, path: str, *, max_examples: int 
     for item in files:
         sanitized = item.sanitized_rel_path
         previous = sanitized_seen.get(sanitized)
-        if previous and previous != item.rel_path:
+        if previous and (previous.rel_path != item.rel_path
+                         or previous.object_id != item.object_id):
             collisions.append({
                 "sanitized_path": sanitized,
-                "paths": sorted([previous, item.rel_path]),
+                "paths": sorted([previous.rel_path, item.rel_path]),
+                "object_ids": sorted(filter(None, [previous.object_id, item.object_id])),
             })
         else:
-            sanitized_seen[sanitized] = item.rel_path
+            sanitized_seen[sanitized] = item
 
         normalized = unicodedata.normalize("NFC", sanitized).casefold()
         previous_unicode = unicode_seen.get(normalized)
@@ -542,6 +544,9 @@ def validate_native_policy(args: argparse.Namespace, policy: dict) -> Optional[s
     """
     for entry, meta in policy.get("paths", {}).items():
         export_plan = meta.get("export_plan")
+        export_error = validate_export_plan(export_plan) if export_plan is not None else None
+        if export_error:
+            return f"Export plan for /{entry} {export_error}"
         if export_plan and meta.get("mode") != "download_only":
             return f"Export plan for /{entry} requires download_only mode"
         if export_plan and export_plan.get("mode") != "download_only":
@@ -551,6 +556,30 @@ def validate_native_policy(args: argparse.Namespace, policy: dict) -> Optional[s
             unsafe = [item.rel_path for item in files if item.is_native or item.is_shortcut]
             if unsafe:
                 return f"Bidirectional mode rejects native documents or shortcuts under /{entry}"
+            materialized = {}
+            for item in files:
+                previous = materialized.get(item.sanitized_rel_path)
+                if previous and (previous.rel_path != item.rel_path
+                                 or previous.object_id != item.object_id):
+                    return f"Bidirectional mode rejects materialization collisions under /{entry}"
+                materialized[item.sanitized_rel_path] = item
+    return None
+
+
+def validate_export_plan(plan: object) -> Optional[str]:
+    """Validate the safe, non-executable native export plan envelope."""
+    if not isinstance(plan, dict):
+        return "must be an object"
+    if plan.get("schema") != "ydm_native_export_plan:v1":
+        return "has an unsupported schema"
+    if plan.get("mode") != "download_only":
+        return "must declare download_only mode"
+    required = (
+        "source_object_id", "source_mime_type", "format",
+        "export_mime_type", "artifact_path",
+    )
+    if any(not isinstance(plan.get(key), str) or not plan[key] for key in required):
+        return "is missing required string fields"
     return None
 
 
@@ -595,7 +624,12 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         requested_mode = risk["recommended_mode"]
 
     error = None
-    if requested_mode == "bidirectional" and not risk["safe_for_bidirectional"] and not args.force_risk:
+    absolute_blockers = {
+        item.get("code") for item in risk.get("risks", [])
+    } & {"native_documents", "shortcuts", "sanitization_collisions"}
+    if requested_mode == "bidirectional" and absolute_blockers:
+        error = "Native documents and shortcuts cannot use bidirectional mode."
+    elif requested_mode == "bidirectional" and not risk["safe_for_bidirectional"] and not args.force_risk:
         error = (
             "Path is not safe for bidirectional sync. Use --mode download_only "
             "or --force-risk to override."
@@ -603,7 +637,10 @@ def add_policy_path(args: argparse.Namespace) -> dict:
     elif requested_mode not in VALID_MODES:
         error = f"Invalid mode: {requested_mode}"
     export_plan = getattr(args, "export_plan", None)
-    if export_plan and requested_mode != "download_only":
+    export_error = validate_export_plan(export_plan) if export_plan is not None else None
+    if export_error:
+        error = f"Export plan {export_error}"
+    elif export_plan and requested_mode != "download_only":
         error = "Export plans require download_only mode"
 
     result = {

@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +83,39 @@ class ReportsTest(unittest.TestCase):
                           "size": 1, "object_id": "id"}])
         self.assertFalse(self.analyzer.get_inventory_tree(scan)["local_root_required"])
         self.assertEqual(self.analyzer.get_long_paths(scan, limit_chars=5)["long_paths_count"], 1)
+
+    def test_incomplete_cloud_scan_is_never_authoritative_for_diff(self):
+        cloud = self.storage.start_scan("cloud")
+        local = self.scan("local")
+        self.rows(cloud, [{"parent_path": "/partial", "name": "unsafe", "type": "file", "size": 1}])
+        self.storage.update_folder_status(cloud, "/failed", "in_progress")
+        self.storage.finish_scan(cloud, "failed", 0)
+        explicit = self.analyzer.get_diff(
+            cloud_scan_id=cloud, local_scan_id=local, use_composite=False, exclude_dirs=[]
+        )
+        fallback = self.analyzer.get_diff(
+            local_scan_id=local, use_composite=False, exclude_dirs=[]
+        )
+        self.assertEqual(explicit["error"], "incomplete_scan")
+        self.assertEqual(fallback["error"], "incomplete_scan")
+        self.assertNotIn("missing_local_count", explicit)
+
+    def test_empty_hash_values_are_not_strong_and_timestamps_normalize(self):
+        cloud = self.scan("cloud")
+        local = self.scan("local")
+        instant = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+        local_wall = instant.astimezone().replace(tzinfo=None)
+        self.rows(cloud, [{"parent_path": "/docs", "name": "same", "type": "file",
+                           "size": 7, "hash_name": "sha1", "content_hash": None,
+                           "modified": instant}])
+        self.rows(local, [{"parent_path": "docs", "name": "same", "type": "file",
+                           "size": 7, "hash_name": "sha1", "content_hash": None,
+                           "modified": local_wall}])
+        report = self.analyzer.get_diff(
+            cloud_scan_id=cloud, local_scan_id=local, use_composite=False, exclude_dirs=[]
+        )
+        self.assertEqual(report["strong_comparison_count"], 0)
+        self.assertEqual(report["comparisons"][0]["status"], "weak_match")
 
 
 if __name__ == "__main__":

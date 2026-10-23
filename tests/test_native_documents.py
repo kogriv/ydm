@@ -35,6 +35,10 @@ class NativeDocumentTests(unittest.TestCase):
     def test_metadata_native_and_shortcut_are_not_missing_local(self):
         result = Analyzer(self.storage).get_diff(cloud_scan_id=self.scan, local_scan_id=self.local, use_composite=False)
         self.assertEqual(result["missing_local_sample"], ["/docs/ordinary.bin"])
+        self.assertEqual(
+            {item["reason"] for item in result["comparisons"]},
+            {"native_document", "shortcut"},
+        )
 
     def test_export_plan_is_synthetic_and_download_only(self):
         plan = provider_for("google_drive").export_plan(
@@ -45,6 +49,7 @@ class NativeDocumentTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "download_only")
         self.assertEqual(plan["source_object_id"], "synthetic-native")
         self.assertTrue(plan["artifact_path"].endswith("synthetic-native.xlsx"))
+        self.assertIsNone(sync_policy.validate_export_plan(plan))
 
     def test_bidirectional_native_or_export_is_rejected_before_filter_write(self):
         args = argparse.Namespace(db_path=self.db, local_root=self.tmp.name,
@@ -59,7 +64,57 @@ class NativeDocumentTests(unittest.TestCase):
         self.assertFalse(os.path.exists(args.download_filter_path))
         export_policy = {"schema": sync_policy.SCHEMA, "paths": {"docs": {
             "mode": "bidirectional", "export_plan": {"mode": "download_only"}}}}
-        self.assertIn("requires download_only", sync_policy.validate_native_policy(args, export_policy))
+        self.assertIn("unsupported schema", sync_policy.validate_native_policy(args, export_policy))
+
+    def test_force_cannot_override_native_bidirectional_block(self):
+        args = argparse.Namespace(
+            db_path=self.db, local_root=self.tmp.name,
+            policy_path=os.path.join(self.tmp.name, "policy.json"),
+            path="/docs", mode="bidirectional", force_risk=True,
+            apply=True, export_plan=None, backend="rclone", remote="synthetic",
+        )
+        risk = {
+            "safe_for_bidirectional": False,
+            "recommended_mode": "download_only",
+            "risks": [{"code": "native_documents", "severity": "blocker"}],
+            "scan_id": self.scan,
+        }
+        with mock.patch("tools.sync_policy.inspect_path", return_value=risk):
+            result = sync_policy.add_policy_path(args)
+        self.assertIn("cannot use bidirectional", result["error"])
+        self.assertFalse(os.path.exists(args.policy_path))
+
+    def test_duplicate_siblings_block_policy_and_filter_writes(self):
+        args = argparse.Namespace(
+            db_path=self.db, local_root=self.tmp.name,
+            policy_path=os.path.join(self.tmp.name, "policy.json"),
+            download_filter_path=os.path.join(self.tmp.name, "download.filters"),
+            bisync_filter_path=os.path.join(self.tmp.name, "bisync.filters"),
+            path="/docs", mode="bidirectional", force_risk=True,
+            apply=True, export_plan=None, backend="rclone", remote="synthetic",
+        )
+        collision_risk = {
+            "safe_for_bidirectional": False,
+            "recommended_mode": "download_only",
+            "risks": [{"code": "sanitization_collisions", "severity": "blocker"}],
+            "scan_id": self.scan,
+        }
+        with mock.patch("tools.sync_policy.inspect_path", return_value=collision_risk):
+            added = sync_policy.add_policy_path(args)
+        self.assertIn("cannot use bidirectional", added["error"])
+        self.assertFalse(os.path.exists(args.policy_path))
+        policy = {"schema": sync_policy.SCHEMA, "paths": {"docs": {"mode": "bidirectional"}}}
+        siblings = [
+            sync_policy.CloudFile("/docs", "same", 1, object_id="synthetic-a"),
+            sync_policy.CloudFile("/docs", "same", 1, object_id="synthetic-b"),
+        ]
+        with mock.patch(
+            "tools.sync_policy.cloud_files_for_path",
+            return_value=(self.scan, True, siblings),
+        ):
+            rendered = sync_policy.render_filters(args, policy)
+        self.assertIn("materialization collisions", rendered["error"])
+        self.assertFalse(os.path.exists(args.bisync_filter_path))
 
     def test_shortcuts_are_inventory_objects_not_descended_content(self):
         shortcut = sync_policy.CloudFile("/docs", "shortcut", 0, is_shortcut=True)
