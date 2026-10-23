@@ -1,0 +1,23 @@
+{
+  "schema": "ydm_targets:v1",
+  "default_target": "example-yandex",
+  "targets": {
+    "example-yandex": {
+      "provider": "yandex",
+      "inventory": {"kind": "yandex_api"},
+      "sync": {"kind": "daemon"},
+      "local_root": "/srv/cloud-mirrors/example-yandex",
+      "state_dir": "/var/lib/ydm/example-yandex",
+      "config_profile": "prod"
+    },
+    "example-gdrive": {
+      "provider": "google_drive",
+      "inventory": {"kind": "rclone", "remote": "example-gdrive"},
+      "sync": {"kind": "rclone", "remote": "example-gdrive"},
+      "local_root": "/srv/cloud-mirrors/example-gdrive",
+      "state_dir": "/var/lib/ydm/example-gdrive",
+      "config_profile": "prod",
+      "native_docs": "metadata"
+    }
+  }
+}

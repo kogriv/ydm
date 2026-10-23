@@ -15,6 +15,13 @@ import time
 import subprocess
 from abc import ABC, abstractmethod
 
+from tools.targets import (
+    TargetConfigError,
+    discover_targets_file,
+    load_targets_file,
+    resolve_target,
+)
+
 # Global state for signal handling
 _storage_for_signal = None
 _scan_id_for_signal = None
@@ -3019,10 +3026,12 @@ class YDM_CLI:
             description="YDM - Yandex Disk Monitor & Auditor",
             formatter_class=argparse.RawDescriptionHelpFormatter
         )
-        self.parser.add_argument("--db-path", default="monitor.db", help="Path to SQLite database")
+        self.parser.add_argument("--db-path", default=None, help="Path to SQLite database")
         self.parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
-        self.parser.add_argument("--config-profile", default="prod", help="Config profile to use (prod/test/custom)")
-        self.parser.add_argument("--backend", choices=["api", "rclone"], default="api",
+        self.parser.add_argument("--target", help="Named isolated cloud target")
+        self.parser.add_argument("--targets-file", help="Path to ydm_targets:v1 file (defaults to YDM_TARGETS_FILE or ydm_targets.json)")
+        self.parser.add_argument("--config-profile", default=None, help="Config profile to use (prod/test/custom)")
+        self.parser.add_argument("--backend", choices=["api", "rclone"], default=None,
                                   help="Cloud client backend: 'api' (YANDEX_DISK_TOKEN, default) or "
                                        "'rclone' (rclone.conf remote, for environments without the "
                                        "yandex-disk daemon — see tasks/rclone_backend/README.md)")
@@ -3031,10 +3040,17 @@ class YDM_CLI:
         
         # init command
         subparsers.add_parser("init", help="Initialize the database")
+
+        targets_parser = subparsers.add_parser("targets", help="Inspect or validate target configuration offline")
+        targets_subparsers = targets_parser.add_subparsers(dest="targets_command", required=True)
+        targets_subparsers.add_parser("list", help="List configured targets without remote access")
+        targets_show = targets_subparsers.add_parser("show", help="Show a target and derived state paths")
+        targets_show.add_argument("name", nargs="?", help="Target name (defaults to resolved --target/default)")
+        targets_subparsers.add_parser("validate", help="Validate ydm_targets:v1 without remote access")
         
         # scan command
         scan_parser = subparsers.add_parser("scan", help="Scan operations")
-        scan_parser.add_argument("target", choices=["meta", "local", "cloud"], help="Scan target")
+        scan_parser.add_argument("scan_target", choices=["meta", "local", "cloud"], help="Scan target")
         scan_parser.add_argument("--path", default=None, help="Specific path to scan (cloud: /папка, local: /path/to/dir)")
         scan_parser.add_argument(
             "--depth", type=int, default=None,
@@ -3091,7 +3107,41 @@ class YDM_CLI:
 
     def run(self):
         self.args = self.parser.parse_args()
-        self.args.config = load_config(self.args.config_profile)
+        # These commands deliberately avoid StorageManager: they must remain
+        # useful on an unconfigured/offline host and must not create state.
+        if self.args.command == "targets":
+            return self.targets_command_handler()
+
+        try:
+            self.target_context = resolve_target(
+                cli_target=self.args.target,
+                targets_path=self.args.targets_file,
+            )
+        except (TargetConfigError, OSError) as exc:
+            self.render(f"Target configuration error: {exc}", success=False)
+            return True
+
+        if self.target_context:
+            profile = self.args.config_profile or self.target_context.config.config_profile
+        else:
+            profile = self.args.config_profile or "prod"
+        self.args.config_profile = profile
+        self.args.config = load_config(profile)
+        if self.target_context:
+            target = self.target_context.config
+            self.args.config["local_root"] = target.local_root
+            if target.inventory_remote:
+                self.args.config["rclone_remote"] = target.inventory_remote
+            if self.args.backend is None:
+                self.args.backend = "rclone" if target.inventory_kind == "rclone" else "api"
+            if self.args.db_path is None:
+                self.args.db_path = self.target_context.db_path
+                # A target owns its state directory. Creating it is normal
+                # command execution, unlike the offline `targets` commands.
+                os.makedirs(self.target_context.state_dir, exist_ok=True)
+        else:
+            self.args.backend = self.args.backend or "api"
+            self.args.db_path = self.args.db_path or "monitor.db"
         
         # Для report команд - всегда используем disk БД, для scan - tmpfs
         use_temp = self.args.command == "scan"
@@ -3109,6 +3159,81 @@ class YDM_CLI:
             self.parser.print_help()
         return handled
 
+    @staticmethod
+    def _target_payload(context):
+        config = context.config
+        return {
+            "name": config.name,
+            "source": context.source,
+            "provider": config.provider,
+            "inventory": {"kind": config.inventory_kind, "remote": config.inventory_remote},
+            "sync": {"kind": config.sync_kind, "remote": config.sync_remote},
+            "local_root": config.local_root,
+            "state_dir": config.state_dir,
+            "config_profile": config.config_profile,
+            "native_docs": config.native_docs,
+            "paths": {
+                "db": context.db_path,
+                "policy": context.policy_path,
+                "download_filter": context.download_filter_path,
+                "bisync_filter": context.bisync_filter_path,
+                "bisync_state": context.bisync_state_path,
+                "bisync_log": context.bisync_log_path,
+                "rename_state": context.rename_state_path,
+                "locks_dir": context.locks_dir,
+            },
+        }
+
+    def targets_command_handler(self):
+        path = discover_targets_file(self.args.targets_file)
+        if path is None:
+            legacy = {"mode": "legacy", "targets": []}
+            if self.args.targets_command == "validate":
+                self.render("Legacy mode is valid: no targets file configured.")
+            elif self.args.targets_command == "list":
+                self.render(legacy if self.args.format == "json" else "Legacy mode (no targets file configured).")
+            else:
+                self.render("No targets file configured; legacy mode has no named target.", success=False)
+            return True
+        try:
+            document = load_targets_file(path)
+        except (TargetConfigError, OSError) as exc:
+            self.render(f"Target configuration error: {exc}", success=False)
+            return True
+        if self.args.targets_command == "validate":
+            payload = {"path": document.path, "targets": len(document.targets), "valid": True}
+            self.render(payload if self.args.format == "json" else f"Valid targets file: {document.path} ({len(document.targets)} targets)")
+            return True
+        if self.args.targets_command == "list":
+            entries = [
+                {"name": item.name, "provider": item.provider,
+                 "inventory_kind": item.inventory_kind, "sync_kind": item.sync_kind,
+                 "default": item.name == document.default_target}
+                for item in document.targets.values()
+            ]
+            if self.args.format == "json":
+                self.render({"path": document.path, "default_target": document.default_target, "targets": entries})
+            else:
+                lines = [f"Targets file: {document.path}"]
+                lines.extend(
+                    f"{'*' if item['default'] else ' '} {item['name']}: {item['provider']} "
+                    f"(inventory={item['inventory_kind']}, sync={item['sync_kind']})" for item in entries
+                )
+                self.render("\n".join(lines))
+            return True
+        selected = self.args.name or self.args.target or os.environ.get("YDM_TARGET") or document.default_target
+        if not selected:
+            self.render("Target configuration error: choose a target with --target or `targets show NAME`.", success=False)
+            return True
+        try:
+            context = resolve_target(cli_target=selected, targets_path=document.path)
+        except TargetConfigError as exc:
+            self.render(f"Target configuration error: {exc}", success=False)
+            return True
+        payload = self._target_payload(context)
+        self.render(payload if self.args.format == "json" else json.dumps(payload, ensure_ascii=False, indent=2))
+        return True
+
     def command_handler(self, storage):
         if self.args.command == "init":
             success, message = storage.init_db()
@@ -3119,7 +3244,7 @@ class YDM_CLI:
             # Only meta/cloud targets talk to a cloud client; local scan
             # never needed one and shouldn't require credentials for either backend.
             client = None
-            if self.args.target in ("meta", "cloud"):
+            if self.args.scan_target in ("meta", "cloud"):
                 if self.args.backend == "rclone":
                     if shutil.which("rclone") is None:
                         self.render("Error: rclone not found in PATH (required for --backend rclone)", success=False)
@@ -3143,7 +3268,7 @@ class YDM_CLI:
 
             scan_success = False
             
-            if self.args.target == "meta":
+            if self.args.scan_target == "meta":
                 start_time = time.time()
                 scan_id = storage.start_scan("meta")
                 try:
@@ -3170,7 +3295,7 @@ class YDM_CLI:
                         storage.finalize()
                 return True
 
-            if self.args.target == "local":
+            if self.args.scan_target == "local":
                 start_time = time.time()
                 local_path = self.args.path or self.args.config.get("local_root")
                 if not local_path:
@@ -3221,7 +3346,7 @@ class YDM_CLI:
                         storage.finalize()
                 return True
 
-            if self.args.target == "cloud":
+            if self.args.scan_target == "cloud":
                 # Проверка логики для добавления папки в существующий скан
                 if self.args.add_to_scan:
                     if not self.args.path:
@@ -3248,7 +3373,11 @@ class YDM_CLI:
                     return True
 
                 # Level 1: Lock file to prevent concurrent scans
-                LOCK_FILE = '/tmp/ydm_cloud_scan.lock'
+                LOCK_FILE = (self.target_context.lock_path if self.target_context
+                             else '/tmp/ydm_cloud_scan.lock')
+
+                if self.target_context:
+                    os.makedirs(self.target_context.locks_dir, exist_ok=True)
 
                 if os.path.exists(LOCK_FILE):
                     try:

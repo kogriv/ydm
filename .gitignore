@@ -15,6 +15,9 @@ deleted.log.old
 
 # Secrets
 .env
+# Host-specific multi-cloud configuration and live validation material.
+ydm_targets.json
+.private/
 
 # Python
 __pycache__/
