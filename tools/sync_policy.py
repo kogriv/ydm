@@ -193,6 +193,8 @@ def configure_target_args(args: argparse.Namespace) -> None:
     args.target_managed = True
     args.target, args.provider = cfg.name, cfg.provider
     args.inventory_kind, args.sync_kind = cfg.inventory_kind, cfg.sync_kind
+    args.native_docs = cfg.native_docs
+    args.target_context = context
     args.remote, args.local_root, args.db_path = cfg.sync_remote, cfg.local_root, context.db_path
     args.policy_path = context.policy_path
     args.download_filter_path, args.bisync_filter_path = context.download_filter_path, context.bisync_filter_path
@@ -686,6 +688,53 @@ def download_apply(args: argparse.Namespace, policy: dict) -> dict:
     return plan
 
 
+def native_export_action(args: argparse.Namespace, policy: dict) -> dict:
+    """Plan or execute one policy-bound, inventory-verified native export."""
+    entry = normalize_entry(args.path)
+    result = {
+        "schema": "ydm_native_export_result:v1", "action": "native-export",
+        "dry_run": not args.apply, "path": f"/{entry}", "error": None,
+    }
+    error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
+    if error:
+        result["error"] = error
+        return result
+    if not getattr(args, "target_managed", False):
+        result["error"] = "native export requires a target-managed invocation"
+        return result
+    meta = policy.get("paths", {}).get(entry)
+    if not isinstance(meta, dict) or meta.get("mode") != "download_only":
+        result["error"] = f"Download-only policy entry not found: /{entry}"
+        return result
+    plan = meta.get("export_plan")
+    plan_error = validate_export_plan(plan) if plan is not None else "is missing"
+    if plan_error:
+        result["error"] = f"Export plan for /{entry} {plan_error}"
+        return result
+    try:
+        scan_id, exists, files = cloud_files_for_path(args.db_path, f"/{entry}" if entry else "/")
+    except Exception as exc:
+        result["error"] = f"native export inventory is unavailable: {exc}"
+        return result
+    matches = [item for item in files if item.object_id == plan["source_object_id"]]
+    if not exists or len(matches) != 1:
+        result["error"] = "native export object is absent or ambiguous in the bound inventory"
+        return result
+    item = matches[0]
+    if item.is_shortcut or not item.is_native or item.mime_type != plan["source_mime_type"]:
+        result["error"] = "native export object type or MIME does not match the bound inventory"
+        return result
+    from tools.native_export import ExportSafetyError, execute_export
+    try:
+        executed = execute_export(plan, args.target_context, apply=args.apply)
+    except ExportSafetyError as exc:
+        result["error"] = str(exc)
+        return result
+    result.update(executed)
+    result.update({"action": "native-export", "path": f"/{entry}", "scan_id": scan_id})
+    return result
+
+
 def validate_native_policy(args: argparse.Namespace, policy: dict) -> Optional[str]:
     """Reject native/shortcut materialization before policy or filters write.
 
@@ -992,6 +1041,11 @@ def parse_args() -> argparse.Namespace:
     common_flags(apply_download)
     apply_download.add_argument("--apply", action="store_true")
 
+    native_export = subparsers.add_parser("native-export")
+    native_export.add_argument("--path", required=True)
+    native_export.add_argument("--apply", action="store_true")
+    common_flags(native_export)
+
     add = subparsers.add_parser("add")
     add.add_argument("--path", required=True)
     add.add_argument("--mode", choices=["auto", "bidirectional", "download_only", "disabled"], default="auto")
@@ -1090,6 +1144,11 @@ def main() -> None:
             payload = (download_apply(args, policy) if policy else {
                 "schema": "ydm_download_plan:v1", "action": "download-apply", "dry_run": not args.apply,
                 "error": f"Policy not found: {args.policy_path}"})
+        elif args.command == "native-export":
+            policy = load_policy(args.policy_path)
+            payload = (native_export_action(args, policy) if policy else {
+                "schema": "ydm_native_export_result:v1", "action": "native-export",
+                "dry_run": not args.apply, "error": f"Policy not found: {args.policy_path}"})
         elif args.command == "add":
             payload = add_policy_path(args)
             if args.apply and payload.get("error") is None:
