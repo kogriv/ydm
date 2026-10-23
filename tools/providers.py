@@ -66,7 +66,7 @@ class GoogleDriveProvider(ProviderAdapter):
         stable_object_id=True, duplicate_sibling_names=True,
         content_hashes=frozenset({"md5"}), native_documents=True, shortcuts=True,
         revisions=False, trash_listing=False, server_side_move=False,
-        bidirectional_sync=False,
+        bidirectional_sync=True,
     )
 
     def normalize_rclone_item(self, entry: Mapping[str, Any]) -> dict[str, Any]:

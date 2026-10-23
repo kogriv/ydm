@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from tools import sync_backends, sync_bisync, sync_policy, sync_rename
+from tools.providers import provider_for
 from tools.targets import TargetConfigError, load_targets_file
 
 
@@ -127,6 +128,9 @@ class Phase7SafetyTests(unittest.TestCase):
                     google_root, os.path.join(tmp, "missing.cfg")))
 
     def test_google_fast_rename_is_blocked_by_provider_capability(self):
+        capabilities = provider_for("google_drive").capabilities
+        self.assertTrue(capabilities.bidirectional_sync)
+        self.assertFalse(capabilities.server_side_move)
         args = argparse.Namespace(
             command="plan", old="/chosen/old", new="/chosen/new",
             local_root="/tmp/synthetic", remote="synthetic",
