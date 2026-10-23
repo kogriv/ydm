@@ -56,6 +56,14 @@ class ProviderInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryError, "stable object ID"):
             RcloneClient("synthetic", provider="google_drive").get_resources("/")
 
+        run.return_value.stdout = json.dumps([{
+            "Name": "missing-dir-id", "Size": -1, "IsDir": True,
+            "ModTime": "2026-01-01T00:00:00Z",
+            "MimeType": "application/vnd.google-apps.folder",
+        }])
+        with self.assertRaisesRegex(InventoryError, "stable object ID"):
+            RcloneClient("synthetic", provider="google_drive").get_resources("/dir")
+
     def test_listing_failure_leaves_scan_resumable_not_completed(self):
         class FailingClient:
             def get_resources(self, *_args):
@@ -88,6 +96,78 @@ class ProviderInventoryTests(unittest.TestCase):
             self.assertTrue(payload["read_only"])
             self.assertNotIn("total_space", json.dumps(payload))
             self.assertFalse(os.path.exists(os.path.join(tmp, "state")))
+
+    @mock.patch.object(RcloneClient, "get_resources", side_effect=InventoryError("secret-remote:path"))
+    def test_doctor_failure_does_not_echo_provider_details(self, _listing):
+        with tempfile.TemporaryDirectory() as tmp:
+            targets_path = os.path.join(tmp, "targets.json")
+            config = {"schema": "ydm_targets:v1", "default_target": "synthetic", "targets": {
+                "synthetic": {"provider": "google_drive", "inventory": {"kind": "rclone", "remote": "secret-remote"},
+                 "sync": {"kind": "rclone", "remote": "secret-remote"}, "local_root": os.path.join(tmp, "local"),
+                 "state_dir": os.path.join(tmp, "state"), "config_profile": "prod"}}}
+            with open(targets_path, "w", encoding="utf-8") as handle:
+                json.dump(config, handle)
+            argv = ["ydm.py", "--format", "json", "--targets-file", targets_path,
+                    "targets", "doctor"]
+            out = StringIO()
+            with mock.patch("sys.argv", argv), redirect_stdout(out):
+                self.assertTrue(YDM_CLI().run())
+            serialized = out.getvalue()
+            self.assertNotIn("secret-remote", serialized)
+            self.assertIn("inventory_probe_failed", serialized)
+
+    @mock.patch("ydm.shutil.which", return_value="/synthetic/rclone")
+    def test_add_to_scan_is_source_bound_and_updates_disk_state(self, _which):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = os.path.join(tmp, "state")
+            os.makedirs(state_dir)
+            db_path = os.path.join(state_dir, "monitor.db")
+            storage = StorageManager(db_path, use_temp_storage=False)
+            storage.init_db()
+            matching_id = storage.start_scan(
+                "cloud", target_name="synthetic", provider="google_drive",
+                inventory_kind="rclone", remote_name="synthetic-remote",
+            )
+            wrong_id = storage.start_scan(
+                "cloud", target_name="other", provider="yandex",
+                inventory_kind="yandex_api", remote_name=None,
+            )
+            targets_path = os.path.join(tmp, "targets.json")
+            config = {"schema": "ydm_targets:v1", "default_target": "synthetic", "targets": {
+                "synthetic": {"provider": "google_drive", "inventory": {"kind": "rclone", "remote": "synthetic-remote"},
+                 "sync": {"kind": "rclone", "remote": "synthetic-remote"}, "local_root": os.path.join(tmp, "local"),
+                 "state_dir": state_dir, "config_profile": "prod"}}}
+            with open(targets_path, "w", encoding="utf-8") as handle:
+                json.dump(config, handle)
+
+            def run(scan_id, path):
+                argv = ["ydm.py", "--format", "json", "--targets-file", targets_path,
+                        "scan", "cloud", "--add-to-scan", str(scan_id), "--path", path]
+                out = StringIO()
+                with mock.patch("sys.argv", argv), redirect_stdout(out):
+                    YDM_CLI().run()
+                return json.loads(out.getvalue())
+
+            rejected = run(wrong_id, "/must-not-write")
+            self.assertFalse(rejected["success"])
+            accepted = run(matching_id, "/synthetic-folder")
+            self.assertTrue(accepted["success"])
+
+            resume_argv = [
+                "ydm.py", "--format", "json", "--targets-file", targets_path,
+                "scan", "cloud", "--resume", "--scan-id", str(wrong_id),
+            ]
+            resume_out = StringIO()
+            with mock.patch("sys.argv", resume_argv), redirect_stdout(resume_out):
+                YDM_CLI().run()
+            self.assertFalse(json.loads(resume_out.getvalue())["success"])
+            self.assertFalse(os.path.exists(os.path.join(state_dir, "locks", "cloud_scan.lock")))
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT scan_id, path FROM scan_progress ORDER BY scan_id, path"
+                ).fetchall()
+            self.assertEqual(rows, [(matching_id, "/synthetic-folder")])
 
 
 if __name__ == "__main__":

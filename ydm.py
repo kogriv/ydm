@@ -1404,8 +1404,7 @@ class RcloneClient(CloudResourceClient):
                 frac = frac_and_zone.rstrip("Z")[:6]
                 mod_time = f"{head}.{frac}Z"
             item = self.provider.normalize_rclone_item(entry)
-            if (self.provider.capabilities.stable_object_id
-                    and item["type"] != "dir" and not item["object_id"]):
+            if self.provider.capabilities.stable_object_id and not item["object_id"]:
                 raise InventoryError(
                     f"rclone item {item['name']!r} has no stable object ID for {self.provider.name}"
                 )
@@ -3407,6 +3406,25 @@ class YDM_CLI:
             "remote_name": getattr(client, "remote", None),
         }
 
+    def _scan_matches_active_target(self, db_path, scan_id, client):
+        """Check recovery mutations against the scan's recorded source."""
+        if not self.target_context or not os.path.exists(db_path):
+            return not self.target_context
+        try:
+            with sqlite3.connect(db_path) as conn:
+                stored = conn.execute(
+                    "SELECT target_name, provider, inventory_kind, remote_name "
+                    "FROM scans WHERE id=?",
+                    (scan_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            return False
+        expected = self._scan_provenance(client)
+        return bool(stored) and tuple(stored) == (
+            expected["target_name"], expected["provider"],
+            expected["inventory_kind"], expected["remote_name"],
+        )
+
     def _inventory_client_for_context(self, context):
         """Build only an inventory client; sync engine selection is irrelevant."""
         config = context.config
@@ -3500,8 +3518,14 @@ class YDM_CLI:
                               "root_entries": listing.get("total", 0)},
                     "read_only": True,
                 }
-            except (InventoryError, subprocess.SubprocessError, OSError, ValueError) as exc:
-                self.render({"target": context.name, "read_only": True, "error": str(exc)}, success=False)
+            except (InventoryError, subprocess.SubprocessError, OSError, ValueError):
+                # Do not echo subprocess argv, remote names, paths, tokens, or
+                # provider responses. Doctor output is safe to paste publicly.
+                self.render({
+                    "target": context.name,
+                    "read_only": True,
+                    "error": "inventory_probe_failed",
+                }, success=False)
                 return True
             self.render(payload if self.args.format == "json" else json.dumps(payload, ensure_ascii=False, indent=2))
             return True
@@ -3636,14 +3660,26 @@ class YDM_CLI:
                         return True
                     
                     scan_id = self.args.add_to_scan
+                    if not self._scan_matches_active_target(
+                            storage.final_db_path, scan_id, client):
+                        self.render(
+                            "Error: scan provenance does not match the active target",
+                            success=False,
+                        )
+                        return True
                     print(f"Adding paths to scan {scan_id}...", file=sys.stderr)
                     
                     try:
                         # Добавляем папку в очередь существующего скана
                         paths = [self.args.path]
-                        storage.add_folders_to_scan(scan_id, paths)
+                        operation_storage = StorageManager(
+                            storage.final_db_path,
+                            use_temp_storage=False,
+                            config=self.args.config,
+                        )
+                        operation_storage.add_folders_to_scan(scan_id, paths)
                         
-                        remaining = storage.get_pending_folders_count(scan_id)
+                        remaining = operation_storage.get_pending_folders_count(scan_id)
                         self.render({
                             "scan_id": scan_id,
                             "action": "added_path",
@@ -3653,6 +3689,29 @@ class YDM_CLI:
                     except Exception as e:
                         self.render(f"Failed to add path: {str(e)}", success=False)
                     return True
+
+                resume_scan_id = None
+                if self.args.resume:
+                    if self.args.scan_id:
+                        resume_scan_id = self.args.scan_id
+                    elif os.path.exists(storage.final_db_path):
+                        with sqlite3.connect(storage.final_db_path) as disk_conn:
+                            last_scan = disk_conn.execute(
+                                "SELECT id FROM scans WHERE scan_type='cloud' "
+                                "ORDER BY id DESC LIMIT 1"
+                            ).fetchone()
+                        if last_scan:
+                            resume_scan_id = last_scan[0]
+                    if resume_scan_id is None:
+                        self.render("No previous cloud scans found", success=False)
+                        return True
+                    if not self._scan_matches_active_target(
+                            storage.final_db_path, resume_scan_id, client):
+                        self.render(
+                            "Error: resume scan provenance does not match the active target",
+                            success=False,
+                        )
+                        return True
 
                 # Level 1: Lock file to prevent concurrent scans
                 LOCK_FILE = (self.target_context.lock_path if self.target_context
@@ -3706,41 +3765,9 @@ class YDM_CLI:
                 
                 # Determine scan_id: resume existing or create new
                 if self.args.resume:
-                    if self.args.scan_id:
-                        scan_id = self.args.scan_id
-                        print(f"Resuming scan {scan_id}...", file=sys.stderr)
-                    else:
-                        # Get last cloud scan from disk DB
-                        if os.path.exists(storage.final_db_path):
-                            disk_conn = sqlite3.connect(storage.final_db_path)
-                            last_scan = disk_conn.execute(
-                                "SELECT id FROM scans WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
-                            ).fetchone()
-                            disk_conn.close()
-                            if not last_scan:
-                                self.render("No previous cloud scans found", success=False)
-                                return True
-                            scan_id = last_scan[0]
-                        else:
-                            self.render("No previous database found", success=False)
-                            return True
-                        print(f"Resuming last cloud scan {scan_id}...", file=sys.stderr)
-                    
+                    scan_id = resume_scan_id
+                    print(f"Resuming scan {scan_id}...", file=sys.stderr)
                     # Восстановить данные сеанса из disk DB в tmpfs
-                    if self.target_context:
-                        disk_conn = sqlite3.connect(storage.final_db_path)
-                        stored = disk_conn.execute(
-                            "SELECT target_name, provider, inventory_kind, remote_name FROM scans WHERE id=?",
-                            (scan_id,),
-                        ).fetchone()
-                        disk_conn.close()
-                        expected = self._scan_provenance(client)
-                        if not stored or tuple(stored) != (
-                            expected["target_name"], expected["provider"],
-                            expected["inventory_kind"], expected["remote_name"],
-                        ):
-                            self.render("Error: resume scan provenance does not match the active target", success=False)
-                            return True
                     storage.restore_from_disk(scan_id)
                 else:
                     scan_depth = getattr(self.args, "depth", None)

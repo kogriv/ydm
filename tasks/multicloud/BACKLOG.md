@@ -49,7 +49,7 @@ write-path, пока предыдущая не умеет корректно п�
 **Exit:** fake Google scan хранит два одинаковых path/name с разными IDs без
 потери строк; legacy Yandex DB остаётся читаемой.
 
-## Phase 3 — Provider-aware inventory
+## Phase 3 — Provider-aware inventory ✅
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
