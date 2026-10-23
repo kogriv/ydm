@@ -20,7 +20,7 @@ write-path, пока предыдущая не умеет корректно п�
 **Exit:** код не начат до фиксации identity, native-doc и state-isolation
 решений.
 
-## Phase 1 — Target foundation
+## Phase 1 — Target foundation ✅
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
@@ -34,7 +34,7 @@ write-path, пока предыдущая не умеет корректно п�
 
 **Exit:** два synthetic targets не разделяют ни одного writable state path.
 
-## Phase 2 — Storage schema v2 and identity
+## Phase 2 — Storage schema v2 and identity ✅
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|

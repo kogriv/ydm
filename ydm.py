@@ -1392,7 +1392,11 @@ class RcloneClient(CloudResourceClient):
             hashes = entry.get("Hashes") or {}
             hash_name = "md5" if hashes.get("md5") else (sorted(hashes)[0] if hashes else None)
             content_hash = hashes.get(hash_name) if hash_name else None
-            metadata = entry.get("Metadata") or {}
+            metadata = dict(entry.get("Metadata") or {})
+            if hashes:
+                # Keep every provider hash even though hash_name/content_hash
+                # expose a single compatibility value to existing reports.
+                metadata["rclone_hashes"] = dict(hashes)
             items.append({
                 "name": entry["Name"],
                 "type": "dir" if is_dir else "file",
@@ -3326,8 +3330,15 @@ class YDM_CLI:
             self.args.config["local_root"] = target.local_root
             if target.inventory_remote:
                 self.args.config["rclone_remote"] = target.inventory_remote
-            if self.args.backend is None:
-                self.args.backend = "rclone" if target.inventory_kind == "rclone" else "api"
+            target_backend = "rclone" if target.inventory_kind == "rclone" else "api"
+            if self.args.backend is not None and self.args.backend != target_backend:
+                self.render(
+                    f"Target configuration error: --backend {self.args.backend} conflicts "
+                    f"with target {target.name} inventory {target.inventory_kind}",
+                    success=False,
+                )
+                return True
+            self.args.backend = target_backend
             if self.args.db_path is None:
                 self.args.db_path = self.target_context.db_path
                 # A target owns its state directory. Creating it is normal
@@ -3376,6 +3387,24 @@ class YDM_CLI:
                 "rename_state": context.rename_state_path,
                 "locks_dir": context.locks_dir,
             },
+        }
+
+    def _scan_provenance(self, client=None):
+        """Return normalized source identity for every scan type."""
+        if self.target_context:
+            config = self.target_context.config
+            return {
+                "target_name": config.name,
+                "provider": config.provider,
+                "inventory_kind": config.inventory_kind,
+                "remote_name": config.inventory_remote,
+            }
+        inventory_kind = "rclone" if self.args.backend == "rclone" else "yandex_api"
+        return {
+            "target_name": "legacy",
+            "provider": "yandex",
+            "inventory_kind": inventory_kind,
+            "remote_name": getattr(client, "remote", None),
         }
 
     def targets_command_handler(self):
@@ -3464,7 +3493,7 @@ class YDM_CLI:
             
             if self.args.scan_target == "meta":
                 start_time = time.time()
-                scan_id = storage.start_scan("meta")
+                scan_id = storage.start_scan("meta", **self._scan_provenance(client))
                 try:
                     info = client.get_disk_info()
                     storage.save_disk_info(scan_id, info)
@@ -3499,7 +3528,10 @@ class YDM_CLI:
                         success=False,
                     )
                     return True
-                scan_id = storage.start_scan("local", scan_root=local_path)
+                scan_id = storage.start_scan(
+                    "local", scan_root=local_path,
+                    **self._scan_provenance(),
+                )
                 try:
                     if not os.path.exists(local_path):
                         raise Exception(f"Path not found: {local_path}")
@@ -3646,10 +3678,7 @@ class YDM_CLI:
                         "cloud",
                         scan_root=self.args.path or "/",
                         scan_depth=scan_depth,
-                        target_name="legacy",
-                        provider="yandex",
-                        inventory_kind=self.args.backend,
-                        remote_name=(getattr(client, "remote", None)),
+                        **self._scan_provenance(client),
                     )
                     print(f"Starting new cloud scan {scan_id}...", file=sys.stderr)
                     if scan_depth is not None:

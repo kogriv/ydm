@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Synthetic regression coverage for the v2 inventory storage migration."""
 import os
+import json
 import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +14,7 @@ import sys
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ydm import DEFAULT_CONFIG, StorageManager
+from ydm import DEFAULT_CONFIG, RcloneClient, StorageManager
 
 
 class StorageV2Test(unittest.TestCase):
@@ -103,6 +105,21 @@ class StorageV2Test(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("future", message)
         self.assertEqual(sqlite3.connect(self.db_path).execute("PRAGMA user_version").fetchone()[0], 99)
+
+    @mock.patch("ydm.subprocess.run")
+    def test_rclone_normalization_preserves_every_available_hash(self, run):
+        run.return_value.stdout = json.dumps([{
+            "Name": "fixture.bin", "Size": 3, "ModTime": "2026-01-01T00:00:00Z",
+            "Hashes": {"sha1": "sha-one", "md5": "md-five"},
+            "Metadata": {"synthetic": "true"},
+        }])
+        item = RcloneClient("synthetic")._list_folder("/")[0]
+        self.assertEqual(item["hash_name"], "md5")
+        self.assertEqual(item["content_hash"], "md-five")
+        self.assertEqual(
+            item["metadata"]["rclone_hashes"],
+            {"sha1": "sha-one", "md5": "md-five"},
+        )
 
     @unittest.skipUnless(os.path.exists("/dev/shm"), "tmpfs unavailable")
     def test_checkpoint_and_restore_keep_v2_fields(self):

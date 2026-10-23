@@ -156,6 +156,16 @@ def _parse_target(name: str, raw: Any) -> TargetConfig:
         value["inventory"], f"{path}.inventory", {"yandex_api", "rclone"}
     )
     sync_kind, sync_remote = _component(value["sync"], f"{path}.sync", {"daemon", "rclone"})
+    if provider == "google_drive" and inventory_kind != "rclone":
+        raise _error(
+            f"{path}.inventory.kind",
+            "google_drive requires rclone inventory",
+        )
+    if provider == "google_drive" and sync_kind != "rclone":
+        raise _error(
+            f"{path}.sync.kind",
+            "google_drive requires rclone sync",
+        )
     native_docs = value.get("native_docs", "metadata")
     if native_docs not in {"metadata", "export", "skip"}:
         raise _error(f"{path}.native_docs", "must be metadata, export, or skip")
@@ -189,6 +199,19 @@ def load_targets_file(path: str) -> TargetsFile:
     if not raw_targets:
         raise _error("$.targets", "must not be empty")
     targets = {name: _parse_target(name, value) for name, value in raw_targets.items()}
+    target_items = list(targets.values())
+    for index, left in enumerate(target_items):
+        for right in target_items[index + 1:]:
+            try:
+                shared = os.path.commonpath((left.state_dir, right.state_dir))
+            except ValueError:
+                # Different drives on Windows cannot overlap.
+                continue
+            if shared in {left.state_dir, right.state_dir}:
+                raise _error(
+                    f"$.targets.{right.name}.state_dir",
+                    f"must not equal or be nested with $.targets.{left.name}.state_dir",
+                )
     default_target = root.get("default_target")
     if default_target is not None:
         default_target = _string(default_target, "$.default_target")

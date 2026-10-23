@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -97,6 +98,28 @@ class TargetResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(TargetConfigError, r"inventory\.remote"):
             load_targets_file(str(self.path))
 
+    def test_provider_rejects_incompatible_inventory_and_sync(self):
+        data = fixture(self.base)
+        data["targets"]["synthetic-drive"]["inventory"] = {"kind": "yandex_api"}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(TargetConfigError, r"google_drive requires rclone inventory"):
+            load_targets_file(str(self.path))
+
+        data = fixture(self.base)
+        data["targets"]["synthetic-drive"]["sync"] = {"kind": "daemon"}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(TargetConfigError, r"google_drive requires rclone sync"):
+            load_targets_file(str(self.path))
+
+    def test_state_directories_must_not_overlap(self):
+        data = fixture(self.base)
+        data["targets"]["synthetic-drive"]["state_dir"] = str(
+            self.base / "state-yandex" / "drive"
+        )
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(TargetConfigError, r"must not equal or be nested"):
+            load_targets_file(str(self.path))
+
 
 class TargetCliTests(unittest.TestCase):
     def setUp(self):
@@ -130,6 +153,33 @@ class TargetCliTests(unittest.TestCase):
         # its own ignored monitor.db in the repository root.)
         self.assertTrue((self.base / "state-drive").is_dir())
         self.assertFalse((self.base / "state-yandex").exists())
+
+    def test_target_rejects_conflicting_backend_override(self):
+        result = self.run_cli(
+            "--target", "synthetic-drive", "--backend", "api", "scan", "local"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["success"])
+        self.assertIn("conflicts with target synthetic-drive", payload["data"])
+        self.assertFalse((self.base / "state-drive").exists())
+
+    def test_target_provenance_is_persisted_for_local_scan(self):
+        local_root = self.base / "mirror-drive"
+        local_root.mkdir()
+        (local_root / "fixture.txt").write_text("synthetic", encoding="utf-8")
+        result = self.run_cli("--target", "synthetic-drive", "scan", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        db_path = self.base / "state-drive" / "monitor.db"
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT target_name, provider, inventory_kind, remote_name "
+                "FROM scans ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(
+            row,
+            ("synthetic-drive", "google_drive", "rclone", "synthetic-drive"),
+        )
 
 
 if __name__ == "__main__":
