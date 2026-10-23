@@ -5,6 +5,20 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-23 — isolated Yandex Disk and Google Drive targets
+
+- Added `ydm_targets:v1` and immutable target contexts with separate database,
+  policy, filters, locks, logs and scheduler identity.
+- Added Google Drive inventory semantics: stable object IDs, duplicate-name
+  gates, shortcuts and native Docs/Sheets/Slides classification/export.
+- Added exact-inventory download-only materialization and guarded ordinary-file
+  bisync with scope, access, delete, rename and resync gates.
+- Menu and aliases now retain the selected target and display reachability,
+  inventory, policy and sync as independent states.
+- Disposable live acceptance covered scan, selective download, two-way edit,
+  stable-ID rename, deletion isolation and native export; no live identifiers
+  or credentials are stored in the repository.
+
 ## 2026-10-12 — the documented way to stop the sync did not stop it
 
 Found while stopping it, during an outage, which is the only time anybody runs

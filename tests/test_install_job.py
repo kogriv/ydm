@@ -54,7 +54,7 @@ class InstallJobTestCase(unittest.TestCase):
             )
         os.chmod(self.stub, 0o755)
 
-    def run_it(self, command, expect_rc=0):
+    def run_it(self, command, expect_rc=0, extra_env=None):
         env = dict(os.environ)
         env.update({
             "YDM_JOB_SCHEDULER_BIN": self.stub,
@@ -64,6 +64,7 @@ class InstallJobTestCase(unittest.TestCase):
             "PENDING": self.pending,
             "HOME": self.tmpdir,
         })
+        env.update(extra_env or {})
         result = subprocess.run(
             ["bash", str(INSTALL_JOB), command],
             env=env, capture_output=True, text=True, timeout=60,
@@ -141,6 +142,17 @@ class StatusAndInstall(InstallJobTestCase):
         """Shared storage ignores chmod +x and the job then never runs."""
         self.run_it("install")
         self.assertTrue(os.access(self.target, os.X_OK))
+
+    def test_target_selection_is_persisted_for_android_scheduler(self):
+        targets = "/container/config/targets.json"
+        self.run_it("install", extra_env={
+            "YDM_TARGET": "drive", "YDM_TARGETS_FILE": targets,
+        })
+        with open(self.target + ".env", encoding="utf-8") as handle:
+            saved = handle.read()
+        self.assertIn("YDM_TARGET=drive", saved)
+        self.assertIn(f"YDM_TARGETS_FILE={targets}", saved)
+        self.assertEqual(os.stat(self.target + ".env").st_mode & 0o777, 0o600)
 
     def test_a_missing_scheduler_is_named_not_guessed_at(self):
         """The package and the Termux:API app are two separate installs, and

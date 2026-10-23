@@ -25,18 +25,30 @@
 
 set -u
 
+# install_job.sh persists the selected target next to this script.  Android's
+# scheduler does not preserve the interactive shell environment.
+[ -f "$0.env" ] && source "$0.env"
+
 DISTRO="${YDM_DISTRO:-debian}"
 YDM_DIR="${YDM_DIR:-/root/notes/pro/ydm}"
 YDM_LOCAL_ROOT="${YDM_LOCAL_ROOT:-/sdcard/Download/ya_disk}"
+YDM_TARGET="${YDM_TARGET:-}"
+YDM_TARGETS_FILE="${YDM_TARGETS_FILE:-}"
 YDM_BINDS="${YDM_BINDS:---bind /storage/emulated/0/Documents:/root/notes --bind /storage/emulated/0/Download:/root/download}"
 
 termux-wake-lock
+
+target_args=()
+if [ -n "$YDM_TARGET" ]; then
+    target_args=(--target "$YDM_TARGET" --targets-file "$YDM_TARGETS_FILE")
+fi
 
 # shellcheck disable=SC2086  # YDM_BINDS is a deliberate word-split list.
 proot-distro login "$DISTRO" $YDM_BINDS -- \
     bash "$YDM_DIR/tools/termux/job_run.sh" \
     --project-dir "$YDM_DIR" \
     --local-root "$YDM_LOCAL_ROOT" \
+    "${target_args[@]}" \
     --apply >/dev/null 2>&1
 
 termux-wake-unlock

@@ -23,6 +23,8 @@ FILTER_PATH="${YDM_BISYNC_FILTER:-}"
 DB_PATH="${YDM_DB:-}"
 PRUNE_INTERVAL_SEC="${YDM_PRUNE_INTERVAL_SEC:-86400}"
 APPLY=0
+TARGET_NAME="${YDM_TARGET:-}"
+TARGETS_FILE="${YDM_TARGETS_FILE:-}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -30,6 +32,8 @@ while [ $# -gt 0 ]; do
         --filter-path) FILTER_PATH="$2"; shift 2 ;;
         --db-path) DB_PATH="$2"; shift 2 ;;
         --project-dir) PROJECT_DIR="$2"; shift 2 ;;
+        --target) TARGET_NAME="$2"; shift 2 ;;
+        --targets-file) TARGETS_FILE="$2"; shift 2 ;;
         --prune-interval) PRUNE_INTERVAL_SEC="$2"; shift 2 ;;
         --apply) APPLY=1; shift ;;
         --no-apply) APPLY=0; shift ;;
@@ -39,6 +43,22 @@ while [ $# -gt 0 ]; do
         *) echo "job_run.sh: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+TARGET_ARGS=()
+TARGET_STATE_DIR=""
+if [ -n "$TARGET_NAME" ]; then
+    [ -n "$TARGETS_FILE" ] || { echo "job_run.sh: --targets-file is required with --target." >&2; exit 2; }
+    target_context=$(PYTHONPATH="$PROJECT_DIR" python3 - "$TARGET_NAME" "$TARGETS_FILE" <<'PY'
+import sys
+from tools.targets import resolve_target
+c = resolve_target(cli_target=sys.argv[1], targets_path=sys.argv[2])
+print("\t".join((c.local_root, c.db_path, c.bisync_filter_path, c.bisync_log_path, c.state_dir)))
+PY
+) || exit 2
+    IFS=$'\t' read -r LOCAL_ROOT DB_PATH FILTER_PATH BISYNC_LOG TARGET_STATE_DIR <<< "$target_context"
+    mkdir -p "$TARGET_STATE_DIR"
+    TARGET_ARGS=(--target "$TARGET_NAME" --targets-file "$TARGETS_FILE")
+fi
 
 if [ -z "$LOCAL_ROOT" ]; then
     echo "job_run.sh: --local-root is required (or set YDM_LOCAL_ROOT)." >&2
@@ -66,7 +86,7 @@ NOTIFY_REMOVE_BIN="${YDM_NOTIFY_REMOVE_BIN:-/data/data/com.termux/files/usr/bin/
 # must not silently replace the other. Both are ids rather than nothing, so a
 # card can be taken back once what it describes stops being true — see
 # tools/sync_common.py, SYNC_NOTIFICATION_ID.
-NOTIFY_ID="ydm-guard"
+NOTIFY_ID="ydm-guard-${TARGET_NAME:-legacy}"
 
 notify() {
     [ -x "$NOTIFY_BIN" ] || return 0
@@ -82,7 +102,7 @@ dismiss_notify() {
 # The same file sync_bisync.py appends to. It resolves this through
 # var_path(), which YDM_VAR_DIR redirects, so writing a bare `var/` here would
 # split the log in two the moment anything sets it.
-BISYNC_LOG="${YDM_VAR_DIR:-$PROJECT_DIR/var}/bisync.log"
+[ -n "${BISYNC_LOG:-}" ] || BISYNC_LOG="${YDM_VAR_DIR:-$PROJECT_DIR/var}/bisync.log"
 
 # Every run that does not do the ordinary thing says so in the log. Only
 # `sync_bisync.py` used to write there, so a guard decision left no trace at
@@ -97,6 +117,7 @@ log_decision() {
 # --- 1. rename preflight ----------------------------------------------------
 
 preflight_json=$(python3 tools/sync_rename.py preflight \
+    "${TARGET_ARGS[@]}" \
     --db-path "$DB_PATH" \
     --local-root "$LOCAL_ROOT" \
     --bisync-filter-path "$FILTER_PATH" \
@@ -151,11 +172,13 @@ case "$decision" in
         dismiss_notify
         if [ "$APPLY" -eq 1 ]; then
             python3 tools/sync_bisync.py run --apply \
+                "${TARGET_ARGS[@]}" \
                 --db-path "$DB_PATH" \
                 --local-root "$LOCAL_ROOT" \
                 --filter-path "$FILTER_PATH" >/dev/null 2>&1
         else
             python3 tools/sync_bisync.py run \
+                "${TARGET_ARGS[@]}" \
                 --db-path "$DB_PATH" \
                 --local-root "$LOCAL_ROOT" \
                 --filter-path "$FILTER_PATH"
@@ -174,7 +197,9 @@ esac
 
 [ "$APPLY" -eq 1 ] || exit 0
 
-stamp=var/prune_last
+HOUSEKEEPING_DIR="${TARGET_STATE_DIR:-$PROJECT_DIR/var}"
+mkdir -p "$HOUSEKEEPING_DIR"
+stamp="$HOUSEKEEPING_DIR/prune_last"
 now=$(date +%s)
 last=0
 if [ -f "$stamp" ]; then
@@ -188,7 +213,7 @@ if [ $(( now - last )) -ge "$PRUNE_INTERVAL_SEC" ]; then
     {
         printf "=== %s ===\n" "$(date -Is)"
         python3 ydm.py --db-path "$DB_PATH" report prune --apply --vacuum
-    } >> var/prune.log 2>&1 && printf "%s" "$now" > "$stamp"
+    } >> "$HOUSEKEEPING_DIR/prune.log" 2>&1 && printf "%s" "$now" > "$stamp"
 fi
 
 exit 0

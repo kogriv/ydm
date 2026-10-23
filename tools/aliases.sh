@@ -26,17 +26,42 @@ export YDM_ROOT
 export YDM_DB="${YDM_DB:-$YDM_ROOT/monitor.db}"
 export YDM_POLICY="${YDM_POLICY:-$YDM_ROOT/var/sync_policy.json}"
 export YDM_REMOTE="${YDM_REMOTE:-yandex}"
+export YDM_TARGET="${YDM_TARGET:-}"
+export YDM_TARGETS_FILE="${YDM_TARGETS_FILE:-}"
 
 # No default for the mirror: it is wherever you put it. Commands that need it
 # say so instead of scanning a path that happens to exist.
 export YDM_LOCAL_ROOT="${YDM_LOCAL_ROOT:-}"
 
 _ydm_need_local_root() {
+  # A named target owns its local root and all state paths.  Requiring the
+  # legacy variable here would make the target-aware tools unreachable from
+  # these wrappers, or worse, encourage two competing sources of truth.
+  if [ -n "$YDM_TARGET" ] && [ -n "$YDM_TARGETS_FILE" ]; then
+    return 0
+  fi
   if [ -z "$YDM_LOCAL_ROOT" ]; then
     echo "YDM_LOCAL_ROOT is not set — export it to your local mirror, e.g." >&2
     echo "  export YDM_LOCAL_ROOT=\"\$HOME/YandexDisk\"" >&2
     return 1
   fi
+}
+
+ydm-use-target() {
+  if [ -z "${1:-}" ]; then
+    echo "usage: ydm-use-target <name> [targets-file]" >&2
+    return 2
+  fi
+  export YDM_TARGET="$1"
+  if [ -n "${2:-}" ]; then
+    export YDM_TARGETS_FILE="$2"
+  fi
+  if [ -z "$YDM_TARGETS_FILE" ]; then
+    echo "YDM_TARGETS_FILE is not set — pass it as the second argument." >&2
+    return 2
+  fi
+  python3 "$YDM_ROOT/ydm.py" --target "$YDM_TARGET" \
+    --targets-file "$YDM_TARGETS_FILE" targets show "$YDM_TARGET"
 }
 
 # The bidirectional filter, resolved late: YDM_LOCAL_ROOT may be exported
@@ -534,5 +559,7 @@ Environment:
   YDM_POLICY         $YDM_POLICY
   YDM_BISYNC_FILTER  ${YDM_BISYNC_FILTER:-(derived from YDM_LOCAL_ROOT)}
   YDM_REMOTE         $YDM_REMOTE
+  YDM_TARGET         ${YDM_TARGET:-(legacy mode)}
+  YDM_TARGETS_FILE   ${YDM_TARGETS_FILE:-(unset)}
 EOF
 }

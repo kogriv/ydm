@@ -51,6 +51,16 @@ class NativeDocumentTests(unittest.TestCase):
         self.assertTrue(plan["artifact_path"].endswith("synthetic-native.xlsx"))
         self.assertIsNone(sync_policy.validate_export_plan(plan))
 
+    def test_rclone_export_mime_keeps_native_source_mime_from_metadata(self):
+        item = provider_for("google_drive").normalize_rclone_item({
+            "Name": "native.docx", "Size": -1, "IsDir": False,
+            "MimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "ID": "synthetic-native",
+            "Metadata": {"content-type": "application/vnd.google-apps.document"},
+        })
+        self.assertTrue(item["is_native"])
+        self.assertEqual(item["mime_type"], "application/vnd.google-apps.document")
+
     def test_bidirectional_native_or_export_is_rejected_before_filter_write(self):
         args = argparse.Namespace(db_path=self.db, local_root=self.tmp.name,
             policy_path=os.path.join(self.tmp.name, "policy.json"),

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools import sync_backends, sync_bisync, sync_policy, sync_rename
+from tools import sync_backends, sync_bisync, sync_policy
 from tools.providers import provider_for
 from tools.targets import TargetConfigError, load_targets_file
 
@@ -127,20 +127,12 @@ class Phase7SafetyTests(unittest.TestCase):
                 self.assertIn("cannot be verified", sync_backends.daemon_conflict_error(
                     google_root, os.path.join(tmp, "missing.cfg")))
 
-    def test_google_fast_rename_is_blocked_by_provider_capability(self):
+    def test_google_declares_only_supported_sync_capabilities(self):
         capabilities = provider_for("google_drive").capabilities
         self.assertTrue(capabilities.bidirectional_sync)
-        self.assertFalse(capabilities.server_side_move)
-        args = argparse.Namespace(
-            command="plan", old="/chosen/old", new="/chosen/new",
-            local_root="/tmp/synthetic", remote="synthetic",
-            policy_path="/tmp/synthetic-policy", bisync_filter_path="/tmp/synthetic-filter",
-            followup="resync", target_managed=True, provider="google_drive",
-        )
-        with mock.patch("tools.sync_rename.remote_exists") as remote:
-            result = sync_rename.preflight(args)
-        self.assertIn("does not support", result["error"])
-        remote.assert_not_called()
+        self.assertTrue(capabilities.server_side_move)
+        self.assertFalse(capabilities.revisions)
+        self.assertFalse(capabilities.trash_listing)
 
     def test_same_nested_and_symlinked_local_roots_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

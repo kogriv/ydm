@@ -109,9 +109,10 @@ class Phase6CompletionTests(unittest.TestCase):
             )
             policy["paths"] = {"chosen": {"mode": "download_only"}}
             result = sync_policy.render_filters(args, policy)
-            self.assertIn("exact inventory manifest", result["error"])
+            self.assertIsNone(result["error"])
+            self.assertIn("exact inventory manifest", result["download_filter_disabled"])
             self.assertFalse(os.path.exists(args.download_filter_path))
-            self.assertFalse(os.path.exists(args.bisync_filter_path))
+            self.assertTrue(os.path.exists(args.bisync_filter_path))
 
     def test_render_error_and_target_edit_do_not_reach_backend(self):
         policy = {"schema": sync_policy.SCHEMA, "paths": {}}

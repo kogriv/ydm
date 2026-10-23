@@ -42,6 +42,10 @@ def render_header(cfg: MenuConfig, status: MenuStatus) -> List[str]:
     lines.append(f"Backend: {cfg.backend_name}")
     if cfg.backend_error:
         lines.append(f"WARN: {_truncate(cfg.backend_error, cfg.width - 6)}")
+    lines.append(f"Reachability: {status.reachability}")
+    lines.append(f"Inventory:    {status.inventory}")
+    lines.append(f"Policy:       {status.policy}")
+    lines.append(f"Sync:         {_truncate(status.sync, cfg.width - 14)}")
     if status.bisync_fields_apply:
         lines.append(f"Status: {status.overall}   last bisync: {status.last_run_short}")
         lock = "yes" if status.lock_held else "no"

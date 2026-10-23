@@ -27,7 +27,7 @@ ALIASES = ROOT_DIR / "tools" / "aliases.sh"
 #: Every command the README's "What you get" section promises. A name dropped
 #: from the file without being dropped from the docs fails here.
 DOCUMENTED = [
-    "ydm", "ydm-menu", "ydm-cli",
+    "ydm", "ydm-menu", "ydm-cli", "ydm-use-target",
     "ydm-scan-cloud", "ydm-scan-cloud-path", "ydm-scan-local",
     "ydm-tree", "ydm-tree-path", "ydm-sync-state",
     "ydm-sync-add", "ydm-sync-pick", "ydm-sync-rm",
@@ -61,7 +61,8 @@ class AliasesTests(unittest.TestCase):
         machine the file itself exports it, and a check that inherited it
         would be testing the developer's setup instead of the default.
         """
-        env = {k: v for k, v in os.environ.items() if k != "YDM_LOCAL_ROOT"}
+        env = {k: v for k, v in os.environ.items()
+               if k not in {"YDM_LOCAL_ROOT", "YDM_TARGET", "YDM_TARGETS_FILE"}}
         env["HOME"] = self.home
         if local_root is not None:
             env["YDM_LOCAL_ROOT"] = local_root
@@ -113,6 +114,17 @@ class AliasesTests(unittest.TestCase):
         """
         proc = self.bash("_ydm_bisync_filter", local_root="/tmp/mirror")
         self.assertEqual(proc.stdout.strip(), "/tmp/mirror.bisync.filters")
+
+    def test_named_target_does_not_require_legacy_mirror_variable(self):
+        env = dict(os.environ)
+        env.update({"HOME": self.home, "YDM_TARGET": "gdrive",
+                    "YDM_TARGETS_FILE": "/tmp/targets.json"})
+        env.pop("YDM_LOCAL_ROOT", None)
+        proc = subprocess.run(
+            ["bash", "-c", f"source {ALIASES}; _ydm_need_local_root"],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_help_lists_the_commands_and_the_paths_in_effect(self):
         proc = self.bash("ydm-help --plain", local_root="/tmp/mirror")

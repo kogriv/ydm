@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sqlite3
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -34,6 +36,39 @@ class MenuStatus:
     #: against the local copy. Age alone is not a problem: on the machine this
     #: was written for, every stale file sits in an excluded folder.
     snapshot_stale: bool = False
+    # Independent planes.  A reachable remote can still have a stale or
+    # failed inventory, and a healthy inventory says nothing about bisync.
+    reachability: str = "not checked"
+    inventory: str = "no snapshot"
+    sync: str = "unknown"
+    policy: str = "not configured"
+
+
+def _apply_plane_status(cfg: MenuConfig, status: MenuStatus) -> None:
+    status.sync = status.overall
+    count = len(status.bidirectional) + len(status.download_only) + len(status.disabled)
+    status.policy = f"configured ({count} path(s))" if os.path.exists(cfg.policy_path) else "not configured"
+    try:
+        conn = sqlite3.connect(cfg.db_path)
+        conn.row_factory = sqlite3.Row
+        if cfg.target_managed:
+            row = conn.execute(
+                "SELECT id, status, timestamp FROM scans "
+                "WHERE scan_type='cloud' AND target_name=? ORDER BY id DESC LIMIT 1",
+                (cfg.target,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id, status, timestamp FROM scans "
+                "WHERE scan_type='cloud' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row:
+            status.inventory = f"{row['status']} (scan #{row['id']})"
+    except (OSError, sqlite3.Error):
+        status.inventory = "unavailable"
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 
 def _bisync_args(cfg: MenuConfig) -> argparse.Namespace:
@@ -153,13 +188,16 @@ def _apply_snapshot_freshness(cfg: MenuConfig, status: MenuStatus) -> None:
 def load_status(cfg: MenuConfig) -> MenuStatus:
     if cfg.backend_kind == "daemon":
         status = _daemon_status(cfg)
+        status.reachability = "reachable" if status.overall != "daemon not running" else "unreachable"
         _apply_snapshot_freshness(cfg, status)
+        _apply_plane_status(cfg, status)
         return status
     status = MenuStatus()
     try:
         bisync = bisync_status_payload(_bisync_args(cfg))
     except Exception as exc:
         status.warnings.append(f"bisync status: {exc}")
+        _apply_plane_status(cfg, status)
         return status
 
     state = bisync.get("state") or {}
@@ -191,4 +229,5 @@ def load_status(cfg: MenuConfig) -> MenuStatus:
     if bisync.get("error"):
         status.warnings.append(str(bisync["error"]))
     _apply_snapshot_freshness(cfg, status)
+    _apply_plane_status(cfg, status)
     return status

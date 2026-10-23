@@ -2,7 +2,31 @@
 
 # YDM - Yandex Disk Monitor
 
-Инструмент для глубокого анализа состояния Яндекс.Диска, сверки локальной копии с облаком и отслеживания динамики изменений.
+Инструмент для глубокого анализа и безопасной синхронизации Яндекс.Диска и
+Google Drive: сверка изолированных локальных копий с облаком и отслеживание
+изменений.
+
+## Несколько облачных target’ов
+
+Скопируйте [`ydm_targets.example.json`](ydm_targets.example.json) за пределы
+репозитория и замените только имена remote и абсолютные пути. Секреты должны
+оставаться в `rclone.conf` или окружении, а не в targets-файле. Для каждого
+target создаются отдельные БД, policy, фильтры, lock-файлы и логи.
+
+```bash
+export YDM_TARGETS_FILE="$HOME/.config/ydm/targets.json"
+source tools/aliases.sh
+ydm-use-target example-gdrive
+ydm-scan-cloud
+ydm-tree
+```
+
+Google Drive работает через авторизованный remote rclone. Обычные файлы
+поддерживают защищённые режимы download-only и bidirectional. Нативные
+Docs/Sheets/Slides по умолчанию остаются метаданными и экспортируются только
+явно; в общий bisync они не допускаются. Подробности:
+[`tasks/multicloud/README.md`](tasks/multicloud/README.md) и
+[`tasks/multicloud/DESIGN.md`](tasks/multicloud/DESIGN.md).
 
 ## Быстрая памятка
 

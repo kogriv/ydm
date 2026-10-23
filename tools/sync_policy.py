@@ -577,12 +577,7 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
     download_path = args.download_filter_path or download_filter_path(args.local_root)
     bisync_path = args.bisync_filter_path or bisync_filter_path(args.local_root)
     validation_error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
-    if (validation_error is None and getattr(args, "target_managed", False)
-            and download_paths):
-        validation_error = (
-            "target-managed download-only paths require download-apply with an "
-            "exact inventory manifest; path-level download filters are disabled"
-        )
+    target_managed = getattr(args, "target_managed", False)
     result = {
         "schema": SCHEMA,
         "action": "render-filters",
@@ -596,8 +591,14 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         "bisync_filter": render_filter_text(bisync_paths, check_access=True),
         "error": validation_error,
     }
+    if target_managed:
+        result["download_filter"] = None
+        result["download_filter_disabled"] = (
+            "target-managed downloads use download-apply with an exact inventory manifest"
+        )
     if args.apply and validation_error is None:
-        write_filter_file(download_path, download_paths)
+        if not target_managed:
+            write_filter_file(download_path, download_paths)
         write_filter_file(bisync_path, bisync_paths, check_access=True)
     return result
 
@@ -844,6 +845,19 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         error = f"Export plan {export_error}"
     elif export_plan and requested_mode != "download_only":
         error = "Export plans require download_only mode"
+    elif export_plan and getattr(args, "target_managed", False):
+        try:
+            _scan_id, exists, files = cloud_files_for_path(
+                args.db_path, f"/{entry}" if entry else "/")
+            matches = [item for item in files
+                       if item.object_id == export_plan["source_object_id"]]
+        except Exception as exc:
+            error = f"Export inventory is unavailable: {exc}"
+        else:
+            if (not exists or len(matches) != 1 or not matches[0].is_native
+                    or matches[0].is_shortcut
+                    or matches[0].mime_type != export_plan["source_mime_type"]):
+                error = "Export object ID/MIME does not match one native object under the policy path"
 
     result = {
         "schema": SCHEMA,
@@ -958,7 +972,10 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
         print(f"resync_needed: {payload['resync_needed']}")
     elif action == "render-filters":
         print(f"download_filter_path: {payload['download_filter_path']}")
-        print(payload["download_filter"], end="")
+        if payload.get("download_filter") is not None:
+            print(payload["download_filter"], end="")
+        elif payload.get("download_filter_disabled"):
+            print(f"download_filter: disabled ({payload['download_filter_disabled']})")
         print(f"bisync_filter_path: {payload['bisync_filter_path']}")
         print(payload["bisync_filter"], end="")
         backend_apply = payload.get("backend_apply")
@@ -1051,6 +1068,9 @@ def parse_args() -> argparse.Namespace:
     add.add_argument("--mode", choices=["auto", "bidirectional", "download_only", "disabled"], default="auto")
     add.add_argument("--apply", action="store_true")
     add.add_argument("--force-risk", action="store_true")
+    add.add_argument("--export-object-id", default=None)
+    add.add_argument("--export-mime-type", default=None)
+    add.add_argument("--export-artifact-root", default=None)
     common_flags(add)
 
     remove = subparsers.add_parser("remove")
@@ -1130,7 +1150,8 @@ def main() -> None:
             else:
                 payload = render_filters(args, policy)
                 # Also apply to backend if requested
-                if args.apply and payload.get("error") is None:
+                if (args.apply and payload.get("error") is None
+                        and not getattr(args, "target_managed", False)):
                     backend_payload = _apply_backend_policy(args, policy)
                     payload["backend_apply"] = backend_payload
         elif args.command == "download-plan":
@@ -1150,6 +1171,25 @@ def main() -> None:
                 "schema": "ydm_native_export_result:v1", "action": "native-export",
                 "dry_run": not args.apply, "error": f"Policy not found: {args.policy_path}"})
         elif args.command == "add":
+            export_object_id = getattr(args, "export_object_id", None)
+            export_mime_type = getattr(args, "export_mime_type", None)
+            if export_object_id or export_mime_type:
+                if not (export_object_id and export_mime_type):
+                    raise ValueError("native export requires both --export-object-id and --export-mime-type")
+                if not getattr(args, "target_managed", False) or args.provider != "google_drive":
+                    raise ValueError("native export planning requires a target-managed Google Drive target")
+                if getattr(args, "native_docs", None) != "export":
+                    raise ValueError("target native_docs must be export")
+                from tools.providers import provider_for
+                artifact_root = (getattr(args, "export_artifact_root", None)
+                                 or os.path.join(args.local_root, "native-exports"))
+                args.export_plan = provider_for(args.provider).export_plan(
+                    object_id=export_object_id,
+                    mime_type=export_mime_type,
+                    artifact_root=artifact_root,
+                )
+            else:
+                args.export_plan = None
             payload = add_policy_path(args)
             if args.apply and payload.get("error") is None:
                 if getattr(args, "target_managed", False):

@@ -14,9 +14,12 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${YDM_JOB_PATH:-$HOME/ydm_bisync_job.sh}"
+TARGET_NAME="${YDM_TARGET:-legacy}"
+TARGET="${YDM_JOB_PATH:-$HOME/ydm_bisync_job-${TARGET_NAME}.sh}"
 PERIOD_MS="${YDM_JOB_PERIOD_MS:-1800000}"
-JOB_ID="${YDM_JOB_ID:-31415}"
+# Stable per-target Android id. Explicit YDM_JOB_ID still wins.
+TARGET_SUM=$(printf '%s' "$TARGET_NAME" | cksum | awk '{print $1}')
+JOB_ID="${YDM_JOB_ID:-$((31415 + TARGET_SUM % 20000))}"
 # One name for the binary, so the existence check and the calls cannot
 # disagree, and so a test can point it at a recorder and assert on the
 # arguments — the same reason job_run.sh names termux-notification through a
@@ -36,7 +39,16 @@ need_termux() {
 case "${1:-}" in
     install)
         need_termux
+        if [ "$TARGET_NAME" != "legacy" ] && [ -z "${YDM_TARGETS_FILE:-}" ]; then
+            echo "YDM_TARGETS_FILE is required when YDM_TARGET selects a target." >&2
+            exit 2
+        fi
         cp "$HERE/ydm_bisync_job.sh" "$TARGET"
+        if [ "$TARGET_NAME" != "legacy" ]; then
+            printf 'YDM_TARGET=%q\nYDM_TARGETS_FILE=%q\n' \
+                "$TARGET_NAME" "$YDM_TARGETS_FILE" > "$TARGET.env"
+            chmod 600 "$TARGET.env"
+        fi
         chmod +x "$TARGET"
         if [ ! -x "$TARGET" ]; then
             echo "$TARGET is not executable after chmod +x." >&2

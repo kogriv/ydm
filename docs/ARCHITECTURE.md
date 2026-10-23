@@ -8,6 +8,21 @@
 
 Утилита строится по принципу разделения ответственности (SoC). Интерфейс (CLI) отделен от бизнес-логики и работы с данными.
 
+### Multi-cloud target boundary
+
+`ydm_targets:v1` отделяет провайдера от транспорта inventory и движка sync.
+После выбора target создаётся неизменяемый `TargetContext`; из него выводятся
+local root, SQLite DB, policy, filters, locks, rename/bisync state и logs.
+Действия меню и scheduler получают уже выбранный context и не выполняют
+повторный auto-detect. Google Drive и Yandex могут использовать rclone как
+транспорт, но provider adapter отдельно задаёт identity, native documents,
+shortcuts, rename и trash/revision capabilities.
+
+Главный инвариант: ни один runtime path одного target не пересекается с другим;
+одинаковые или вложенные `local_root`/`state_dir` отклоняются при валидации.
+Path-level download-фильтры не используются: download-only строится по точному
+inventory manifest, а bidirectional имеет отдельный фильтр и baseline gate.
+
 ### Основные слои:
 1.  **View (CLI):** Обработка аргументов, форматирование вывода (Text/JSON/Table).
 2.  **Service (Collector/Analyzer):** Логика сбора данных (API/Disk) и их анализа (Diff).

@@ -122,7 +122,7 @@ gate.
 | 7.5 | Filter hash/resync gate ✅ | bisync | changed scope cannot normal-run before resync |
 | 7.6 | Delete/access safeguards ✅ | bisync | marker + max-delete + preview mandatory |
 | 7.7 | Rename strategy capability-aware ✅ | sync rename | server-side move only when provider advertises it |
-| 7.8 | Disposable live round-trip | private acceptance | create/edit/rename/delete fixture; no unrelated changes |
+| 7.8 | Disposable live round-trip ✅ | private acceptance | create/edit/rename/delete fixture; no unrelated changes |
 
 **Exit:** bidirectional mode доступен только для доказуемо материализируемых
 обычных файлов в disposable-tested scope.
@@ -134,10 +134,10 @@ gate.
 | 8.1 | Target selector/header ✅ | `ydm_menu.py` | active target/provider всегда видимы |
 | 8.2 | Immutable target through actions ✅ | menu modules | action не выполняет повторный auto-detect |
 | 8.3 | Target-aware sync tree ✅ | `sync_tree.py` | policy/local/cloud читаются из одного context |
-| 8.4 | Target-aware aliases | `tools/aliases.sh` | explicit target; no host paths in repo |
-| 8.5 | Scheduler instance per target | termux/systemd helpers | separate job, lock, log and notification ID |
-| 8.6 | Status separates reachability/inventory/sync | status/menu | четыре состояния не схлопнуты в `OK/error` |
-| 8.7 | Cross-target bench | tests | Google action cannot mutate Yandex fixtures and наоборот |
+| 8.4 | Target-aware aliases ✅ | `tools/aliases.sh` | explicit target; no host paths in repo |
+| 8.5 | Scheduler instance per target ✅ | termux/systemd helpers | separate job, lock, log and notification ID |
+| 8.6 | Status separates reachability/inventory/sync ✅ | status/menu | четыре состояния не схлопнуты в `OK/error` |
+| 8.7 | Cross-target bench ✅ | tests | Google action cannot mutate Yandex fixtures and наоборот |
 
 **Exit:** обычная эксплуатация не требует вручную передавать DB/policy/filter
 paths и не может незаметно выбрать другой target.
@@ -146,10 +146,10 @@ paths и не может незаметно выбрать другой target.
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 9.1 | Capability-routed trash/cleanup | provider modules | unsupported operations explicit; plan→apply preserved |
-| 9.2 | Google server-side move/rename | provider adapter | ID continuity checked in disposable fixture |
-| 9.3 | Evaluate Google delta API | design addendum | measurement before implementation decision |
-| 9.4 | Evaluate Shared Drives | design addendum | root/permissions/shortcuts documented |
+| 9.1 | Capability-routed trash/cleanup ✅ | provider modules | unsupported operations explicit; plan→apply preserved |
+| 9.2 | Google server-side move/rename ✅ | provider adapter | ID continuity checked in disposable fixture |
+| 9.3 | Evaluate Google delta API ✅ | [`GOOGLE_DRIVE_EVALUATION.md`](./GOOGLE_DRIVE_EVALUATION.md) | measurement before implementation decision |
+| 9.4 | Evaluate Shared Drives ✅ | [`GOOGLE_DRIVE_EVALUATION.md`](./GOOGLE_DRIVE_EVALUATION.md) | root/permissions/shortcuts documented |
 | 9.5 | Secret/privacy scan of publishable commits | release checklist | diff + messages + filenames + fixtures inspected |
 | 9.6 | Clean-checkout promotion rehearsal | private workflow | selected commits apply and tests pass without private overlay |
 | 9.7 | Public docs migration | README/architecture/changelog | only after feature gates and sanitized evidence |

@@ -65,13 +65,21 @@ class GoogleDriveProvider(ProviderAdapter):
     capabilities = Capabilities(
         stable_object_id=True, duplicate_sibling_names=True,
         content_hashes=frozenset({"md5"}), native_documents=True, shortcuts=True,
-        revisions=False, trash_listing=False, server_side_move=False,
+        revisions=False, trash_listing=False, server_side_move=True,
         bidirectional_sync=True,
     )
 
     def normalize_rclone_item(self, entry: Mapping[str, Any]) -> dict[str, Any]:
         item = super().normalize_rclone_item(entry)
-        mime_type = item["mime_type"] or ""
+        # With Drive export formats enabled rclone exposes the downloadable
+        # Office MIME in MimeType, while the actual Google-native MIME remains
+        # in metadata.content-type. Identity/export planning must use the
+        # source type, not the representation selected for download.
+        source_mime = (item["metadata"].get("content-type")
+                       or item["metadata"].get("Content-Type") or "")
+        mime_type = (source_mime if source_mime.startswith("application/vnd.google-apps.")
+                     else (item["mime_type"] or ""))
+        item["mime_type"] = mime_type
         is_shortcut = bool(entry.get("IsShortcut", False)) or mime_type == "application/vnd.google-apps.shortcut"
         is_native = (
             mime_type.startswith("application/vnd.google-apps.")

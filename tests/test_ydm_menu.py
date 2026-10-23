@@ -280,6 +280,10 @@ class MenuStatusTests(MenuTestCase):
         self.assertTrue(
             status.overall.startswith(("OK", "NEEDS RESYNC", "CHECK", "BUSY"))
         )
+        self.assertEqual(status.reachability, "not checked")
+        self.assertEqual(status.inventory, "success (scan #1)")
+        self.assertIn("configured", status.policy)
+        self.assertEqual(status.sync, status.overall)
 
     def test_daemon_status_uses_the_daemon_not_bisync_terms(self):
         from tools.sync_common import CommandResult

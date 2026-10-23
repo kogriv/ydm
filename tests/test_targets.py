@@ -181,6 +181,31 @@ class TargetCliTests(unittest.TestCase):
             ("synthetic-drive", "google_drive", "rclone", "synthetic-drive"),
         )
 
+    def test_actions_are_isolated_from_the_other_target_state(self):
+        """A selected target may create only its own state and database."""
+        for name in ("mirror-drive", "mirror-yandex"):
+            root = self.base / name
+            root.mkdir()
+            (root / "fixture.txt").write_text(name, encoding="utf-8")
+
+        y_state = self.base / "state-yandex"
+        y_state.mkdir()
+        y_sentinel = y_state / "sentinel"
+        y_sentinel.write_text("yandex-unchanged", encoding="utf-8")
+        result = self.run_cli("--target", "synthetic-drive", "scan", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(y_sentinel.read_text(encoding="utf-8"), "yandex-unchanged")
+        self.assertEqual(sorted(p.name for p in y_state.iterdir()), ["sentinel"])
+
+        d_state = self.base / "state-drive"
+        d_sentinel = d_state / "sentinel"
+        d_sentinel.write_text("drive-unchanged", encoding="utf-8")
+        before = {p.name: p.read_bytes() for p in d_state.iterdir() if p.is_file()}
+        result = self.run_cli("--target", "synthetic-yandex", "scan", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = {p.name: p.read_bytes() for p in d_state.iterdir() if p.is_file()}
+        self.assertEqual(after, before)
+
 
 if __name__ == "__main__":
     unittest.main()

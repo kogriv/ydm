@@ -33,7 +33,7 @@ case "$*" in
         exit "${STUB_PREFLIGHT_RC:-0}"
         ;;
     *sync_bisync.py*)
-        echo "bisync" >> "$STUB_TRACE"
+        echo "$*" >> "$STUB_TRACE"
         exit 0
         ;;
 esac
@@ -78,7 +78,7 @@ class JobRunTestCase(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def run_job(self, decision, reason, rc=0):
+    def run_job(self, decision, reason, rc=0, extra_args=None):
         """Drive the script with a preflight that answers `decision`/`reason`."""
         envelope = os.path.join(self.tmpdir, "preflight.json")
         with open(envelope, "w", encoding="utf-8") as handle:
@@ -99,9 +99,11 @@ class JobRunTestCase(unittest.TestCase):
             "NOTIFY_LOG": self.notify_log,
             "DISMISS_LOG": self.dismiss_log,
         })
+        command = ["bash", str(JOB_RUN), "--local-root", self.mirror,
+                   "--db-path", os.path.join(self.tmpdir, "monitor.db")]
+        command.extend(extra_args or [])
         result = subprocess.run(
-            ["bash", str(JOB_RUN), "--local-root", self.mirror,
-             "--db-path", os.path.join(self.tmpdir, "monitor.db")],
+            command,
             env=env, capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -166,12 +168,12 @@ class GuardDecisionsReachTheLog(JobRunTestCase):
         notification shade was in on 2026-09-13.
         """
         self.run_job("block_bisync", "ambiguous_candidates")
-        self.assertIn("--id ydm-guard", self.notifications()[0], self.notifications())
+        self.assertIn("--id ydm-guard-legacy", self.notifications()[0], self.notifications())
 
     def test_a_clean_run_takes_the_card_back(self):
         """The guard let this run through, so its last complaint is over."""
         self.run_job("allow_bisync", "no_candidates")
-        self.assertEqual(self.dismissals(), ["ydm-guard"], self.dismissals())
+        self.assertEqual(self.dismissals(), ["ydm-guard-legacy"], self.dismissals())
 
     def test_a_blocked_run_does_not_take_it_back(self):
         self.run_job("block_bisync", "ambiguous_candidates")
@@ -221,25 +223,45 @@ class AnAbsentGuardIsNotAPassingGuard(JobRunTestCase):
         self.assertTrue(self.bisync_ran())
 
     def test_an_error_inside_the_envelope_is_written_down_too(self):
-        """The exit code is 0: sync_rename reports errors in its JSON.
-
-        So the rc test cannot see this one, and without a line of its own a run
-        with no guard at all is indistinguishable from a clean one — which is
-        exactly how issue #5 stayed invisible for hours.
-        """
+        """A JSON-reported guard error is distinct from a clean pass."""
         self.run_job("allow_bisync", "error", rc=0)
         self.assertIn("allow_bisync (error)", self.log())
         self.assertTrue(self.bisync_ran())
 
     def test_an_ordinary_pass_says_nothing_and_runs(self):
-        """The guard passing is the common case; it must not add noise.
-
-        `sync_bisync.py` already writes its own line for the run itself.
-        """
         self.run_job("allow_bisync", "no_candidates")
         self.assertEqual(self.log(), "")
         self.assertTrue(self.bisync_ran())
 
+
+class TargetSchedulerIsolation(JobRunTestCase):
+    def test_target_owns_arguments_log_and_notification_id(self):
+        target_state = os.path.join(self.tmpdir, "state-drive")
+        target_root = os.path.join(self.tmpdir, "mirror-drive")
+        os.makedirs(target_root)
+        targets = os.path.join(self.tmpdir, "targets.json")
+        with open(targets, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "ydm_targets:v1",
+                "default_target": "drive",
+                "targets": {"drive": {
+                    "provider": "google_drive",
+                    "inventory": {"kind": "rclone", "remote": "fixture"},
+                    "sync": {"kind": "rclone", "remote": "fixture"},
+                    "local_root": target_root,
+                    "state_dir": target_state,
+                    "config_profile": "test",
+                }},
+            }, handle)
+        self.run_job(
+            "block_bisync", "ambiguous_candidates",
+            extra_args=["--target", "drive", "--targets-file", targets],
+        )
+        target_log = os.path.join(target_state, "bisync.log")
+        self.assertTrue(os.path.exists(target_log))
+        with open(target_log, encoding="utf-8") as handle:
+            self.assertIn("block_bisync", handle.read())
+        self.assertIn("--id ydm-guard-drive", self.notifications()[0])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
