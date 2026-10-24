@@ -586,7 +586,8 @@ class StorageManager:
                               "content_hash", "is_native", "is_shortcut", "metadata_json"}
             indexes = {row[1] for row in conn.execute("PRAGMA index_list(files)")}
             if (required_scans <= scans and required_files <= files and
-                    {"idx_files_object_id", "idx_files_path_legacy"} <= indexes):
+                    {"idx_files_object_id", "idx_files_path_legacy"} <= indexes and
+                    "idx_files_unique" not in indexes):
                 return
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -709,7 +710,6 @@ class StorageManager:
                 );
                 """,
                 "CREATE INDEX IF NOT EXISTS idx_files_parent ON files(scan_id, parent_path);",
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_unique ON files(scan_id, parent_path, name);",
                 "CREATE INDEX IF NOT EXISTS idx_scans_type ON scans(scan_type);",
                 "CREATE INDEX IF NOT EXISTS idx_progress_scan ON scan_progress(scan_id, status);"
             ]
@@ -827,7 +827,6 @@ class StorageManager:
             );
             """,
             "CREATE INDEX IF NOT EXISTS idx_files_parent ON files(scan_id, parent_path);",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_unique ON files(scan_id, parent_path, name);",
             "CREATE INDEX IF NOT EXISTS idx_scans_type ON scans(scan_type);",
             "CREATE INDEX IF NOT EXISTS idx_progress_scan ON scan_progress(scan_id, status);"
         ]
@@ -1026,12 +1025,30 @@ class StorageManager:
                              "md5" if md5 is not None else None, md5,
                              0, 0, None))
         conn = self.get_connection()
-        conn.executemany(
-            f"INSERT INTO files ({self._FILE_COLUMNS}) VALUES ({','.join('?' for _ in range(16))})",
-            rows,
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.executemany(
+                f"INSERT INTO files ({self._FILE_COLUMNS}) VALUES ({','.join('?' for _ in range(16))})",
+                rows,
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            # executemany may already have inserted part of the batch.  Keep
+            # that partial transaction from locking the tmpfs DB while the
+            # scan records its failed status and checkpoints diagnostics.
+            conn.rollback()
+            object_ids = [row[8] for row in rows]
+            legacy_keys = [(row[1], row[2]) for row in rows if row[8] is None]
+            raise sqlite3.IntegrityError(
+                f"{exc}; batch_rows={len(rows)}, "
+                f"missing_object_ids={len(legacy_keys)}, "
+                f"duplicate_legacy_keys={len(legacy_keys) - len(set(legacy_keys))}, "
+                f"duplicate_object_ids={len([item for item in object_ids if item is not None]) - len(set(item for item in object_ids if item is not None))}"
+            ) from exc
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         
         # Обновить счетчик для checkpoint
         self.last_checkpoint_files += len(rows)

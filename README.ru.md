@@ -28,6 +28,9 @@ Docs/Sheets/Slides по умолчанию остаются метаданным
 [`tasks/multicloud/README.md`](tasks/multicloud/README.md) и
 [`tasks/multicloud/DESIGN.md`](tasks/multicloud/DESIGN.md).
 
+Пошаговая безопасная первоначальная настройка без запуска синхронизации:
+[`docs/MULTICLOUD_SETUP_RUNBOOK.md`](docs/MULTICLOUD_SETUP_RUNBOOK.md).
+
 ## Быстрая памятка
 
 Сразу после клонирования, без какой-либо настройки:

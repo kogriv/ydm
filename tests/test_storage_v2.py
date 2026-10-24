@@ -95,6 +95,37 @@ class StorageV2Test(unittest.TestCase):
                          "VALUES (?, '/docs', 'other', 'file', 'obj-a')", (scan_id,))
         conn.close()
 
+    def test_reinitializing_v2_does_not_restore_legacy_name_uniqueness(self):
+        storage = StorageManager(self.db_path, use_temp_storage=False, config=dict(DEFAULT_CONFIG))
+        self.assertTrue(storage.init_db()[0])
+        self.assertTrue(storage.init_db()[0])
+        with sqlite3.connect(self.db_path) as conn:
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list(files)")}
+        self.assertIn("idx_files_object_id", indexes)
+        self.assertIn("idx_files_path_legacy", indexes)
+        self.assertNotIn("idx_files_unique", indexes)
+
+    def test_failed_batch_does_not_leave_database_locked(self):
+        storage = StorageManager(self.db_path, use_temp_storage=False, config=dict(DEFAULT_CONFIG))
+        self.assertTrue(storage.init_db()[0])
+        scan_id = storage.start_scan("cloud")
+        rows = [
+            {"scan_id": scan_id, "parent_path": "/docs", "name": "same",
+             "type": "file", "object_id": None},
+            {"scan_id": scan_id, "parent_path": "/docs", "name": "same",
+             "type": "file", "object_id": None},
+        ]
+        with self.assertRaises(sqlite3.IntegrityError):
+            storage.save_files_batch(rows)
+        storage.finish_scan(scan_id, "failed", 0)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT status FROM scans WHERE id=?", (scan_id,)
+            ).fetchone()[0], "failed")
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM files WHERE scan_id=?", (scan_id,)
+            ).fetchone()[0], 0)
+
     def test_future_schema_refuses_writes(self):
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA user_version=99")
