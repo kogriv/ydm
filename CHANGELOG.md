@@ -5,6 +5,25 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-24 — the default job kept its id
+
+The multicloud change of 2026-10-23 derived the Android job id from the target
+name for every target, `legacy` included: the default job's id went from 31415
+to 50076 and its script from `~/ydm_bisync_job.sh` to
+`~/ydm_bisync_job-legacy.sh`. Nothing broke on the device — the job was already
+off — but for anyone with a job installed before that, `install_job.sh remove`
+cancelled an id that had never been registered, found nothing pending under it
+and printed "not scheduled" while the old job kept running every half hour.
+That is the failure of 2026-10-12 reached by a different road.
+
+- **The default target is 31415 and `~/ydm_bisync_job.sh` again**, which is
+  what `docs/ANDROID_SETUP.md` and the hand-off notes name. A named target keeps
+  its own derived id, now in 31416–51414, so none can land on the default's.
+  The first formula could: the name `cagd` gave exactly 31415.
+- **Eight tests for it** (`JobIdentity` in `tests/test_install_job.py`). The
+  harness pinned `YDM_JOB_ID` and `YDM_JOB_PATH`, which is why nothing had
+  noticed the default move; the tests unpin them. Six mutations checked.
+
 ## 2026-10-23 — isolated Yandex Disk and Google Drive targets
 
 - Added `ydm_targets:v1` and immutable target contexts with separate database,

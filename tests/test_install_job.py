@@ -55,6 +55,8 @@ class InstallJobTestCase(unittest.TestCase):
         os.chmod(self.stub, 0o755)
 
     def run_it(self, command, expect_rc=0, extra_env=None):
+        """`extra_env` overrides the pinned values; a value of None removes the
+        variable, which is the only way to see what the script does by default."""
         env = dict(os.environ)
         env.update({
             "YDM_JOB_SCHEDULER_BIN": self.stub,
@@ -64,7 +66,11 @@ class InstallJobTestCase(unittest.TestCase):
             "PENDING": self.pending,
             "HOME": self.tmpdir,
         })
-        env.update(extra_env or {})
+        for key, value in (extra_env or {}).items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         result = subprocess.run(
             ["bash", str(INSTALL_JOB), command],
             env=env, capture_output=True, text=True, timeout=60,
@@ -162,6 +168,74 @@ class StatusAndInstall(InstallJobTestCase):
         self.assertIn("termux-job-scheduler not found", result.stderr)
         self.assertIn("termux-api", result.stderr)
         self.assertEqual(self.calls_made(), [])
+
+
+class JobIdentity(InstallJobTestCase):
+    """Which Android job id and which script a target gets, with nothing pinned.
+
+    The harness pins YDM_JOB_ID and YDM_JOB_PATH so the other tests do not care.
+    That hid the multicloud change of 2026-10-23, which derived the id from the
+    target name for *every* target, `legacy` included: 31415 became 50076 and
+    `~/ydm_bisync_job.sh` became `~/ydm_bisync_job-legacy.sh`. A job installed
+    before that stays registered under 31415, so `remove` cancelled an id that
+    was never there, found nothing pending under it, and reported "not
+    scheduled" with the old job still running every half hour — the same shape
+    as the bug of 2026-10-12, reached by a different road.
+    """
+
+    UNPINNED = {"YDM_JOB_ID": None, "YDM_JOB_PATH": None}
+    TARGETS = "/container/config/targets.json"
+
+    def named(self, name, **more):
+        env = dict(self.UNPINNED, YDM_TARGET=name, YDM_TARGETS_FILE=self.TARGETS)
+        env.update(more)
+        return env
+
+    def install_id(self, env):
+        self.run_it("install", extra_env=env)
+        argv = self.calls_made()[-1]
+        return int(argv.split("--job-id ")[1].split()[0])
+
+    def test_the_default_target_keeps_the_id_installs_already_have(self):
+        self.assertEqual(self.install_id(self.UNPINNED), 31415)
+
+    def test_remove_cancels_the_id_install_registered(self):
+        """Whatever install picked, remove must pick the same."""
+        self.run_it("remove", extra_env=self.UNPINNED)
+        self.assertEqual(self.calls_made()[0], "--cancel --job-id 31415")
+
+    def test_the_default_target_keeps_the_script_path_the_docs_name(self):
+        """`~/ydm_bisync_job.sh` is what ANDROID_SETUP.md, the README and the
+        hand-off notes tell the owner to diff against."""
+        result = self.run_it("install", extra_env=self.UNPINNED)
+        self.assertIn(f"-> {self.tmpdir}/ydm_bisync_job.sh (every", result.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, "ydm_bisync_job.sh")))
+
+    def test_a_named_target_gets_an_id_of_its_own(self):
+        ids = {name: self.install_id(self.named(name)) for name in ("drive", "gdrive", "yandex")}
+        self.assertEqual(len(set(ids.values())), 3, ids)
+        self.assertNotIn(31415, ids.values())
+
+    def test_a_named_targets_id_is_the_same_every_time(self):
+        """Android keys the job by id, so an id that moves between runs leaves
+        the old job behind every time install is repeated."""
+        self.assertEqual(
+            self.install_id(self.named("drive")), self.install_id(self.named("drive"))
+        )
+
+    def test_a_named_target_never_lands_on_the_default_ones_id(self):
+        """`cagd` is a name whose checksum made the first formula give exactly
+        31415 — it would have taken the default target's job over."""
+        self.assertNotEqual(self.install_id(self.named("cagd")), 31415)
+
+    def test_a_named_target_is_removed_by_the_id_it_was_installed_under(self):
+        env = self.named("drive")
+        installed = self.install_id(env)
+        self.run_it("remove", extra_env=env)
+        self.assertIn(f"--cancel --job-id {installed}", self.calls_made())
+
+    def test_an_explicit_job_id_still_wins(self):
+        self.assertEqual(self.install_id(self.named("drive", YDM_JOB_ID="777")), 777)
 
 
 if __name__ == "__main__":
