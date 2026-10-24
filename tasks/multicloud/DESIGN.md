@@ -1,6 +1,6 @@
 # Multi-cloud targets — Design
 
-*Дата:* 2026-10-23  
+*Дата:* 2026-10-23
 *Scope:* Yandex Disk остаётся совместимым по поведению; Google Drive получает
 эквивалентные inventory, diff и policy workflows через rclone там, где
 семантика провайдера это позволяет.
@@ -427,4 +427,3 @@ Read-only модель ещё не умеет выразить duplicate names �
 - Нужно ли сохранять весь rclone metadata JSON или allowlist полей.
 - Provider delta API для Google после стабильного полного scan.
 - Публичное переименование YDM; оно не блокирует архитектуру targets.
-

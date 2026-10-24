@@ -1,7 +1,7 @@
 # Multi-cloud targets — Backlog
 
-*Дата:* 2026-10-23  
-*Дизайн:* [`DESIGN.md`](./DESIGN.md)  
+*Дата:* 2026-10-23
+*Дизайн:* [`DESIGN.md`](./DESIGN.md)
 *Scope:* добавить Google Drive как изолированный target, не меняя существующее
 Yandex поведение и не допуская попадания live account data в публикуемый Git.
 
@@ -193,4 +193,3 @@ Phase 1 targets
 - Native documents cannot enter bidirectional sync.
 - Read-only, download-only and bidirectional gates have independent acceptance.
 - No live credentials, IDs, filenames, DB or logs exist in publishable commits.
-

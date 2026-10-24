@@ -1,6 +1,6 @@
 # Google Drive delta and Shared Drives evaluation
 
-*Date:* 2026-10-23  
+*Date:* 2026-10-23
 *Status:* design decision; no credentials or live identifiers
 
 ## Change feed
