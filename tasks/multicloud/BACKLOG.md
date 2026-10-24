@@ -24,13 +24,13 @@ write-path, пока предыдущая не умеет корректно п�
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 1.1 | Добавить `TargetConfig` и `TargetContext` | new `tools/targets.py` | immutable resolved context содержит provider, inventory, sync, local/state paths |
-| 1.2 | Parser `ydm_targets:v1` | `tools/targets.py` | unknown/missing keys дают path-specific error |
-| 1.3 | Resolution: CLI → env → default → legacy | `ydm.py`, tools | все четыре приоритета покрыты тестами |
-| 1.4 | Производные paths только из `state_dir` | target helpers | ни один state file не использует глобальный `var/` при активном target |
-| 1.5 | `targets list|show|validate` | `ydm.py` или отдельный tool | offline, JSON + text, без обращения к remote |
-| 1.6 | Example config без реальных данных | `ydm_targets.example.json` | synthetic paths/remotes only |
-| 1.7 | Legacy regression suite | tests | без targets-файла CLI и defaults побайтно совместимы где возможно |
+| 1.1 | Добавить `TargetConfig` и `TargetContext` ✅ | new `tools/targets.py` | immutable resolved context содержит provider, inventory, sync, local/state paths |
+| 1.2 | Parser `ydm_targets:v1` ✅ | `tools/targets.py` | unknown/missing keys дают path-specific error |
+| 1.3 | Resolution: CLI → env → default → legacy ✅ | `ydm.py`, tools | все четыре приоритета покрыты тестами |
+| 1.4 | Производные paths только из `state_dir` ✅ | target helpers | ни один state file не использует глобальный `var/` при активном target |
+| 1.5 | `targets list|show|validate` ✅ | `ydm.py` или отдельный tool | offline, JSON + text, без обращения к remote |
+| 1.6 | Example config без реальных данных ✅ | `ydm_targets.example.json` | synthetic paths/remotes only |
+| 1.7 | Legacy regression suite ✅ | tests | без targets-файла CLI и defaults побайтно совместимы где возможно |
 
 **Exit:** два synthetic targets не разделяют ни одного writable state path.
 
@@ -38,13 +38,13 @@ write-path, пока предыдущая не умеет корректно п�
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 2.1 | Версионирование schema | `ydm.py`/new storage module | версия читается до scan; unsupported future schema не открывается на запись |
-| 2.2 | Добавить scan source columns | storage migration | target/provider/inventory/remote сохранены |
-| 2.3 | Добавить cloud identity/metadata columns | storage migration | object/parent IDs, MIME, hash type, native/shortcut flags |
-| 2.4 | Заменить path unique index partial indexes | storage migration | sibling duplicate names сохраняются; duplicate object ID отвергается |
-| 2.5 | Compatibility projection `md5` | storage/analyzer | старые MD5 reports не ломаются |
-| 2.6 | Транзакционная миграция legacy DB | tests + migration | rollback при fault injection; повторный запуск idempotent |
-| 2.7 | Checkpoint/restore с новой schema | `StorageManager` tests | tmpfs → disk → resume сохраняет все новые поля |
+| 2.1 | Версионирование schema ✅ | `ydm.py`/new storage module | версия читается до scan; unsupported future schema не открывается на запись |
+| 2.2 | Добавить scan source columns ✅ | storage migration | target/provider/inventory/remote сохранены |
+| 2.3 | Добавить cloud identity/metadata columns ✅ | storage migration | object/parent IDs, MIME, hash type, native/shortcut flags |
+| 2.4 | Заменить path unique index partial indexes ✅ | storage migration | sibling duplicate names сохраняются; duplicate object ID отвергается |
+| 2.5 | Compatibility projection `md5` ✅ | storage/analyzer | старые MD5 reports не ломаются |
+| 2.6 | Транзакционная миграция legacy DB ✅ | tests + migration | rollback при fault injection; повторный запуск idempotent |
+| 2.7 | Checkpoint/restore с новой schema ✅ | `StorageManager` tests | tmpfs → disk → resume сохраняет все новые поля |
 
 **Exit:** fake Google scan хранит два одинаковых path/name с разными IDs без
 потери строк; legacy Yandex DB остаётся читаемой.
@@ -53,13 +53,13 @@ write-path, пока предыдущая не умеет корректно п�
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 3.1 | Разделить `CloudResourceClient` и sync backend | `ydm.py`, `tools/sync_backends.py` | выбор inventory не выбирает sync engine |
-| 3.2 | `Capabilities` contract | new provider module | команды проверяют capability до execution |
-| 3.3 | Нормализовать rclone `ID`, `MimeType`, metadata, hashes | `RcloneClient` | ни одно доступное identity поле не теряется |
-| 3.4 | Определение native docs и shortcuts | Google provider adapter | fixtures всех типов классифицируются явно |
-| 3.5 | Ошибка listing не превращается в пустую папку | scanner | failed folder keeps scan incomplete; no false deletions |
-| 3.6 | `targets doctor` read-only probe | CLI | about/list/capabilities; никаких upload/delete/mkdir |
-| 3.7 | Retry policy per folder | rclone inventory | transient failure retry bounded; resume сохраняется |
+| 3.1 | Разделить `CloudResourceClient` и sync backend ✅ | `ydm.py`, `tools/sync_backends.py` | выбор inventory не выбирает sync engine |
+| 3.2 | `Capabilities` contract ✅ | new provider module | команды проверяют capability до execution |
+| 3.3 | Нормализовать rclone `ID`, `MimeType`, metadata, hashes ✅ | `RcloneClient` | ни одно доступное identity поле не теряется |
+| 3.4 | Определение native docs и shortcuts ✅ | Google provider adapter | fixtures всех типов классифицируются явно |
+| 3.5 | Ошибка listing не превращается в пустую папку ✅ | scanner | failed folder keeps scan incomplete; no false deletions |
+| 3.6 | `targets doctor` read-only probe ✅ | CLI | about/list/capabilities; никаких upload/delete/mkdir |
+| 3.7 | Retry policy per folder ✅ | rclone inventory | transient failure retry bounded; resume сохраняется |
 
 **Exit:** shallow Google scan завершается в отдельной DB и содержит IDs/MIME;
 искусственный listing failure не выглядит успешным пустым деревом.
@@ -68,13 +68,13 @@ write-path, пока предыдущая не умеет корректно п�
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 4.1 | `report status/scan-list/scan-info` target-aware | analyzer/CLI | target/provider видны в text и JSON |
-| 4.2 | Diff classification strong/weak/uncomparable | Analyzer | hash, size+mtime и native metadata не смешиваются |
-| 4.3 | Sibling-name collision report | Analyzer | обе cloud строки видны; status=`materialization_conflict` |
-| 4.4 | Duplicate report по typed hash | Analyzer | сравниваются только одинаковые hash types; unhashable count отдельно |
-| 4.5 | Long paths/tree для Google inventory | reports/tree | работают без local root |
-| 4.6 | Unsupported provider reports | CLI | revision/trash-specific команда возвращает structured unsupported, не traceback |
-| 4.7 | Read-only live validation | private runbook/results outside Git | временная DB, никакого apply |
+| 4.1 | `report status/scan-list/scan-info` target-aware ✅ | analyzer/CLI | target/provider видны в text и JSON |
+| 4.2 | Diff classification strong/weak/uncomparable ✅ | Analyzer | hash, size+mtime и native metadata не смешиваются |
+| 4.3 | Sibling-name collision report ✅ | Analyzer | обе cloud строки видны; status=`materialization_conflict` |
+| 4.4 | Duplicate report по typed hash ✅ | Analyzer | сравниваются только одинаковые hash types; unhashable count отдельно |
+| 4.5 | Long paths/tree для Google inventory ✅ | reports/tree | работают без local root |
+| 4.6 | Unsupported provider reports ✅ | CLI | revision/trash-specific команда возвращает structured unsupported, не traceback |
+| 4.7 | Read-only live validation ✅ | private runbook/results outside Git | временная DB, никакого apply |
 
 **Exit:** Google Drive можно безопасно инвентаризировать и анализировать без
 создания локальной копии.
@@ -83,12 +83,12 @@ write-path, пока предыдущая не умеет корректно п�
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 5.1 | `native_docs=metadata|export|skip` validation | target config | default metadata; unknown mode refused |
-| 5.2 | Metadata-only diff semantics | Analyzer | native doc не помечается missing local |
-| 5.3 | Export plan schema | provider adapter | source ID, MIME, format и artifact path сохранены |
-| 5.4 | Export только download-only | policy validator | bidirectional native/export rejected before filter write |
-| 5.5 | Shortcut inventory semantics | scanner/tree | shortcut отдельный; target content не дублируется под shortcut path |
-| 5.6 | Sanitized fixtures | tests | никаких captured live IDs/names |
+| 5.1 | `native_docs=metadata|export|skip` validation ✅ | target config | default metadata; unknown mode refused |
+| 5.2 | Metadata-only diff semantics ✅ | Analyzer | native doc не помечается missing local |
+| 5.3 | Export plan schema ✅ | provider adapter | source ID, MIME, format и artifact path сохранены |
+| 5.4 | Export только download-only ✅ | policy validator | bidirectional native/export rejected before filter write |
+| 5.5 | Shortcut inventory semantics ✅ | scanner/tree | shortcut отдельный; target content не дублируется под shortcut path |
+| 5.6 | Sanitized fixtures ✅ | tests | никаких captured live IDs/names |
 
 **Exit:** native documents и shortcuts не могут молча попасть в обычный file
 bisync.
@@ -97,13 +97,13 @@ bisync.
 
 | ID | Task | Files | Acceptance |
 |---|---|---|---|
-| 6.1 | Policy v2 target binding | `sync_policy.py` | target/remote/root mismatch blocks apply |
-| 6.2 | Target-scoped download filters | sync filters | filters written only under target state/local root |
-| 6.3 | Collision/native preflight | policy validator | unmaterializable paths excluded with actionable reason |
-| 6.4 | Download plan + dry-run | sync backend | exact source/destination/filter shown |
-| 6.5 | Disposable filesystem-remote E2E | sync bench | selected paths copied, disabled absent, cleanup automatic |
-| 6.6 | Disposable live Google folder | private acceptance | upload fixture separately, download, compare, remove fixture |
-| 6.7 | Remove flow keeps local by default | menu/policy | local deletion requires explicit choice and successful check |
+| 6.1 | Policy v2 target binding ✅ | `sync_policy.py` | target/remote/root mismatch blocks apply |
+| 6.2 | Target-scoped download filters ✅ | sync filters | filters written only under target state/local root |
+| 6.3 | Collision/native preflight ✅ | policy validator | unmaterializable paths excluded with actionable reason |
+| 6.4 | Download plan + dry-run ✅ | sync backend | exact source/destination/filter shown |
+| 6.5 | Disposable filesystem-remote E2E ✅ | sync bench | selected paths copied, disabled absent, cleanup automatic |
+| 6.6 | Disposable live Google folder ✅ | private acceptance | upload fixture separately, download, compare, remove fixture |
+| 6.7 | Remove flow keeps local by default ✅ | menu/policy | local deletion requires explicit choice and successful check |
 | 6.8 | Execute validated native export plans ✅ | provider/download backend | exact object ID and declared format are exported only to the bound artifact path; no generic copy/bisync |
 
 **Exit:** selected ordinary files and optional exports can be downloaded without
