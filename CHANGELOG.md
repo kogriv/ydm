@@ -5,6 +5,27 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-25 — a watcher for the cloud coming back
+
+During the outage of 2026-10-11 the only way to learn that Yandex Disk's
+resource API was answering again was to ask it. `rclone about` is no use for
+that: it hits `/v1/disk`, which answered 200 throughout.
+
+- **`tools/cloud_probe.py`** asks `/v1/disk/resources?path=/` and
+  `/resources/files`; the root decides. `check` prints one verdict and exits 0,
+  10 or 11 (open, closed, could not tell); `watch` also remembers it, logs a
+  line to `var/cloud_watch.log` and sends a card only when the picture changes.
+- **Silence is the failure mode, so the quiet cases are handled.** A card is
+  taken back when the disk closes again; a rejected token is refreshed through
+  `rclone about` and, if still rejected, reported once; a dead signal does not
+  count as a change; a crash of the watcher itself leaves an `error …` line.
+- **Job 31413, every 4 hours**, installed by `tools/termux/install_watch.sh`
+  through `install_job.sh` (which now takes its script from `YDM_JOB_TEMPLATE`),
+  so its `remove` carries the same `--pending` check. It never starts the sync.
+- **Tests:** `tests/test_cloud_probe.py` (32) and `CloudWatcherInstall` (7) in
+  `tests/test_install_job.py`; 23 mutations, each fails a test. The Termux
+  wrapper itself has not been run end to end on the device — see the PR.
+
 ## 2026-10-24 — the default job kept its id
 
 The multicloud change of 2026-10-23 derived the Android job id from the target

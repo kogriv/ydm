@@ -24,6 +24,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_JOB = ROOT / "tools" / "termux" / "install_job.sh"
+INSTALL_WATCH = ROOT / "tools" / "termux" / "install_watch.sh"
+TERMUX = ROOT / "tools" / "termux"
 
 
 class InstallJobTestCase(unittest.TestCase):
@@ -54,7 +56,7 @@ class InstallJobTestCase(unittest.TestCase):
             )
         os.chmod(self.stub, 0o755)
 
-    def run_it(self, command, expect_rc=0, extra_env=None):
+    def run_it(self, command, expect_rc=0, extra_env=None, script=None):
         """`extra_env` overrides the pinned values; a value of None removes the
         variable, which is the only way to see what the script does by default."""
         env = dict(os.environ)
@@ -72,7 +74,7 @@ class InstallJobTestCase(unittest.TestCase):
             else:
                 env[key] = value
         result = subprocess.run(
-            ["bash", str(INSTALL_JOB), command],
+            ["bash", str(script or INSTALL_JOB), command],
             env=env, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, expect_rc, result.stderr)
@@ -236,6 +238,70 @@ class JobIdentity(InstallJobTestCase):
 
     def test_an_explicit_job_id_still_wins(self):
         self.assertEqual(self.install_id(self.named("drive", YDM_JOB_ID="777")), 777)
+
+
+class CloudWatcherInstall(InstallJobTestCase):
+    """install_watch.sh: the same installer under another job id and script.
+
+    The watcher must never share a registration with the sync job. Android keys
+    a job by id, so one id for both would make installing the watcher replace
+    the sync job (or removing it cancel the sync) with nothing said.
+    """
+
+    def watch(self, command, **kwargs):
+        return self.run_it(command, script=INSTALL_WATCH, **kwargs)
+
+    def test_it_registers_its_own_job_every_four_hours(self):
+        self.watch("install")
+        argv = self.calls_made()[0]
+        self.assertIn("--job-id 31413", argv)
+        self.assertIn("--period-ms 14400000", argv)
+        self.assertIn("--persisted true", argv)
+        self.assertIn(f"--script {self.tmpdir}/ydm_cloud_watch.sh", argv)
+
+    def test_it_never_takes_the_sync_jobs_id(self):
+        self.watch("install")
+        self.assertNotIn("31415", self.calls_made()[0])
+
+    def test_it_installs_the_watcher_script_not_the_sync_one(self):
+        self.watch("install")
+        with open(os.path.join(self.tmpdir, "ydm_cloud_watch.sh"), encoding="utf-8") as handle:
+            installed = handle.read()
+        with open(TERMUX / "cloud_watch_job.sh", encoding="utf-8") as handle:
+            self.assertEqual(installed, handle.read())
+        self.assertIn("cloud_probe.py", installed)
+        self.assertNotIn("job_run.sh", installed)
+
+    def test_the_plain_installer_still_installs_the_sync_script(self):
+        self.run_it("install")
+        with open(self.target, encoding="utf-8") as handle:
+            installed = handle.read()
+        with open(TERMUX / "ydm_bisync_job.sh", encoding="utf-8") as handle:
+            self.assertEqual(installed, handle.read())
+
+    def test_removing_the_watcher_leaves_the_sync_job_alone(self):
+        self.write_pending(
+            "Pending Job 31415: /data/data/com.termux/files/home/ydm_bisync_job.sh"
+            "\t(periodic: 1800000ms) (persisted)"
+        )
+        result = self.watch("remove")
+        self.assertIn("--cancel --job-id 31413", self.calls_made())
+        self.assertNotIn("--cancel --job-id 31415", self.calls_made())
+        self.assertIn("Job 31413 is not scheduled", result.stdout)
+
+    def test_a_watcher_that_survived_the_cancel_is_reported(self):
+        self.write_pending(
+            "Pending Job 31413: /data/data/com.termux/files/home/ydm_cloud_watch.sh"
+            "\t(periodic: 14400000ms) (persisted)"
+        )
+        result = self.watch("remove", expect_rc=1)
+        self.assertIn("STILL scheduled", result.stderr)
+
+    def test_a_target_left_in_the_shell_does_not_change_what_it_is(self):
+        """The watcher is about the API, not about a target; a named-target
+        install would also refuse to run without a targets file."""
+        self.watch("install", extra_env={"YDM_TARGET": "drive"})
+        self.assertIn("--job-id 31413", self.calls_made()[0])
 
 
 if __name__ == "__main__":

@@ -202,6 +202,41 @@ up to `--max-delete` files per run. `--check-access` and the delete cap stop the
 wholesale case; neither stops a small real loss. Before putting the job back,
 check a few policy folders with `rclone check … --size-only`.
 
+#### Knowing when the cloud is back
+
+While the sync is off after an outage, something has to notice that the API is
+answering again. `tools/cloud_probe.py` asks the one question that matters — does
+`/v1/disk/resources?path=/` answer 200 — and a second Android job runs it:
+
+```bash
+# From Termux, or from the container with the Termux path spelled out:
+YDM_WATCH_JOB_PATH=/data/data/com.termux/files/home/ydm_cloud_watch.sh \
+    bash tools/termux/install_watch.sh install
+bash tools/termux/install_watch.sh status     # lists every pending job
+bash tools/termux/install_watch.sh remove     # same --pending check as the sync job's
+```
+
+Job `31413`, every 4 hours (`YDM_WATCH_PERIOD_MS`), script `~/ydm_cloud_watch.sh`
+— its own id and file, so it never replaces or cancels the sync job. From the
+container `$HOME` is `/root`, which is why the path above is explicit; the
+scheduler only sees Termux's filesystem.
+
+What it does and does not do:
+
+- **It reads and never writes**, and it never starts the sync. The card it sends
+  says the disk answers and points at the checklist in the incident note, because
+  a reopened disk is not yet a safe one.
+- **One card per change**, not one per run, and the card is taken back if the disk
+  closes again. A rejected token is reported once too, after trying to refresh it
+  through `rclone about`: a watcher that cannot log in is as quiet as a healthy
+  one watching a closed disk.
+- **Its output is thrown away on purpose**; the record is `var/cloud_watch.log`,
+  one line per run (`closed root=410 files=410`), and `error …` if the watcher
+  itself broke. If no new lines appear, the job is not running.
+
+By hand: `python3 tools/cloud_probe.py check` prints the verdict and exits 0
+(open), 10 (closed) or 11 (could not tell).
+
 Point the job at your own paths by exporting before `install`, or by editing
 the copy:
 
