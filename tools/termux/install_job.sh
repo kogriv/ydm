@@ -15,11 +15,25 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_NAME="${YDM_TARGET:-legacy}"
-TARGET="${YDM_JOB_PATH:-$HOME/ydm_bisync_job-${TARGET_NAME}.sh}"
 PERIOD_MS="${YDM_JOB_PERIOD_MS:-1800000}"
-# Stable per-target Android id. Explicit YDM_JOB_ID still wins.
-TARGET_SUM=$(printf '%s' "$TARGET_NAME" | cksum | awk '{print $1}')
-JOB_ID="${YDM_JOB_ID:-$((31415 + TARGET_SUM % 20000))}"
+# The default target is the job every existing install already has: id 31415,
+# script ~/ydm_bisync_job.sh. Both are what ANDROID_SETUP.md names, and the id
+# is how Android keys the job — so a different id here means `install` adds a
+# second job beside the old one and `remove` cancels an id that was never
+# registered, finds nothing pending under it and reports "not scheduled" while
+# the old job keeps running. Only a named target (YDM_TARGET) gets ids of its
+# own; they live strictly above 31415 so none can take the default's place.
+if [ "$TARGET_NAME" = "legacy" ]; then
+    DEFAULT_JOB_ID=31415
+    DEFAULT_TARGET="$HOME/ydm_bisync_job.sh"
+else
+    TARGET_SUM=$(printf '%s' "$TARGET_NAME" | cksum | awk '{print $1}')
+    DEFAULT_JOB_ID=$((31416 + TARGET_SUM % 19999))
+    DEFAULT_TARGET="$HOME/ydm_bisync_job-${TARGET_NAME}.sh"
+fi
+TARGET="${YDM_JOB_PATH:-$DEFAULT_TARGET}"
+# Explicit YDM_JOB_ID still wins.
+JOB_ID="${YDM_JOB_ID:-$DEFAULT_JOB_ID}"
 # One name for the binary, so the existence check and the calls cannot
 # disagree, and so a test can point it at a recorder and assert on the
 # arguments — the same reason job_run.sh names termux-notification through a

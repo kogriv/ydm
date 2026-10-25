@@ -169,9 +169,15 @@ registers it. Both steps matter:
   the container. The repository copy is a template; re-run `install` after
   editing it, or the two drift.
 
-Defaults, all overridable by environment variable: job id `31415`, period
-30 minutes (`YDM_JOB_PERIOD_MS`), persisted across reboots, skipped when
-battery or storage is low. Android will not schedule anything more often than
+Defaults, all overridable by environment variable: job id `31415` (`YDM_JOB_ID`),
+period 30 minutes (`YDM_JOB_PERIOD_MS`), persisted across reboots, skipped when
+battery or storage is low.
+
+The id and the script path above are for the default target. A named target
+(`YDM_TARGET`, with `YDM_TARGETS_FILE`) gets its own: an id derived from the
+name, always above 31415, stable between runs, and
+`~/ydm_bisync_job-<name>.sh`. `install` prints the id it registered; `remove`
+needs the same `YDM_TARGET` to cancel it, and `status` lists every job. Android will not schedule anything more often than
 every 15 minutes, and treats the period as a suggestion in any case.
 
 #### Pausing it, and putting it back
