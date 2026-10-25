@@ -16,6 +16,9 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_NAME="${YDM_TARGET:-legacy}"
 PERIOD_MS="${YDM_JOB_PERIOD_MS:-1800000}"
+# What `install` copies. install_watch.sh points this at the watcher's script;
+# everything else here — the id, the pending check in `remove` — serves both.
+TEMPLATE="${YDM_JOB_TEMPLATE:-ydm_bisync_job.sh}"
 # The default target is the job every existing install already has: id 31415,
 # script ~/ydm_bisync_job.sh. Both are what ANDROID_SETUP.md names, and the id
 # is how Android keys the job — so a different id here means `install` adds a
@@ -57,7 +60,7 @@ case "${1:-}" in
             echo "YDM_TARGETS_FILE is required when YDM_TARGET selects a target." >&2
             exit 2
         fi
-        cp "$HERE/ydm_bisync_job.sh" "$TARGET"
+        cp "$HERE/$TEMPLATE" "$TARGET"
         if [ "$TARGET_NAME" != "legacy" ]; then
             printf 'YDM_TARGET=%q\nYDM_TARGETS_FILE=%q\n' \
                 "$TARGET_NAME" "$YDM_TARGETS_FILE" > "$TARGET.env"
