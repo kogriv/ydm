@@ -436,7 +436,14 @@ def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: b
     lines = [line + "\n" for line in filter_lines(include_dirs, check_access=check_access,
                                                    exclude=exclude, ignore=ignore)]
     if os.path.exists(resolved):
-        backup = f"{resolved}.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup = f"{resolved}.bak.{stamp}"
+        if not os.access(os.path.dirname(resolved) or ".", os.W_OK):
+            # The file can be ours in a directory that is not: /data/ya_disk's
+            # filters sit in /data, which belongs to root. The backup then goes
+            # to var/ instead of failing the write it was meant to protect.
+            backup = os.path.join(var_path("filter_backups"), f"{os.path.basename(resolved)}.bak.{stamp}")
+            os.makedirs(os.path.dirname(backup), exist_ok=True)
         with open(resolved, "rb") as src, open(backup, "wb") as dst:
             dst.write(src.read())
     with open(resolved, "w") as handle:

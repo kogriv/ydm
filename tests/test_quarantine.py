@@ -206,6 +206,37 @@ class TestIgnoreBuildOutput(QuarantineCase):
         self.assertNotIn("ignore", sync_policy.load_policy(self.policy_path))
 
 
+class TestFilterInADirectoryThatIsNotOurs(unittest.TestCase):
+    """/data/ya_disk's filters sit in /data, which belongs to root: the files are
+    created once, owned by the user, and rewritten in place. The backup taken
+    before each rewrite cannot go next to them, so it goes to var/."""
+
+    def test_rewrite_succeeds_and_backs_up_into_var(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can write anywhere; the case does not arise")
+        with tempfile.TemporaryDirectory() as tmp:
+            locked = os.path.join(tmp, "data")
+            os.makedirs(locked)
+            target = os.path.join(locked, "ya_disk.bisync.filters")
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write("+ /old/**\n- **\n")
+            var = os.path.join(tmp, "var")
+            os.chmod(locked, 0o555)
+            try:
+                with patch("tools.sync_policy.var_path",
+                           side_effect=lambda name: os.path.join(var, name)):
+                    sync_policy.write_filter_file(target, ["pro"], check_access=True)
+            finally:
+                os.chmod(locked, 0o755)
+            with open(target, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "+ /pro/**\n+ /RCLONE_TEST\n- **\n")
+            backups = os.listdir(os.path.join(var, "filter_backups"))
+            self.assertEqual(len(backups), 1)
+            with open(os.path.join(var, "filter_backups", backups[0]), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "+ /old/**\n- **\n")
+            self.assertEqual(sorted(os.listdir(locked)), ["ya_disk.bisync.filters"])
+
+
 class TestQuarantineCli(QuarantineCase):
     def test_cli_round_trip(self):
         out = io.StringIO()
