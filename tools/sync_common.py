@@ -414,22 +414,18 @@ def path_exists_in_snapshot(analyzer: Analyzer, snapshot, path: str) -> bool:
         target_name = Path(normalized).name
     conn = storage.get_connection()
     try:
-        if parent_db == "":
-            if target_name == "":
-                row = conn.execute(
-                    "SELECT 1 FROM files WHERE scan_id = ? LIMIT 1",
-                    (scan_id,),
-                ).fetchone()
-                return row is not None
+        if parent_db == "" and target_name == "":
             row = conn.execute(
-                """
-                SELECT 1 FROM files
-                WHERE scan_id = ? AND parent_path = '' AND name = ? AND type = 'dir'
-                LIMIT 1
-                """,
-                (scan_id, target_name),
+                "SELECT 1 FROM files WHERE scan_id = ? LIMIT 1",
+                (scan_id,),
             ).fetchone()
             return row is not None
+        # A folder at the root used to be looked up only as a row of its own
+        # serving scan. When that scan is rooted at the folder itself (`scan
+        # cloud --path /pro`) it holds the folder's children, not the folder,
+        # and /pro, /brtn and /DAO came out as path_not_found on 2026-10-29.
+        # The children fallback below already covered nested paths; it now
+        # covers the root level too.
         row = conn.execute(
             """
             SELECT 1 FROM files

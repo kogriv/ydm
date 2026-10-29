@@ -964,6 +964,22 @@ class TestFolderWithOnlySubfolders(AnalyzerTestCase):
         snapshot = build_composite_snapshot(self.analyzer)
         self.assertTrue(path_exists_in_snapshot(self.analyzer, snapshot, "/pro/physon"))
 
+    def test_a_folder_at_the_root_scanned_on_its_own_exists(self):
+        """2026-10-29: after `scan cloud --path /pro` the policy refused /pro as
+        path_not_found — its serving scan was rooted at /pro and held only its
+        children, and the root level had no children fallback."""
+        from tools.sync_common import build_composite_snapshot, path_exists_in_snapshot
+
+        self._base()
+        self.insert_scan(2, "cloud", "success", scan_root="/pro")
+        self.insert_files(2, [
+            ("/pro", "mathcoach", "dir", 0, None),
+            ("/pro/mathcoach", "new.txt", "file", 1, None),
+        ])
+        snapshot = build_composite_snapshot(self.analyzer)
+        self.assertTrue(path_exists_in_snapshot(self.analyzer, snapshot, "/pro"))
+        self.assertFalse(path_exists_in_snapshot(self.analyzer, snapshot, "/nope"))
+
     def test_the_files_under_it_are_the_ones_the_risk_check_reads(self):
         """`inspect_path` checks every file under the path for Android-hostile
         names, and reads them through this. Served from a base that never saw
