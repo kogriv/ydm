@@ -394,10 +394,33 @@ def filter_glob_escape(path: str) -> str:
     return "".join("\\" + char if char in "\\*?[]{}" else char for char in path)
 
 
+def ignore_rules(ignore: Optional[Dict[str, List[str]]]) -> List[str]:
+    """Exclusion rules for generated files under a synced path.
+
+    A pattern ending in `/` is a directory at any depth below the path
+    (`build/`, `__pycache__/`); anything else is a file name glob at any depth
+    (`*.log`, `*.aux`). The path is escaped, the pattern is a glob on purpose.
+    `**/` in an rclone rule needs at least one directory in between, so each
+    pattern gets a rule for the path's own level and one for everything below.
+    """
+    rules: List[str] = []
+    for base in sorted(ignore or {}):
+        root = "/" + filter_glob_escape(base)
+        for pattern in sorted(set(ignore[base])):
+            if pattern.endswith("/"):
+                name = pattern.rstrip("/")
+                rules += [f"- {root}/{name}/**", f"- {root}/**/{name}/**"]
+            else:
+                rules += [f"- {root}/{pattern}", f"- {root}/**/{pattern}"]
+    return rules
+
+
 def filter_lines(include_dirs: Iterable[str], *, check_access: bool = False,
-                 exclude: Iterable[str] = ()) -> List[str]:
-    """Rule lines, first match wins: quarantine, then includes, then the rest out."""
+                 exclude: Iterable[str] = (),
+                 ignore: Optional[Dict[str, List[str]]] = None) -> List[str]:
+    """Rule lines, first match wins: quarantine, ignored build output, includes, the rest out."""
     lines = [f"- /{filter_glob_escape(entry)}" for entry in sorted(set(exclude)) if entry]
+    lines += ignore_rules(ignore)
     lines += [f"+ /{filter_glob_escape(entry)}/**" for entry in sorted(set(include_dirs)) if entry]
     if check_access:
         lines.append(f"+ /{CHECK_ACCESS_FILENAME}")
@@ -406,11 +429,12 @@ def filter_lines(include_dirs: Iterable[str], *, check_access: bool = False,
 
 
 def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: bool = False,
-                      exclude: Iterable[str] = ()) -> None:
+                      exclude: Iterable[str] = (),
+                      ignore: Optional[Dict[str, List[str]]] = None) -> None:
     resolved = os.path.expanduser(path)
     os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
     lines = [line + "\n" for line in filter_lines(include_dirs, check_access=check_access,
-                                                   exclude=exclude)]
+                                                   exclude=exclude, ignore=ignore)]
     if os.path.exists(resolved):
         backup = f"{resolved}.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         with open(resolved, "rb") as src, open(backup, "wb") as dst:
@@ -420,8 +444,10 @@ def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: b
 
 
 def render_filter_text(include_dirs: Iterable[str], *, check_access: bool = False,
-                       exclude: Iterable[str] = ()) -> str:
-    return "\n".join(filter_lines(include_dirs, check_access=check_access, exclude=exclude)) + "\n"
+                       exclude: Iterable[str] = (),
+                       ignore: Optional[Dict[str, List[str]]] = None) -> str:
+    return "\n".join(filter_lines(include_dirs, check_access=check_access,
+                                  exclude=exclude, ignore=ignore)) + "\n"
 
 
 def cloud_files_for_path(db_path: str, path: str) -> Tuple[int, bool, List[CloudFile]]:
@@ -648,9 +674,12 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         "download_paths": download_paths,
         "bisync_paths": bisync_paths,
         "quarantine": quarantine_paths(policy),
-        "download_filter": render_filter_text(download_paths, exclude=quarantine_paths(policy)),
+        "ignore": policy.get("ignore", {}),
+        "download_filter": render_filter_text(download_paths, exclude=quarantine_paths(policy),
+                                              ignore=policy.get("ignore")),
         "bisync_filter": render_filter_text(bisync_paths, check_access=True,
-                                            exclude=quarantine_paths(policy)),
+                                            exclude=quarantine_paths(policy),
+                                            ignore=policy.get("ignore")),
         "error": validation_error,
     }
     if target_managed:
@@ -660,9 +689,10 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         )
     if args.apply and validation_error is None:
         if not target_managed:
-            write_filter_file(download_path, download_paths, exclude=quarantine_paths(policy))
+            write_filter_file(download_path, download_paths, exclude=quarantine_paths(policy),
+                              ignore=policy.get("ignore"))
         write_filter_file(bisync_path, bisync_paths, check_access=True,
-                          exclude=quarantine_paths(policy))
+                          exclude=quarantine_paths(policy), ignore=policy.get("ignore"))
     return result
 
 
@@ -873,6 +903,7 @@ def status_payload(args: argparse.Namespace) -> dict:
         "download_only_paths": policy_paths_by_mode(policy, "download_only") if policy else [],
         "disabled_paths": policy_paths_by_mode(policy, "disabled") if policy else [],
         "quarantine": (policy or {}).get("quarantine", {}),
+        "ignore": (policy or {}).get("ignore", {}),
         "bisync_state": state,
         "resync_needed": (not state_hash or current_bisync_hash != state_hash),
         "error": None if policy else f"Policy not found: {args.policy_path}",
@@ -1010,6 +1041,66 @@ def quarantine_policy_path(args: argparse.Namespace) -> dict:
             policy["quarantine"] = quarantine
         else:
             policy.pop("quarantine", None)
+        policy["updated_at"] = datetime.now().isoformat()
+        write_policy(args.policy_path, policy)
+    return result
+
+
+IGNORE_PATTERN_FORBIDDEN = ("/", "**")
+
+
+def ignore_policy_pattern(args: argparse.Namespace) -> dict:
+    """Leave generated files under a synced path out of sync: build output that
+    every device makes for itself and that would otherwise travel back and forth
+    on every run between two bisync clients. Policy only, like quarantine: the
+    filters change on `render-filters --apply`, and bisync then wants a resync."""
+    policy = load_policy(args.policy_path)
+    result = {"schema": SCHEMA, "action": "ignore", "dry_run": not args.apply,
+              "policy_path": args.policy_path, "error": None}
+    if not policy:
+        result["error"] = f"Policy not found: {args.policy_path}"
+        return result
+    ignore = {base: list(patterns) for base, patterns in policy.get("ignore", {}).items()}
+    if args.path is None:
+        result["ignore"] = ignore
+        return result
+    base = normalize_entry(args.path)
+    result["path"] = f"/{base}"
+    if not base or not any(base == p or base.startswith(p + "/") for p in effective_download_paths(policy)):
+        result["error"] = f"/{base} is not a synced path or inside one"
+        return result
+    patterns = args.pattern or []
+    if not patterns:
+        result["error"] = "--pattern is required (e.g. build/  __pycache__/  *.log)"
+        return result
+    for pattern in patterns:
+        core = pattern[:-1] if pattern.endswith("/") else pattern
+        if not core or any(bad in core for bad in IGNORE_PATTERN_FORBIDDEN) or core in (".", ".."):
+            result["error"] = (f"Pattern {pattern!r}: a name or a name glob, optionally ending "
+                               f"in '/' for a directory; no path separators and no '**'")
+            return result
+    current = set(ignore.get(base, []))
+    if args.remove:
+        missing = [p for p in patterns if p not in current]
+        if missing:
+            result["error"] = f"Not ignored under /{base}: {', '.join(missing)}"
+            return result
+        current -= set(patterns)
+    else:
+        current |= set(patterns)
+    if current:
+        ignore[base] = sorted(current)
+    else:
+        ignore.pop(base, None)
+    result["ignore"] = ignore
+    result["rules"] = ignore_rules({base: ignore[base]}) if base in ignore else []
+    result["next"] = ["sync_policy.py render-filters --apply",
+                      "sync_bisync.py resync --apply  (the filter changed)"]
+    if args.apply:
+        if ignore:
+            policy["ignore"] = ignore
+        else:
+            policy.pop("ignore", None)
         policy["updated_at"] = datetime.now().isoformat()
         write_policy(args.policy_path, policy)
     return result
@@ -1201,6 +1292,14 @@ def parse_args() -> argparse.Namespace:
     quarantine.add_argument("--apply", action="store_true")
     common_flags(quarantine)
 
+    ignore = subparsers.add_parser(
+        "ignore", help="leave generated files (build/, __pycache__/, *.log) under a synced path out of sync")
+    ignore.add_argument("--path", default=None, help="omit to list")
+    ignore.add_argument("--pattern", action="append", default=None)
+    ignore.add_argument("--remove", action="store_true")
+    ignore.add_argument("--apply", action="store_true")
+    common_flags(ignore)
+
     remove = subparsers.add_parser("remove")
     remove.add_argument("--path", required=True)
     remove.add_argument("--apply", action="store_true")
@@ -1374,6 +1473,8 @@ def main() -> None:
             payload = (native_export_action(args, policy) if policy else {
                 "schema": "ydm_native_export_result:v1", "action": "native-export",
                 "dry_run": not args.apply, "error": f"Policy not found: {args.policy_path}"})
+        elif args.command == "ignore":
+            payload = ignore_policy_pattern(args)
         elif args.command == "quarantine":
             payload = quarantine_policy_path(args)
         elif args.command == "add":

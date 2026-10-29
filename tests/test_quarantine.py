@@ -54,7 +54,7 @@ class QuarantineCase(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def ns(self, **kw):
-        base = dict(policy_path=self.policy_path, path=None, reason=None, remove=False,
+        base = dict(policy_path=self.policy_path, path=None, reason=None, remove=False, pattern=None,
                     apply=True, local_root=self.local_root, remote="yandex",
                     download_filter_path=None, bisync_filter_path=None, format="json",
                     text_header=False, db_path=os.path.join(self.tmp, "monitor.db"))
@@ -145,6 +145,65 @@ class TestQuarantineInFilters(QuarantineCase):
         # The device's filter hash must not change just because the code did.
         self.assertEqual(self.render()["bisync_filter"],
                          "+ /Books/Deti/**\n+ /RCLONE_TEST\n- **\n")
+
+
+class TestIgnoreBuildOutput(QuarantineCase):
+    """2026-10-29: pro/physon is synced by both the PC and the phone, and its
+    build output (build/, __pycache__/, *.log, *.aux) is remade on every build:
+    36 of its files went to the trash on 10-25 alone. The owner chose to keep
+    it out of sync on both ends."""
+
+    PATTERNS = ["build/", "__pycache__/", "*.log", "*.aux"]
+
+    def ignore(self, **kw):
+        return sync_policy.ignore_policy_pattern(self.ns(**kw))
+
+    def setUp(self):
+        super().setUp()
+        policy = sync_policy.load_policy(self.policy_path)
+        policy["paths"]["pro/physon"] = {"mode": "bidirectional"}
+        sync_policy.write_policy(self.policy_path, policy)
+
+    def test_rules_cover_the_path_level_and_every_level_below(self):
+        self.assertIsNone(self.ignore(path="/pro/physon", pattern=self.PATTERNS)["error"])
+        text = self.render()["bisync_filter"].splitlines()
+        for rule in ("- /pro/physon/build/**", "- /pro/physon/**/build/**",
+                     "- /pro/physon/__pycache__/**", "- /pro/physon/**/__pycache__/**",
+                     "- /pro/physon/*.log", "- /pro/physon/**/*.log",
+                     "- /pro/physon/*.aux", "- /pro/physon/**/*.aux"):
+            self.assertIn(rule, text)
+            self.assertLess(text.index(rule), text.index("+ /pro/physon/**"))
+
+    def test_survives_a_rewrite(self):
+        self.ignore(path="/pro/physon", pattern=self.PATTERNS)
+        self.render()
+        self.render()
+        with open(os.path.join(self.tmp, "ya_disk.bisync.filters"), encoding="utf-8") as handle:
+            self.assertIn("- /pro/physon/**/build/**", handle.read())
+
+    def test_rules_still_parse_cleanly(self):
+        self.ignore(path="/pro/physon", pattern=self.PATTERNS)
+        self.render()
+        parsed = load_sync_filters(os.path.join(self.tmp, "ya_disk.bisync.filters"))
+        self.assertEqual(parsed.warnings, [])
+
+    def test_outside_synced_paths_is_refused(self):
+        self.assertIn("not a synced path", self.ignore(path="/Books/Math", pattern=["build/"])["error"])
+
+    def test_patterns_cannot_reach_out_of_the_path(self):
+        for bad in ("a/b", "**", "../x", "/", ""):
+            self.assertIsNotNone(self.ignore(path="/pro/physon", pattern=[bad])["error"], bad)
+
+    def test_remove_one_pattern_then_the_last(self):
+        self.ignore(path="/pro/physon", pattern=["build/", "*.log"])
+        self.ignore(path="/pro/physon", pattern=["*.log"], remove=True)
+        self.assertEqual(sync_policy.load_policy(self.policy_path)["ignore"], {"pro/physon": ["build/"]})
+        self.ignore(path="/pro/physon", pattern=["build/"], remove=True)
+        self.assertNotIn("ignore", sync_policy.load_policy(self.policy_path))
+
+    def test_dry_run_writes_nothing(self):
+        self.ignore(path="/pro/physon", pattern=["build/"], apply=False)
+        self.assertNotIn("ignore", sync_policy.load_policy(self.policy_path))
 
 
 class TestQuarantineCli(QuarantineCase):
