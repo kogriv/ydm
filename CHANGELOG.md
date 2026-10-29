@@ -5,6 +5,33 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-29 — a subfolder of an excluded branch can be synced again
+
+The guard below made adding `/Books/Deti` impossible rather than dangerous:
+the daemon's index still remembers the whole of `Books` from before August,
+and un-excluding any part of it with that index in place is a deletion. Three
+changes make it possible, in the safe direction.
+
+- **`--reset-daemon-index`** (`add`, `remove`, `render-filters`). The daemon is
+  stopped, and confirmed stopped, before anything changes; the index (`.sync/~*`)
+  is moved into `.sync/index-before-reset-<time>/`; only then is the new
+  exclude list written and the daemon started. Without an index the daemon
+  merges: what is only in the cloud is downloaded, what is only local is
+  uploaded, a differing file gets a conflict copy, and nothing is deleted
+  because nothing is remembered. The new list never meets the old index: if
+  the index cannot be moved, the config is not written.
+- **A refused apply no longer leaves the policy changed.** `add` and `remove`
+  write the policy first and apply it second; a refusal used to keep the new
+  path in the policy, where the next apply of anything would carry it along.
+  The same holds for the menu's add.
+- **The siblings to exclude must come from a listing less than a day old**
+  (`ydm.py scan cloud --path <parent> --depth 1`). The 10-29 attempt used
+  scan #93 from August.
+- **A config other than the live one is a rehearsal.** `yandex-disk start/stop`
+  take no config argument, so restarting for a temp config restarted the
+  operator's daemon; it is now written and the daemon left alone, and an index
+  reset for it is refused.
+
 ## 2026-10-29 — the guard against the August deletion let the August deletion through
 
 A session adding `/Books/Deti` to sync ran `sync_policy.py add --apply

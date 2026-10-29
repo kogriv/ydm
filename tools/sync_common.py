@@ -485,6 +485,18 @@ def stop_start_daemon() -> Dict[str, CommandResult]:
     }
 
 
+def stop_daemon() -> CommandResult:
+    return run_command(["yandex-disk", "stop"])
+
+
+def start_daemon() -> CommandResult:
+    return run_command(["yandex-disk", "start"])
+
+
+def daemon_running() -> bool:
+    return run_command(["pgrep", "-x", "yandex-disk"]).returncode == 0
+
+
 def daemon_status() -> CommandResult:
     return run_command(["yandex-disk", "status"])
 

@@ -96,8 +96,9 @@ class TestDaemonBackend(unittest.TestCase):
             content = handle.read()
         self.assertIn("exclude-dirs=Sample,Books", content)
 
+    @patch("tools.sync_backends.DaemonBackend.is_live_config", return_value=True)
     @patch("tools.sync_backends.stop_start_daemon")
-    def test_apply_policy_apply(self, mock_restart):
+    def test_apply_policy_apply(self, mock_restart, _live):
         mock_restart.return_value = {
             "stop": type("R", (), {"cmd": ["yandex-disk", "stop"], "returncode": 0, "stdout": "", "stderr": ""})(),
             "start": type("R", (), {"cmd": ["yandex-disk", "start"], "returncode": 0, "stdout": "", "stderr": ""})(),
@@ -342,6 +343,116 @@ class TestDeletionRiskGuard(unittest.TestCase):
         with open(self.config_path, encoding="utf-8") as handle:
             self.assertIn("exclude-dirs=Books\n", handle.read())
 
+    def _seed_index_dir(self):
+        sync = os.path.join(self.local_root, ".sync")
+        self._write_index(["pro", "brtn", "Books", "Books/Deti"])
+        for name in ("~db_common", "~digest-000", "~exclude"):
+            Path(sync, name).write_bytes(b"x")
+        for name in ("cli.log", "push.log", "status"):
+            Path(sync, name).write_text("log", encoding="utf-8")
+        return sync
+
+    def test_reset_index_downloads_what_the_index_would_delete(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._write_index(["pro", "brtn", "Books"])
+        self.assertEqual(
+            self.backend.deletion_risk_paths(["Books"], ["Books/42"], index_reset=True), [])
+
+    def test_reset_index_still_reports_a_never_excluded_folder(self):
+        os.makedirs(os.path.join(self.local_root, "brtn"), exist_ok=True)
+        self._write_index(["pro", "brtn"])
+        self.assertEqual(
+            self.backend.deletion_risk_paths(["Books"], ["Books"], index_reset=True), ["pro"])
+
+    def test_apply_with_reset_stops_moves_the_index_writes_then_starts(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        sync = self._seed_index_dir()
+        order = []
+        ok = type("R", (), {"cmd": [], "returncode": 0, "stdout": "", "stderr": ""})
+        def stop():
+            order.append(("stop", sorted(os.listdir(sync))))
+            return ok()
+        def start():
+            with open(self.config_path, encoding="utf-8") as handle:
+                order.append(("start", sorted(os.listdir(sync)), handle.read()))
+            return ok()
+        with patch.object(DaemonBackend, "is_live_config", return_value=True), \
+                patch("tools.sync_backends.stop_daemon", side_effect=stop), \
+                patch("tools.sync_backends.start_daemon", side_effect=start), \
+                patch("tools.sync_backends.daemon_running", return_value=False), \
+                patch("tools.sync_backends.stop_start_daemon") as plain_restart:
+            result = self.backend.apply_policy(
+                self._policy(["Books/42"]), dry_run=False, reset_index=True)
+        plain_restart.assert_not_called()
+        self.assertEqual([step[0] for step in order], ["stop", "start"])
+        self.assertIn("~state2", order[0][1])          # index present while stopping
+        at_start = order[1][1]
+        self.assertFalse([n for n in at_start if n.startswith("~")])  # gone before start
+        self.assertIn("cli.log", at_start)               # logs stay
+        self.assertIn("exclude-dirs=Books/42", order[1][2])  # new config before start
+        backup = result["index_backup"]
+        self.assertEqual(sorted(os.listdir(backup)),
+                         ["~db_common", "~digest-000", "~exclude", "~state2"])
+        self.assertIsNone(result["error"])
+
+    def test_reset_refuses_when_the_daemon_does_not_stop(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        sync = self._seed_index_dir()
+        before = sorted(os.listdir(sync))
+        ok = type("R", (), {"cmd": [], "returncode": 0, "stdout": "", "stderr": ""})
+        with patch.object(DaemonBackend, "is_live_config", return_value=True), \
+                patch("tools.sync_backends.stop_daemon", return_value=ok()), \
+                patch("tools.sync_backends.start_daemon") as start, \
+                patch("tools.sync_backends.daemon_running", return_value=True), \
+                patch("tools.sync_backends.time.sleep"), \
+                self.assertRaises(BackendError):
+            self.backend.apply_policy(self._policy(["Books/42"]), dry_run=False, reset_index=True)
+        start.assert_not_called()
+        self.assertEqual(sorted(os.listdir(sync)), before)
+        with open(self.config_path, encoding="utf-8") as handle:
+            self.assertIn("exclude-dirs=Books\n", handle.read())
+
+    def test_config_is_not_written_if_the_index_cannot_be_moved(self):
+        # The new list must never meet the old index: whoever starts the daemon
+        # next would get exactly the 2026-10-29 state.
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._seed_index_dir()
+        ok = type("R", (), {"cmd": [], "returncode": 0, "stdout": "", "stderr": ""})
+        with patch.object(DaemonBackend, "is_live_config", return_value=True), \
+                patch("tools.sync_backends.stop_daemon", return_value=ok()), \
+                patch("tools.sync_backends.start_daemon") as start, \
+                patch("tools.sync_backends.daemon_running", return_value=False), \
+                patch.object(DaemonBackend, "reset_index", side_effect=OSError("disk full")), \
+                self.assertRaises(OSError):
+            self.backend.apply_policy(self._policy(["Books/42"]), dry_run=False, reset_index=True)
+        start.assert_not_called()
+        with open(self.config_path, encoding="utf-8") as handle:
+            self.assertIn("exclude-dirs=Books\n", handle.read())
+
+    def test_reset_is_refused_for_a_rehearsal_config(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        sync = self._seed_index_dir()
+        before = sorted(os.listdir(sync))
+        with patch("tools.sync_backends.stop_daemon") as stop, \
+                self.assertRaises(BackendError):
+            self.backend.apply_policy(self._policy(["Books/42"]), dry_run=False, reset_index=True)
+        stop.assert_not_called()
+        self.assertEqual(sorted(os.listdir(sync)), before)
+
+    def test_rehearsal_config_is_written_but_the_daemon_is_left_alone(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        with patch("tools.sync_backends.stop_start_daemon") as restart:
+            result = self.backend.apply_policy(self._policy(["Books"]), dry_run=False)
+        restart.assert_not_called()
+        self.assertFalse(result["daemon_restart"])
+        self.assertIn("restart_skipped", result)
+
     def test_apply_policy_refuses_restart_when_risky(self):
         os.makedirs(os.path.join(self.local_root, "brtn"), exist_ok=True)
         with self.assertRaises(BackendError) as ctx:
@@ -356,7 +467,8 @@ class TestDeletionRiskGuard(unittest.TestCase):
     def test_apply_policy_proceeds_when_local_copies_present(self):
         for name in ("pro", "brtn"):
             os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
-        with patch("tools.sync_backends.stop_start_daemon", return_value={}):
+        with patch("tools.sync_backends.stop_start_daemon", return_value={}), \
+                patch.object(DaemonBackend, "is_live_config", return_value=True):
             result = self.backend.apply_policy(self._policy(["Books"]), dry_run=False)
         self.assertEqual(result["deletion_risk_paths"], [])
         self.assertIsNone(result["error"])

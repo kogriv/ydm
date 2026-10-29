@@ -254,6 +254,28 @@ def _find_scan_with_children(storage, parent_path: str) -> Optional[int]:
     return row[0] if row else None
 
 
+#: How old a listing may be before its subfolders are trusted as the full list
+#: of siblings to exclude. A day: long enough to add several paths in a row,
+#: short enough that "the folder appeared since" is not a realistic gap.
+SNAPSHOT_MAX_AGE_HOURS = 24
+
+
+def _scan_age_hours(storage, scan_id: int) -> Optional[float]:
+    """Age of a scan from `scans.timestamp` (SQLite's UTC CURRENT_TIMESTAMP)."""
+    conn = storage.get_connection()
+    try:
+        row = conn.execute("SELECT timestamp FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        stamp = datetime.strptime(str(row[0])[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return max(0.0, (datetime.utcnow() - stamp).total_seconds() / 3600)
+
+
 def _policy_coerce_for_daemon(
     policy: dict,
     target: str,
@@ -314,6 +336,15 @@ def _policy_coerce_for_daemon(
                 f"No cloud snapshot of {parent_path}: cannot tell which sibling "
                 f"folders must stay excluded. Run "
                 f"`python3 ydm.py scan cloud --path {parent_path}` first."
+            )
+        age = _scan_age_hours(storage, scan_id)
+        if age is None or age > SNAPSHOT_MAX_AGE_HOURS:
+            when = "of unknown age" if age is None else f"{age / 24:.0f} days old"
+            raise PolicyCoercionError(
+                f"The cloud snapshot of {parent_path} (scan {scan_id}) is {when}. "
+                f"Its subfolders become exclusions, and a subfolder created since "
+                f"would fall out of them and start syncing. Refresh it first: "
+                f"`python3 ydm.py scan cloud --path {parent_path} --depth 1`."
             )
         child_names = fetch_child_dirs(storage, scan_id, parent_path)
         if keep not in child_names:
@@ -1051,6 +1082,10 @@ def parse_args() -> argparse.Namespace:
     render_filters_parser = subparsers.add_parser("render-filters")
     common_flags(render_filters_parser)
     render_filters_parser.add_argument("--apply", action="store_true")
+    render_filters_parser.add_argument(
+        "--reset-daemon-index", action="store_true",
+        help="daemon backend: move the daemon's index aside before restarting, so "
+             "a path it still remembers is downloaded instead of deleted in the cloud")
 
     plan = subparsers.add_parser("download-plan")
     common_flags(plan)
@@ -1067,6 +1102,10 @@ def parse_args() -> argparse.Namespace:
     add.add_argument("--path", required=True)
     add.add_argument("--mode", choices=["auto", "bidirectional", "download_only", "disabled"], default="auto")
     add.add_argument("--apply", action="store_true")
+    add.add_argument(
+        "--reset-daemon-index", action="store_true",
+        help="daemon backend: move the daemon's index aside before restarting, so "
+             "a path it still remembers is downloaded instead of deleted in the cloud")
     add.add_argument("--force-risk", action="store_true")
     add.add_argument("--export-object-id", default=None)
     add.add_argument("--export-mime-type", default=None)
@@ -1076,6 +1115,10 @@ def parse_args() -> argparse.Namespace:
     remove = subparsers.add_parser("remove")
     remove.add_argument("--path", required=True)
     remove.add_argument("--apply", action="store_true")
+    remove.add_argument(
+        "--reset-daemon-index", action="store_true",
+        help="daemon backend: move the daemon's index aside before restarting, so "
+             "a path it still remembers is downloaded instead of deleted in the cloud")
     common_flags(remove)
 
     return parser.parse_args()
@@ -1132,7 +1175,44 @@ def _policy_copy_on_live_daemon(args: argparse.Namespace) -> Optional[str]:
 def _apply_backend_policy(args: argparse.Namespace, policy: dict) -> dict:
     """Apply policy via the selected backend."""
     backend = backend_from_args(args)
+    if getattr(args, "reset_daemon_index", False):
+        if backend.kind != "daemon":
+            raise ValueError("--reset-daemon-index applies to the yandex-disk daemon backend only")
+        return backend.apply_policy(policy, dry_run=not args.apply, reset_index=True)
     return backend.apply_policy(policy, dry_run=not args.apply)
+
+
+class restoring_policy:
+    """Put the policy file back if the backend refuses what was written to it.
+
+    `add` and `remove` write the policy first and apply it second. A refused
+    apply used to leave the policy describing a sync the daemon never got —
+    and the next apply of anything would carry it along unchecked.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        try:
+            with open(path, "rb") as handle:
+                self.saved: Optional[bytes] = handle.read()
+        except FileNotFoundError:
+            self.saved = None
+
+    def restore(self) -> None:
+        if self.saved is None:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+            return
+        with open(self.path, "wb") as handle:
+            handle.write(self.saved)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            self.restore()
+        return False
 
 
 def _target_managed_backend_skip(args: argparse.Namespace) -> dict:
@@ -1225,25 +1305,31 @@ def main() -> None:
                 )
             else:
                 args.export_plan = None
-            payload = add_policy_path(args)
-            if args.apply and payload.get("error") is None:
-                if getattr(args, "target_managed", False):
-                    payload["backend_apply"] = _target_managed_backend_skip(args)
-                else:
-                    policy = load_policy(args.policy_path)
-                    if policy:
-                        backend_payload = _apply_backend_policy(args, policy)
-                        payload["backend_apply"] = backend_payload
+            with restoring_policy(args.policy_path) as saved:
+                payload = add_policy_path(args)
+                if args.apply and payload.get("error") is None:
+                    if getattr(args, "target_managed", False):
+                        payload["backend_apply"] = _target_managed_backend_skip(args)
+                    else:
+                        policy = load_policy(args.policy_path)
+                        if policy:
+                            backend_payload = _apply_backend_policy(args, policy)
+                            payload["backend_apply"] = backend_payload
+                            if backend_payload.get("error") and not backend_payload.get("index_backup"):
+                                saved.restore()
         else:
-            payload = remove_policy_path(args)
-            if args.apply and payload.get("error") is None:
-                if getattr(args, "target_managed", False):
-                    payload["backend_apply"] = _target_managed_backend_skip(args)
-                else:
-                    policy = load_policy(args.policy_path)
-                    if policy:
-                        backend_payload = _apply_backend_policy(args, policy)
-                        payload["backend_apply"] = backend_payload
+            with restoring_policy(args.policy_path) as saved:
+                payload = remove_policy_path(args)
+                if args.apply and payload.get("error") is None:
+                    if getattr(args, "target_managed", False):
+                        payload["backend_apply"] = _target_managed_backend_skip(args)
+                    else:
+                        policy = load_policy(args.policy_path)
+                        if policy:
+                            backend_payload = _apply_backend_policy(args, policy)
+                            payload["backend_apply"] = backend_payload
+                            if backend_payload.get("error") and not backend_payload.get("index_backup"):
+                                saved.restore()
     except Exception as exc:
         payload = {
             "schema": SCHEMA,

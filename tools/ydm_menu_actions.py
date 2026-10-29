@@ -28,6 +28,7 @@ from tools.sync_policy import (
     policy_paths_by_mode,
     remove_policy_path,
     render_filters,
+    restoring_policy,
 )
 from tools.ydm_menu_config import MenuConfig
 from tools.ydm_menu_status import MenuStatus, load_status
@@ -187,15 +188,22 @@ def action_add(
     force_risk: bool = False,
 ) -> ActionResult:
     ns = _policy_ns(cfg, path=path, mode=mode, apply=True, force_risk=force_risk)
+    saved = restoring_policy(ns.policy_path)
     payload = add_policy_path(ns)
     if payload.get("error"):
         return ActionResult(False, payload["error"], payload)
     backend = backend_from_args(ns)
     policy = load_policy(ns.policy_path)
     if policy:
-        apply_payload = backend.apply_policy(policy, dry_run=False)
+        try:
+            apply_payload = backend.apply_policy(policy, dry_run=False)
+        except Exception:
+            # The backend refused: the policy must not describe a sync it never got.
+            saved.restore()
+            raise
         payload["backend_apply"] = apply_payload
         if apply_payload.get("error"):
+            saved.restore()
             return ActionResult(False, apply_payload["error"], payload)
     msg = f"Added {payload.get('path')} as {mode} via {cfg.backend_name}"
     return ActionResult(True, msg, payload)

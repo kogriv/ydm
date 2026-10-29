@@ -14,7 +14,9 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -27,7 +29,10 @@ from tools.sync_common import (  # noqa: E402
     CommandResult,
     legacy_filter_path,
     load_sync_filters,
+    daemon_running,
     run_command,
+    start_daemon,
+    stop_daemon,
     stop_start_daemon,
     var_path,
 )
@@ -93,6 +98,14 @@ class SyncBackend(ABC):
         raise NotImplementedError
 
 
+def _command_payload(results: Dict) -> Dict:
+    return {
+        key: {"cmd": value.cmd, "returncode": value.returncode,
+              "stdout": value.stdout, "stderr": value.stderr}
+        for key, value in results.items()
+    }
+
+
 class DaemonBackend(SyncBackend):
     """Backend for the official yandex-disk daemon.
 
@@ -151,7 +164,6 @@ class DaemonBackend(SyncBackend):
             new_lines.append(f"exclude-dirs={value}\n")
         # Backup before write
         if os.path.exists(self.config_path):
-            from datetime import datetime
             backup_path = f"{self.config_path}.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             shutil.copyfile(self.config_path, backup_path)
         with open(self.config_path, "w", encoding="utf-8") as handle:
@@ -235,7 +247,39 @@ class DaemonBackend(SyncBackend):
             start = data.find(record, start + 1)
         return False
 
-    def deletion_risk_paths(self, before: List[str], after: List[str]) -> List[str]:
+    def is_live_config(self) -> bool:
+        """Whether this backend's config is the one the running daemon reads.
+
+        `yandex-disk start/stop` take no config argument here, so restarting or
+        resetting the index always hits the live daemon. Against any other
+        config those steps are a rehearsal and must not run.
+        """
+        live = os.path.abspath(os.path.expanduser(DEFAULT_CONFIG["exclude_config"]))
+        return os.path.abspath(self.config_path) == live
+
+    def reset_index(self) -> str:
+        """Move the daemon's index aside; the daemon must be stopped.
+
+        The index (`.sync/~*`) is what lets the daemon tell "deleted here" from
+        "never had it". Without it the daemon merges: what is only in the cloud
+        is downloaded, what is only local is uploaded, a file that differs gets
+        a conflict copy. Nothing is deleted, because nothing is remembered. Logs
+        stay where they are; the old index is kept in a dated folder next to
+        them, so the step can be undone by moving the files back.
+        """
+        if daemon_running():
+            raise BackendError("Refusing to reset the index of a running yandex-disk daemon")
+        sync_dir = os.path.join(self.local_root, ".sync")
+        names = sorted(name for name in os.listdir(sync_dir) if name.startswith("~"))
+        backup = os.path.join(sync_dir, f"index-before-reset-{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        os.makedirs(backup)
+        for name in names:
+            shutil.move(os.path.join(sync_dir, name), os.path.join(backup, name))
+        return backup
+
+    def deletion_risk_paths(
+        self, before: List[str], after: List[str], *, index_reset: bool = False,
+    ) -> List[str]:
         """Paths whose local copy is missing while the daemon will sync them.
 
         Restarting the daemon in that state makes it read the absence as a user
@@ -255,6 +299,10 @@ class DaemonBackend(SyncBackend):
         but none of the folders that are in sync can be found in it, the format
         has changed: every path leaving the list without a local copy is then
         treated as remembered, because guessing "safe" is the expensive mistake.
+
+        `index_reset=True` asks about the state after `reset_index()`: nothing is
+        remembered then, so leaving the list is a download. Folders that were
+        never excluded and have no local copy are still reported.
         """
         before_set = set(before)
         after_set = set(after)
@@ -267,7 +315,7 @@ class DaemonBackend(SyncBackend):
 
         leaving = [rel for rel in before_set - after_set
                    if not os.path.isdir(os.path.join(self.local_root, rel))]
-        if leaving:
+        if leaving and not index_reset:
             data = self._index_bytes()
             if data is not None:
                 in_sync = [name for name in sorted(os.listdir(self.local_root))
@@ -287,8 +335,16 @@ class DaemonBackend(SyncBackend):
         *,
         dry_run: bool = False,
         force_unsafe: bool = False,
+        reset_index: bool = False,
     ) -> Dict:
         exclude_dirs = self._policy_to_exclude_dirs(policy)
+        live = self.is_live_config()
+        if reset_index and not live and not dry_run:
+            raise BackendError(
+                "Refusing to reset the daemon index for a config that is not the "
+                f"live one ({self.config_path}): the reset would hit the running "
+                "daemon's folder, not the rehearsal's."
+            )
         before = self._parse_exclude_dirs(self._read_config_lines())
         clears_exclude_dirs = bool(before) and not exclude_dirs
         if clears_exclude_dirs and not dry_run and not force_unsafe:
@@ -300,16 +356,18 @@ class DaemonBackend(SyncBackend):
                 f"tools/sync_policy.py migrate --backend daemon --apply. "
                 f"Pass force_unsafe=True to sync everything on purpose."
             )
-        risky = self.deletion_risk_paths(before, exclude_dirs)
+        risky = self.deletion_risk_paths(before, exclude_dirs, index_reset=reset_index)
         if risky and not dry_run and not force_unsafe:
             raise BackendError(
                 "Refusing to restart the yandex-disk daemon: these paths stay in "
                 "sync but are missing locally, so the daemon would delete them in "
                 "the cloud: " + ", ".join("/" + p for p in risky) + ". "
                 "Restore the local copies, or exclude the paths first. A path the "
-                "daemon's index (.sync/~state2) still remembers must be "
-                "downloaded before it leaves the exclude list. Pass "
-                "force_unsafe=True only if the cloud deletion is intended."
+                "daemon's index (.sync/~state2) still remembers can leave the "
+                "exclude list only together with an index reset "
+                "(--reset-daemon-index): without the index the daemon downloads "
+                "it instead. Pass force_unsafe=True only if the cloud deletion "
+                "is intended."
             )
         result = {
             "schema": "sync_backend:v1",
@@ -321,24 +379,47 @@ class DaemonBackend(SyncBackend):
             "after": exclude_dirs,
             "added": sorted(set(exclude_dirs) - set(before)),
             "removed": sorted(set(before) - set(exclude_dirs)),
-            "daemon_restart": not dry_run,
+            "daemon_restart": not dry_run and live,
+            "index_reset": reset_index,
             "deletion_risk_paths": risky,
             "clears_exclude_dirs": clears_exclude_dirs,
             "error": None,
         }
-        if not dry_run:
+        if dry_run:
+            return result
+        if not live:
+            # A rehearsal config: write it, leave the running daemon alone.
             self._write_config(exclude_dirs)
-            # Restart daemon
+            result["restart_skipped"] = "config is not the live daemon's"
+            return result
+        if not reset_index:
+            self._write_config(exclude_dirs)
             restart_result = stop_start_daemon()
-            result["restart"] = {
-                key: {
-                    "cmd": value.cmd,
-                    "returncode": value.returncode,
-                    "stdout": value.stdout,
-                    "stderr": value.stderr,
-                }
-                for key, value in restart_result.items()
-            }
+            result["restart"] = _command_payload(restart_result)
+            return result
+
+        # Stop, and make sure it is stopped, before anything else changes: the
+        # new exclude list must never meet the old index.
+        stopped = stop_daemon()
+        for _ in range(30):
+            if not daemon_running():
+                break
+            time.sleep(1)
+        else:
+            raise BackendError(
+                "yandex-disk did not stop; nothing was changed. "
+                f"stop: rc={stopped.returncode} {stopped.stdout or stopped.stderr}"
+            )
+        result["index_backup"] = self.reset_index()
+        self._write_config(exclude_dirs)
+        started = start_daemon()
+        result["restart"] = _command_payload({"stop": stopped, "start": started})
+        if started.returncode != 0:
+            result["error"] = (
+                "Index reset and config written, but yandex-disk did not start: "
+                f"{started.stdout or started.stderr}. Start it by hand; the old "
+                f"index is in {result['index_backup']}."
+            )
         return result
 
     def run_sync(self, *, dry_run: bool = False, stream: bool = False) -> Dict:

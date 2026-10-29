@@ -41,9 +41,13 @@ from tests.bench import (  # noqa: E402
 class BenchTestCase(unittest.TestCase):
     """One bench per test, torn down after. Nothing outside tmp is touched."""
 
+    #: Age of the bench's base cloud scan. Adding under an excluded folder needs
+    #: a listing younger than a day, so the classes that add say 0.
+    base_age_days = 1
+
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="ydm_bench_")
-        self.bench = build_bench(self.tmpdir)
+        self.bench = build_bench(self.tmpdir, base_age_days=self.base_age_days)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -1604,6 +1608,8 @@ class TestAddPreview(BenchTestCase):
     #: The orphan inside the disabled tree — the shape of the incident.
     TARGET = "/Books/Math/АнГем"
 
+    base_age_days = 0
+
     def setUp(self):
         super().setUp()
         self._drop_download_only()
@@ -2141,6 +2147,8 @@ class TestStopSyncingOnTheDaemon(BenchTestCase):
     See tasks/ydm_menu/AUDIT-2026-08-27.md.
     """
 
+    base_age_days = 0
+
     def setUp(self):
         super().setUp()
         self.excluded = make_daemon_policy(self.bench)
@@ -2176,7 +2184,9 @@ class TestStopSyncingOnTheDaemon(BenchTestCase):
         screen = screen or ydm_menu.screen_remove
         buffer = io.StringIO()
         with mock.patch.object(sync_backends, "stop_start_daemon",
-                               return_value={}) as restart:
+                               return_value={}) as restart, \
+                mock.patch.object(sync_backends.DaemonBackend, "is_live_config",
+                                  return_value=True):
             with contextlib.redirect_stdout(buffer):
                 screen(self.cfg(backend), scripted_reader(answers))
         self.restarts = restart.call_count
@@ -2520,6 +2530,8 @@ class TestAddThroughTheSharedEntryPoint(BenchTestCase):
     path", used by the menu and the shell alike.
     """
 
+    base_age_days = 0
+
     def setUp(self):
         super().setUp()
         self.excluded = make_daemon_policy(self.bench)
@@ -2549,7 +2561,9 @@ class TestAddThroughTheSharedEntryPoint(BenchTestCase):
         args = argparse.Namespace(path=path, mode=mode, force_risk=force_risk, apply=apply)
         buffer = io.StringIO()
         with mock.patch.object(sync_backends, "stop_start_daemon",
-                               return_value={}) as restart:
+                               return_value={}) as restart, \
+                mock.patch.object(sync_backends.DaemonBackend, "is_live_config",
+                                  return_value=True):
             with contextlib.redirect_stdout(buffer):
                 code = ydm_menu.cmd_add_json(self.cfg(backend), args)
         return code, json.loads(buffer.getvalue()), restart.call_count

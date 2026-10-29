@@ -265,7 +265,8 @@ class TestAddPolicyPathEndToEnd(DaemonBenchCase):
         if payload.get("error"):
             return payload, None
         policy = sync_policy.load_policy(self.policy_path)
-        with patch("tools.sync_backends.stop_start_daemon", return_value={}) as restart:
+        with patch("tools.sync_backends.stop_start_daemon", return_value={}) as restart, \
+                patch.object(DaemonBackend, "is_live_config", return_value=True):
             applied = self._backend().apply_policy(policy, dry_run=False)
         payload["backend_apply"] = applied
         payload["restart_calls"] = restart.call_count
@@ -391,6 +392,98 @@ class TestPolicyCopyNeverReachesTheLiveDaemon(DaemonBenchCase):
             "--db-path", self.db_path, "--format", "json")
         error = (payload.get("data") or payload).get("error") or ""
         self.assertNotIn("live daemon config", error)
+
+
+class TestRefusedApplyLeavesThePolicyAlone(DaemonBenchCase):
+    """`add` writes the policy, then applies it. When the backend refused, the
+    policy used to keep the new path anyway — describing a sync the daemon
+    never got, to be carried along by the next apply of anything."""
+
+    def _index(self, paths):
+        os.makedirs(os.path.join(self.local_root, ".sync"), exist_ok=True)
+        with open(os.path.join(self.local_root, ".sync", "~state2"), "wb") as handle:
+            for rel in paths:
+                handle.write(DaemonBackend._index_record(rel) + b"\x00")
+
+    def _main(self, *extra):
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["sync_policy.py", "add", "--path", "/Books/Math/АнГем",
+                                        "--mode", "bidirectional", "--backend", "daemon",
+                                        "--apply", "--policy-path", self.policy_path,
+                                        "--exclude-config", self.config_path,
+                                        "--local-root", self.local_root, "--db-path", self.db_path,
+                                        "--format", "json", *extra]), \
+                patch("tools.sync_backends.stop_start_daemon") as restart, \
+                patch("sys.stdout", out):
+            sync_policy.main()
+        payload = json.loads(out.getvalue())
+        return (payload.get("data") or payload), restart
+
+    def test_policy_is_restored_when_the_index_remembers_the_branch(self):
+        self.write_config(["Books", "video", "pro", "Docs"])
+        self._migrate_policy()
+        self.materialize_local(["video", "pro", "Docs"])
+        self._index(["video", "pro", "Docs", "Books"])
+        before = open(self.policy_path, "rb").read()
+        payload, restart = self._main()
+        self.assertIn("/Books", payload["error"])
+        self.assertIn("--reset-daemon-index", payload["error"])
+        restart.assert_not_called()
+        self.assertEqual(open(self.policy_path, "rb").read(), before)
+        self.assertEqual(sorted(self.read_exclude_dirs()), ["Books", "Docs", "pro", "video"])
+
+    def test_reset_flag_is_for_the_daemon_only(self):
+        payload, _restart = self._main_rclone()
+        self.assertIn("daemon backend only", payload["error"])
+
+    def _main_rclone(self):
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["sync_policy.py", "add", "--path", "/Books/Math/АнГем",
+                                        "--mode", "bidirectional", "--backend", "rclone",
+                                        "--apply", "--reset-daemon-index",
+                                        "--policy-path", self.policy_path,
+                                        "--local-root", self.local_root, "--db-path", self.db_path,
+                                        "--format", "json"]), \
+                patch("tools.sync_backends.stop_start_daemon") as restart, \
+                patch("sys.stdout", out):
+            sync_policy.main()
+        payload = json.loads(out.getvalue())
+        return (payload.get("data") or payload), restart
+
+    def _migrate_policy(self):
+        ns = argparse.Namespace(
+            db_path=self.db_path, local_root=self.local_root, remote="yandex",
+            policy_path=self.policy_path, legacy_filter_path=None, download_filter_path=None,
+            bisync_filter_path=None, format="json", text_header=False, backend="daemon",
+            exclude_config=self.config_path, apply=True)
+        sync_policy.migrate_policy(ns)
+
+
+class TestSiblingsComeFromAFreshListing(DaemonBenchCase):
+    """2026-10-29: the siblings to exclude came from scan #93, two and a half
+    months old. A folder created since would have dropped out of the list."""
+
+    def _age_scan(self, days):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE scans SET timestamp = datetime('now', ?)", (f"-{days} days",))
+        conn.commit()
+        conn.close()
+
+    def _coerce(self):
+        policy = self.policy({"Books": {"mode": "disabled"}})
+        return sync_policy._policy_coerce_for_daemon(policy, "Books/Math", "bidirectional", self.db_path)
+
+    def test_stale_listing_is_refused_with_the_command_that_refreshes_it(self):
+        self._age_scan(75)
+        with self.assertRaises(sync_policy.PolicyCoercionError) as ctx:
+            self._coerce()
+        self.assertIn("75 days old", str(ctx.exception))
+        self.assertIn("scan cloud --path /Books --depth 1", str(ctx.exception))
+
+    def test_listing_from_today_is_used(self):
+        self._age_scan(0)
+        changes = self._coerce()
+        self.assertIn("removed disabled ancestor: /Books", changes)
 
 
 class TestMigrateFromDaemon(DaemonBenchCase):
