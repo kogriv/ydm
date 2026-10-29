@@ -5,6 +5,44 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-29 — the PC syncs through rclone bisync, not the daemon
+
+The daemon (yandex-disk 0.1.6.1080, the newest Yandex ships for Linux) does
+not trust the certificate chain Yandex's storage host started serving
+(GlobalSign GCC R46, 2025): downloads redirected to `mds.storage.yandex.net`
+fail, and its CA list is compiled in. The PC now runs the same bisync as the
+phone, on a timer. Guide: [`docs/LINUX_RCLONE_SETUP.md`](docs/LINUX_RCLONE_SETUP.md).
+
+- **`YDM_RCLONE` names the rclone ydm runs.** The system's 1.60 stays for the
+  other projects' copies and mounts; ydm's bisync gets 1.75.2, installed with
+  its checksum and release signature verified.
+- **bisync survives one bad file** on rclone 1.66+: `--resilient --recover
+  --max-lock 2m`. The phone's 1.60 aborted a whole resync on two files Yandex
+  answers 500 for; it still gets the command it always got.
+- **The policy gains `quarantine`** (files the cloud will not hand over, each
+  with its reason) **and `ignore`** (generated files under a synced path:
+  `build/`, `__pycache__/`, `*.log`, `*.aux` under `pro/physon`, which the PC
+  and the phone would otherwise trade on every run). Both are rendered into the
+  filter, escaped, ahead of the includes; added to the filter by hand they were
+  lost on the next `render-filters`. Unescaped, `[1]` in a name matched
+  `x1.jpg`.
+- **`tools/linux/install_timer.sh`** generates a systemd user service and timer
+  (`install`, `render`, `status`, `remove`); it refuses an rclone older than
+  1.66, never resyncs, unsets proxy variables, and errors reach the desktop
+  through notify-send.
+- **Fixed on the way:** a root-level folder whose own scan held only its
+  children was `path_not_found` to the policy; a filter in a directory not ours
+  (`/data`) failed on its own backup.
+- **Before the switch:** checksum comparison of all eight folders — 14 398
+  identical, none different, none only on the PC. 35 files Yandex currently
+  refuses or serves unreliably are quarantined; they are intact in the cloud.
+  The first resync wrote rclone's modification time onto all 14 398 files in
+  the cloud (files the daemon uploaded had none); contents were untouched.
+- **Two lessons for the next machine:** rclone bisync writes `<filter>.md5`
+  beside its filter, which a dry run never does, so a missing write permission
+  shows up only on the real resync; and a login session's `https_proxy` sent
+  bisync abroad and hung it on its listings for half an hour.
+
 ## 2026-10-29 — a subfolder of an excluded branch can be synced again
 
 The guard below made adding `/Books/Deti` impossible rather than dangerous:
