@@ -223,6 +223,7 @@ scheduler only sees Termux's filesystem.
 
 What it does and does not do:
 
+- **It uses the rclone remote's token on purpose**: that is the token the sync would use. On 2026-10-29 it mattered — another OAuth app's token got 200 from the same address while rclone's got 410, and the watcher rightly went on saying `closed` for the phone.
 - **It reads and never writes**, and it never starts the sync. The card it sends
   says the disk answers and points at the checklist in the incident note, because
   a reopened disk is not yet a safe one.
