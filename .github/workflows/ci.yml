@@ -7,13 +7,24 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # Floor is 3.9, not the README's historical "3.6+" claim: the
         # sync_* tools use argparse.BooleanOptionalAction (added in 3.9).
-        python-version: ["3.9", "3.11", "3.13"]
+        #
+        # 3.9 runs on ubuntu-24.04: ubuntu-latest moved to 26.04 in October
+        # 2026, and setup-python has no 3.9 build for it ("The version '3.9'
+        # with architecture 'x64' was not found"). When 24.04 is retired too,
+        # the floor goes up rather than out of the matrix silently.
+        include:
+          - python-version: "3.9"
+            os: ubuntu-24.04
+          - python-version: "3.11"
+            os: ubuntu-latest
+          - python-version: "3.13"
+            os: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
