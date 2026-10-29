@@ -4,6 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  # A push made while the workflow was disabled is never checked; this is how
+  # to check it afterwards (`gh workflow run CI`).
+  workflow_dispatch:
 
 jobs:
   test:
