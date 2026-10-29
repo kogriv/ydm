@@ -28,11 +28,21 @@ pro/physon/practica_uch/build/sims_cache/under-pressure_ru.html
 Проверены на пробном дереве: отсекаются ровно эти два, соседи проходят. В облаке файлы
 остаются, на телефон не приходят.
 
-- **Перегенерация фильтра из политики** (`sync_policy.py render-filters --apply`,
-  добавление или удаление папки) **молча удалит эти правила**, и следующий resync
-  снова упадёт на тех же файлах. Механизма исключений в политике нет.
+- **С 29.10 08:22 UTC они в политике, а не в фильтре руками:** `sync_policy.py
+  quarantine --path <файл> --reason "Yandex storage answers 500 …" --apply`, затем
+  `render-filters --apply` и resync (08:25, OK, 0 переносов). Карантин рендерится в
+  начало фильтра и переживает перегенерацию; ручные строки и комментарии убраны.
 - **Вернуть:** когда оба файла начнут скачиваться
-  (`rclone copyto yandex:/<путь> /tmp/x`), убрать две строки и сделать resync.
+  (`rclone copyto yandex:/<путь> /tmp/x`), `sync_policy.py quarantine --remove …`,
+  `render-filters --apply`, resync.
+
+Тем же шагом владелец решил не синкать сборочный мусор в `pro/physon` (на телефоне и
+на ПК): `sync_policy.py ignore --path /pro/physon --pattern build/ --pattern
+__pycache__/ --pattern '*.log' --pattern '*.aux' --apply`. Из синка вышел 121 файл
+(`practica_uch` 59, `practica_pro` 56, `practice_kit` 6); на телефоне и в облаке они
+остались на месте, просто больше не ездят. Те же шаблоны вне `physon` не действуют.
+Копия политики до правки — `var/sync_policy.json.before-ignore-20261029`.
+Первый прогон по расписанию с новым фильтром — 08:43 UTC, `run OK`, 0 переносов.
 
 **Resync, попытка 2 (07:53–08:05 UTC, телефонная сессия):** `resync OK`,
 «Bisync successful». Выгружено 39 файлов `vnesh` (402,9 МиБ), докачан `pro/physon`
