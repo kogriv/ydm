@@ -278,6 +278,70 @@ class TestDeletionRiskGuard(unittest.TestCase):
         os.makedirs(os.path.join(self.local_root, "brtn"), exist_ok=True)
         self.assertEqual(self.backend.deletion_risk_paths(["Books"], []), [])
 
+    def _write_index(self, paths):
+        """A daemon index holding these paths, in the on-disk record layout."""
+        os.makedirs(os.path.join(self.local_root, ".sync"), exist_ok=True)
+        with open(os.path.join(self.local_root, ".sync", "~state2"), "wb") as handle:
+            for rel in paths:
+                handle.write(DaemonBackend._index_record(rel) + b"\x00" + b"\x8b" * 24)
+
+    def test_leaving_path_the_index_remembers_is_flagged(self):
+        # 2026-10-29: /Books left the list with no local folder while the index
+        # still held its entries from before 08-14. The daemon would delete it.
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._write_index(["pro", "brtn", "Books", "Books/Deti"])
+        after = ["Books/42", "Books/Math"]  # Books itself is no longer excluded
+        self.assertEqual(self.backend.deletion_risk_paths(["Books"], after), ["Books"])
+
+    def test_leaving_path_the_index_never_saw_is_a_download(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._write_index(["pro", "brtn"])
+        self.assertEqual(self.backend.deletion_risk_paths(["Books"], []), [])
+
+    def test_leaving_path_with_a_local_copy_is_not_flagged(self):
+        for name in ("pro", "brtn", "Books"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._write_index(["pro", "brtn", "Books"])
+        self.assertEqual(self.backend.deletion_risk_paths(["Books"], []), [])
+
+    def test_index_match_needs_the_whole_name(self):
+        # A stray 0x04 before "Books" reads as a 4-byte record "Book" unless the
+        # match insists that the name ends where the length says it does.
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._write_index(["pro", "brtn"])
+        with open(os.path.join(self.local_root, ".sync", "~state2"), "ab") as handle:
+            handle.write(b"\x04Books\x00")
+        self.assertEqual(self.backend.deletion_risk_paths(["Book", "Books"], ["Books"]), [])
+
+    def test_unreadable_index_is_treated_as_remembering(self):
+        # The format is read off the file. If none of the synced folders can be
+        # found in it, it changed, and "safe" would be a guess.
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        os.makedirs(os.path.join(self.local_root, ".sync"), exist_ok=True)
+        with open(os.path.join(self.local_root, ".sync", "~state2"), "wb") as handle:
+            handle.write(b"pro brtn Books in some other layout")
+        self.assertEqual(self.backend.deletion_risk_paths(["Books"], []), ["Books"])
+
+    def test_long_paths_use_a_multibyte_length(self):
+        rel = "Books/" + "я" * 100  # 206 bytes: the length needs two varint bytes
+        self.assertEqual(DaemonBackend._index_record(rel)[:2], bytes([206 & 0x7F | 0x80, 206 >> 7]))
+
+    def test_apply_policy_refuses_the_2026_10_29_restart(self):
+        for name in ("pro", "brtn"):
+            os.makedirs(os.path.join(self.local_root, name), exist_ok=True)
+        self._write_index(["pro", "brtn", "Books", "Books/Deti"])
+        with patch("tools.sync_backends.stop_start_daemon") as restart, \
+                self.assertRaises(BackendError) as ctx:
+            self.backend.apply_policy(self._policy(["Books/42", "Books/Math"]), dry_run=False)
+        self.assertIn("/Books", str(ctx.exception))
+        restart.assert_not_called()
+        with open(self.config_path, encoding="utf-8") as handle:
+            self.assertIn("exclude-dirs=Books\n", handle.read())
+
     def test_apply_policy_refuses_restart_when_risky(self):
         os.makedirs(os.path.join(self.local_root, "brtn"), exist_ok=True)
         with self.assertRaises(BackendError) as ctx:

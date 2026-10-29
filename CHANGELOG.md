@@ -5,6 +5,29 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-29 — the guard against the August deletion let the August deletion through
+
+A session adding `/Books/Deti` to sync ran `sync_policy.py add --apply
+--policy-path <copy>`, meaning it as a rehearsal. The live daemon ran for 18
+seconds with `/Books` out of the exclude list, no local `Books`, and 4709
+entries for it in the daemon's index: the state that sent `/Books` to the trash
+on 2026-08-14. It was stopped in time; nothing reached the cloud. Details in
+[the August incident note](docs/incidents/yandex-books-delete-2026-08-14.md).
+
+- **`deletion_risk_paths()` now reads the daemon's index.** It treated any
+  path leaving the exclude list as a download, on the assumption that the
+  daemon had never tracked it. A path leaving the list without a local copy is
+  now refused if `.sync/~state2` remembers it. The format is undocumented and
+  read off the file; if none of the synced folders can be found in it, the
+  format is taken to have changed and every such path is refused. Replayed
+  against the real index, the morning's config is refused with `/Books`.
+- **`--policy-path` chose the policy file, not the daemon.** `add`, `remove`
+  and `render-filters` with `--apply` now refuse when the policy is a copy but
+  `--exclude-config` is still the live config.
+- Ten tests; each check was broken in turn and a test failed every time.
+- Still open: the siblings `add` excludes come from the newest cloud scan,
+  however old it is, so a folder created since then drops out of the list.
+
 ## 2026-10-25 — a watcher for the cloud coming back
 
 During the outage of 2026-10-11 the only way to learn that Yandex Disk's

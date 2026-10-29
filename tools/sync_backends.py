@@ -195,23 +195,90 @@ class DaemonBackend(SyncBackend):
             conn.close()
         return [row[0] for row in rows]
 
+    #: The daemon's own index of what it has synced, under ``<root>/.sync``.
+    #: A path it remembers but cannot find locally is a path it will delete.
+    INDEX_NAMES = ("~state2", "state2")
+
+    def _index_bytes(self) -> Optional[bytes]:
+        for name in self.INDEX_NAMES:
+            try:
+                with open(os.path.join(self.local_root, ".sync", name), "rb") as handle:
+                    return handle.read()
+            except OSError:
+                continue
+        return None
+
+    @staticmethod
+    def _index_record(rel: str) -> bytes:
+        """How the index stores one path: varint byte length, then UTF-8 bytes.
+
+        Not a documented format — read off the file: ``\\x05Books\\x00``,
+        ``\\x0aBooks/Deti\\x00``, ``9Books/0_самоконтроль…`` (57 bytes).
+        """
+        key = rel.encode("utf-8")
+        length, prefix = len(key), bytearray()
+        while True:
+            byte = length & 0x7F
+            length >>= 7
+            prefix.append(byte | (0x80 if length else 0))
+            if not length:
+                return bytes(prefix) + key
+
+    def _index_remembers(self, data: bytes, rel: str) -> bool:
+        record = self._index_record(rel)
+        start = data.find(record)
+        while start != -1:
+            end = start + len(record)
+            # The path must end there: a flag byte follows, not more of a name.
+            if end < len(data) and data[end] in (0, 1):
+                return True
+            start = data.find(record, start + 1)
+        return False
+
     def deletion_risk_paths(self, before: List[str], after: List[str]) -> List[str]:
-        """Paths whose local copy vanished while they stay inside the daemon's scope.
+        """Paths whose local copy is missing while the daemon will sync them.
 
         Restarting the daemon in that state makes it read the absence as a user
         deletion and propagate it to the cloud — this is exactly what moved
-        /Books (113 GB) to the trash on 2026-08-14. A path that is only *now*
-        leaving the exclude list is not at risk: the daemon has never tracked
-        it, so it downloads instead of deleting.
+        /Books (113 GB) to the trash on 2026-08-14.
+
+        Two ways to get there:
+
+        - a top-level cloud folder that was never excluded has no local copy;
+        - a path leaves the exclude list, has no local copy, and the daemon's
+          index still remembers it. Leaving the list is safe only for a path the
+          daemon never tracked: then it downloads. /Books left the list on
+          2026-10-29 with 4709 index entries from before 08-14 and no local
+          folder, and the guard let it through because it assumed the first case.
+
+        The index format is read off the file, not documented. If it is there
+        but none of the folders that are in sync can be found in it, the format
+        has changed: every path leaving the list without a local copy is then
+        treated as remembered, because guessing "safe" is the expensive mistake.
         """
         before_set = set(before)
         after_set = set(after)
-        risky = []
+        risky = set()
         for name in self._cloud_top_level_dirs():
             if name in after_set or name in before_set:
-                continue  # excluded now, or newly included -> daemon downloads
+                continue  # excluded now, or leaving the list -> checked below
             if not os.path.isdir(os.path.join(self.local_root, name)):
-                risky.append(name)
+                risky.add(name)
+
+        leaving = [rel for rel in before_set - after_set
+                   if not os.path.isdir(os.path.join(self.local_root, rel))]
+        if leaving:
+            data = self._index_bytes()
+            if data is not None:
+                in_sync = [name for name in sorted(os.listdir(self.local_root))
+                           if not name.startswith(".")
+                           and os.path.isdir(os.path.join(self.local_root, name))
+                           and name not in before_set]
+                readable = not in_sync or any(
+                    self._index_remembers(data, name) for name in in_sync)
+                for rel in leaving:
+                    if not readable or self._index_remembers(data, rel):
+                        risky.add(rel)
         return sorted(risky)
 
     def apply_policy(
@@ -239,8 +306,10 @@ class DaemonBackend(SyncBackend):
                 "Refusing to restart the yandex-disk daemon: these paths stay in "
                 "sync but are missing locally, so the daemon would delete them in "
                 "the cloud: " + ", ".join("/" + p for p in risky) + ". "
-                "Restore the local copies, or exclude the paths first, or pass "
-                "force_unsafe=True if the cloud deletion is intended."
+                "Restore the local copies, or exclude the paths first. A path the "
+                "daemon's index (.sync/~state2) still remembers must be "
+                "downloaded before it leaves the exclude list. Pass "
+                "force_unsafe=True only if the cloud deletion is intended."
             )
         result = {
             "schema": "sync_backend:v1",

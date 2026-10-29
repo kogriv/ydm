@@ -1100,6 +1100,35 @@ def _resolve_backend_name(args: argparse.Namespace) -> str:
     ).kind
 
 
+def _policy_copy_on_live_daemon(args: argparse.Namespace) -> Optional[str]:
+    """Refuse `--apply` that would carry a rehearsal policy onto the live daemon.
+
+    `--policy-path` only chooses which policy file is written; the daemon backend
+    still rewrites `--exclude-config`, which defaults to the live
+    ~/.config/yandex-disk/config.cfg, and restarts the daemon. On 2026-10-29 an
+    `add --apply --policy-path <copy>` meant as a rehearsal did exactly that and
+    ran the real daemon with /Books out of the exclude list for 18 seconds.
+    """
+    if not getattr(args, "apply", False) or getattr(args, "target_managed", False):
+        return None
+    if args.command not in ("add", "remove", "render-filters"):
+        return None
+    live_config = os.path.abspath(os.path.expanduser(DEFAULT_CONFIG["exclude_config"]))
+    config = os.path.abspath(os.path.expanduser(
+        getattr(args, "exclude_config", None) or DEFAULT_CONFIG["exclude_config"]))
+    policy = os.path.abspath(os.path.expanduser(args.policy_path))
+    if config != live_config or policy == os.path.abspath(default_policy_path()):
+        return None
+    if _resolve_backend_name(args) != "daemon":
+        return None
+    return (
+        f"--policy-path {args.policy_path} is not the live policy, but --apply "
+        f"would rewrite the live daemon config {DEFAULT_CONFIG['exclude_config']} "
+        f"and restart the daemon. To rehearse, also pass --exclude-config <copy>; "
+        f"to change the real sync, drop --policy-path."
+    )
+
+
 def _apply_backend_policy(args: argparse.Namespace, policy: dict) -> dict:
     """Apply policy via the selected backend."""
     backend = backend_from_args(args)
@@ -1128,6 +1157,12 @@ def main() -> None:
         return
     args.local_root = require_local_root(args.local_root, tool="sync_policy.py")
     try:
+        refusal = _policy_copy_on_live_daemon(args)
+        if refusal:
+            render({"schema": SCHEMA, "action": args.command, "dry_run": True,
+                    "policy_path": args.policy_path, "error": refusal},
+                   args.format, args.text_header)
+            return
         if args.command == "status":
             payload = status_payload(args)
         elif args.command == "inspect":

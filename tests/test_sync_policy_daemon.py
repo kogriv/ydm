@@ -15,6 +15,8 @@ and nothing else.
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
 import shutil
 import sqlite3
@@ -345,6 +347,50 @@ class TestAddPolicyPathEndToEnd(DaemonBenchCase):
         result = self._backend().apply_policy({"paths": {}}, dry_run=True)
         self.assertTrue(result["clears_exclude_dirs"])
         self.assertEqual(result["after"], [])
+
+
+class TestPolicyCopyNeverReachesTheLiveDaemon(DaemonBenchCase):
+    """2026-10-29: `add --apply --policy-path <copy>` was meant as a rehearsal.
+    The copy was written, and so was the live daemon config, and the daemon was
+    restarted with /Books out of the exclude list."""
+
+    def _main(self, *argv):
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["sync_policy.py", *argv]), \
+                patch("tools.sync_policy._apply_backend_policy") as applied, \
+                patch("sys.stdout", out):
+            sync_policy.main()
+        return json.loads(out.getvalue()), applied
+
+    def test_copy_with_default_daemon_config_is_refused(self):
+        self.write_config(["Books"])
+        before = open(self.policy_path, encoding="utf-8").read() if os.path.exists(self.policy_path) else None
+        payload, applied = self._main(
+            "add", "--path", "/Books/Deti", "--mode", "bidirectional", "--backend", "daemon",
+            "--apply", "--policy-path", self.policy_path, "--local-root", self.local_root,
+            "--db-path", self.db_path, "--format", "json")
+        error = (payload.get("data") or payload).get("error")
+        self.assertIn("live daemon config", error)
+        applied.assert_not_called()
+        after = open(self.policy_path, encoding="utf-8").read() if os.path.exists(self.policy_path) else None
+        self.assertEqual(before, after)
+
+    def test_copy_with_its_own_daemon_config_is_a_rehearsal(self):
+        self.write_config(["Books"])
+        payload, _applied = self._main(
+            "add", "--path", "/Books/Deti", "--mode", "bidirectional", "--backend", "daemon",
+            "--apply", "--policy-path", self.policy_path, "--exclude-config", self.config_path,
+            "--local-root", self.local_root, "--db-path", self.db_path, "--format", "json")
+        error = (payload.get("data") or payload).get("error") or ""
+        self.assertNotIn("live daemon config", error)
+
+    def test_rclone_backend_is_not_affected(self):
+        payload, _applied = self._main(
+            "add", "--path", "/Books/Deti", "--mode", "bidirectional", "--backend", "rclone",
+            "--apply", "--policy-path", self.policy_path, "--local-root", self.local_root,
+            "--db-path", self.db_path, "--format", "json")
+        error = (payload.get("data") or payload).get("error") or ""
+        self.assertNotIn("live daemon config", error)
 
 
 class TestMigrateFromDaemon(DaemonBenchCase):
