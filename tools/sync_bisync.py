@@ -39,6 +39,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    bisync_resilience_flags,
+    rclone_version,
     rclone_bin,
     acquire_lock,
     append_text_log,
@@ -323,6 +325,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     ]
     if args.check_access:
         preview_cmd.append("--check-access")
+    preview_cmd.extend(bisync_resilience_flags(rclone_version()))
     preview_cmd.append("-v")
     payload["plan_text"] = [
         "Ensure `+ /RCLONE_TEST` filter rule and local sentinel file exist (if --check-access)",
@@ -505,6 +508,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
     ]
     if args.check_access:
         preview_cmd.append("--check-access")
+    preview_cmd.extend(bisync_resilience_flags(rclone_version()))
     payload["plan_text"] = [f"Run: {' '.join(preview_cmd)}"]
 
     if not args.apply:

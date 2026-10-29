@@ -79,6 +79,28 @@ python3 ydm.py scan cloud --path /pro
 python3 tools/sync_policy.py add --path /pro --mode bidirectional --backend rclone --apply
 ```
 
+The filters live next to the mirror: `<mirror>.bisync.filters`,
+`<mirror>.download.filters`, and the `<mirror>.bisync.filters.md5` that rclone
+bisync writes beside its filter on every resync. If the mirror's parent is not
+yours — `/data` belongs to root here — create the three once, owned by you;
+they are rewritten in place, and ydm's backups of them go to `var/` instead:
+
+```bash
+for f in /data/ya_disk.bisync.filters /data/ya_disk.download.filters /data/ya_disk.bisync.filters.md5; do
+  sudo install -m 644 -o "$USER" -g "$USER" /dev/null "$f"
+done
+```
+
+Run bisync straight to Yandex. A login session that exports `https_proxy`
+(a VPN exit abroad, here) hands it to rclone too, and on 2026-10-29 a resync
+sat on its listings for half an hour that way without moving a byte. The timer
+unsets the proxy variables; for a manual run, prefix the command with
+`env -u http_proxy -u https_proxy -u ALL_PROXY`.
+
+A `--dry-run` does not write the `.md5`, so a missing one shows up only on the
+real resync — as `Bisync critical error: open …filters.md5: permission denied`,
+before anything is transferred.
+
 Two further kinds of entry keep a bisync between several devices quiet:
 
 - **ignore** — generated files under a synced path, which every device makes

@@ -59,6 +59,10 @@ Type=oneshot
 WorkingDirectory=$YDM_DIR
 Environment=YDM_RCLONE=$RCLONE
 Environment=YDM_NOTIFY_DESKTOP=1
+# Straight to Yandex, not through whatever proxy the login session exports:
+# on 2026-10-29 a resync inherited https_proxy (a VPN exit abroad) and hung
+# on its listings for half an hour without moving a byte.
+UnsetEnvironment=http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 ExecStart=$PYTHON $YDM_DIR/tools/sync_bisync.py run --local-root $LOCAL_ROOT --apply --format text
 Nice=10
 IOSchedulingClass=idle

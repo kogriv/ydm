@@ -51,6 +51,7 @@ class TestRender(unittest.TestCase):
         self.assertIn(f"sync_bisync.py run --local-root {root} --apply", proc.stdout)
         self.assertIn(f"WorkingDirectory={ROOT}", proc.stdout)
         self.assertIn("Environment=YDM_NOTIFY_DESKTOP=1", proc.stdout)
+        self.assertIn("UnsetEnvironment=http_proxy https_proxy all_proxy", proc.stdout)
 
     def test_service_never_resyncs(self):
         # The timer must not establish a baseline on its own.
