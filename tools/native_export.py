@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 from typing import Mapping
+from tools.sync_common import rclone_bin
 from tools.sync_policy import validate_export_plan
 from tools.providers import provider_for
 
@@ -69,7 +70,7 @@ def export_command(plan: Mapping[str, object], context) -> list[str]:
         raise ExportSafetyError("artifact parent directory must already exist")
     if os.path.lexists(artifact):
         raise ExportSafetyError("artifact destination already exists")
-    return ["rclone", "backend", "copyid", f"{cfg.inventory_remote}:",
+    return [rclone_bin(), "backend", "copyid", f"{cfg.inventory_remote}:",
             object_id, artifact, "--drive-export-formats", str(plan["format"])]
 
 

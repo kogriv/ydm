@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import bisect
 import hashlib
+import re
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CONFIG
+from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CONFIG, rclone_bin  # noqa: F401  (rclone_bin re-exported)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -191,6 +192,17 @@ def legacy_filter_path(local_root: str) -> str:
 default_filter_path = legacy_filter_path
 
 
+def filter_glob_unescape(text: str) -> str:
+    """Inverse of `sync_policy.filter_glob_escape`: the path a rule names."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            i += 1
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def load_sync_filters(filter_path: str) -> SyncFiltersResult:
     """
     Reads an rclone filter-file of the form:
@@ -218,13 +230,15 @@ def load_sync_filters(filter_path: str) -> SyncFiltersResult:
                     continue
                 if line == "- **":
                     continue  # expected catch-all terminator
+                if line.startswith("- /"):
+                    continue  # quarantined file: policy-generated exclusion
                 if line.startswith("+ /") and not line.endswith("/**"):
                     # Raw single-file include, used by sync_bisync.py for
                     # RCLONE_TEST check-access. It is valid rclone syntax but
                     # not a folder include for sync tree membership.
                     continue
                 if line.startswith("+ /") and line.endswith("/**"):
-                    entry = line[len("+ /"):-len("/**")]
+                    entry = filter_glob_unescape(line[len("+ /"):-len("/**")])
                     if entry:
                         include_dirs.append(entry)
                         if "\n" in entry or entry != entry.strip():
@@ -296,7 +310,7 @@ def rclone_copy_materialize(remote: str, local_root: str, filter_path: str) -> C
     resolved_root = os.path.expanduser(local_root)
     os.makedirs(resolved_root, exist_ok=True)
     cmd = [
-        "rclone", "copy", f"{remote}:", resolved_root,
+        rclone_bin(), "copy", f"{remote}:", resolved_root,
         "--filter-from", os.path.expanduser(filter_path), "-P",
     ]
 
@@ -348,7 +362,7 @@ def rclone_copy_materialize(remote: str, local_root: str, filter_path: str) -> C
 def rclone_check_entry(remote: str, entry: str, local_root: str) -> CommandResult:
     resolved_root = os.path.expanduser(local_root)
     return run_command([
-        "rclone", "check", f"{remote}:{entry}", os.path.join(resolved_root, entry),
+        rclone_bin(), "check", f"{remote}:{entry}", os.path.join(resolved_root, entry),
     ])
 
 
@@ -441,6 +455,46 @@ def path_exists_in_snapshot(analyzer: Analyzer, snapshot, path: str) -> bool:
 def create_storage(db_path: str) -> StorageManager:
     config = load_config("prod")
     return StorageManager(db_path, use_temp_storage=False, config=config)
+
+
+_RCLONE_VERSIONS: Dict[str, Optional[tuple]] = {}
+
+
+def rclone_version(binary: Optional[str] = None) -> Optional[tuple]:
+    """(major, minor, patch) of the given rclone, or None if it cannot be told."""
+    binary = binary or rclone_bin()
+    if binary not in _RCLONE_VERSIONS:
+        version = None
+        try:
+            out = subprocess.run([binary, "version"], capture_output=True, text=True,
+                                 timeout=30).stdout
+            match = re.search(r"rclone v(\d+)\.(\d+)\.(\d+)", out or "")
+            if match:
+                version = tuple(int(part) for part in match.groups())
+        except (OSError, subprocess.SubprocessError):
+            version = None
+        _RCLONE_VERSIONS[binary] = version
+    return _RCLONE_VERSIONS[binary]
+
+
+#: bisync grew error tolerance in rclone 1.66. Before it, one file the cloud
+#: refuses to hand over (Yandex answering 500 for it, 2026-10-29) aborts the
+#: whole run and demands a --resync; the device runs 1.60 and hit exactly that.
+BISYNC_RESILIENCE_SINCE = (1, 66, 0)
+
+
+def bisync_resilience_flags(version: Optional[tuple]) -> List[str]:
+    """Flags that let bisync survive one bad file or an interrupted run.
+
+    --resilient: a less serious error (one file failing) is retried next run
+    instead of requiring --resync. --recover: an interrupted run recovers on its
+    own. --max-lock: a lock left by a killed run expires instead of blocking
+    every later run; a live run keeps renewing it. Older rclone rejects all
+    three, so they are only passed to a version that has them.
+    """
+    if version is None or version < BISYNC_RESILIENCE_SINCE:
+        return []
+    return ["--resilient", "--recover", "--max-lock", "2m"]
 
 
 def run_command(cmd: List[str]) -> CommandResult:
@@ -723,13 +777,14 @@ def rclone_bisync_run(
     to -1 (unlimited) if omitted, so callers should always pass an explicit
     cap."""
     resolved_root = os.path.expanduser(local_root)
-    cmd = ["rclone", "--max-delete", str(max_delete), "bisync",
+    cmd = [rclone_bin(), "--max-delete", str(max_delete), "bisync",
            resolved_root, f"{remote}:",
            "--filters-file", os.path.expanduser(filter_path)]
     if resync:
         cmd.append("--resync")
     if check_access:
         cmd.append("--check-access")
+    cmd.extend(bisync_resilience_flags(rclone_version()))
     if workdir:
         cmd.extend(["--workdir", os.path.expanduser(workdir)])
     cmd.append("-v")

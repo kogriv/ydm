@@ -26,6 +26,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    rclone_bin,
     CommandResult,
     filter_file_hash,
     load_bisync_state,
@@ -174,13 +175,13 @@ def validate_new_path_chars(entry: str, local_root: str) -> List[str]:
 
 
 def rclone_lsjson(remote: str, entry: str, local_root: str) -> CommandResult:
-    cmd = ["rclone", "lsjson", remote_path(remote, entry), "--max-depth", "1"]
+    cmd = [rclone_bin(), "lsjson", remote_path(remote, entry), "--max-depth", "1"]
     cmd.extend(local_encoding_flags_for_path(local_root))
     return run_command(cmd)
 
 
 def rclone_lsjson_hash(remote: str, entry: str, local_root: str) -> CommandResult:
-    cmd = ["rclone", "lsjson", remote_path(remote, entry), "--max-depth", "1", "--hash"]
+    cmd = [rclone_bin(), "lsjson", remote_path(remote, entry), "--max-depth", "1", "--hash"]
     cmd.extend(local_encoding_flags_for_path(local_root))
     return run_command(cmd)
 
@@ -227,7 +228,7 @@ def remote_info(remote: str, entry: str, local_root: str) -> dict:
 
 
 def rclone_moveto(remote: str, old_entry: str, new_entry: str, local_root: str) -> CommandResult:
-    cmd = ["rclone", "moveto", remote_path(remote, old_entry), remote_path(remote, new_entry)]
+    cmd = [rclone_bin(), "moveto", remote_path(remote, old_entry), remote_path(remote, new_entry)]
     cmd.extend(local_encoding_flags_for_path(local_root))
     return run_command(cmd)
 
@@ -776,7 +777,7 @@ def preflight(args: argparse.Namespace) -> dict:
         {"type": "local_mv", "from": local_old, "to": local_new},
         {
             "type": "remote_moveto",
-            "cmd": ["rclone", "moveto", remote_path(args.remote, old_entry), remote_path(args.remote, new_entry)],
+            "cmd": [rclone_bin(), "moveto", remote_path(args.remote, old_entry), remote_path(args.remote, new_entry)],
         },
     ]
     if args.followup != "none":
@@ -1163,7 +1164,7 @@ def cmd_apply_detected(args: argparse.Namespace) -> dict:
     payload["operations"] = [
         {
             "type": "remote_moveto",
-            "cmd": ["rclone", "moveto", remote_path(args.remote, old_entry), remote_path(args.remote, new_entry)],
+            "cmd": [rclone_bin(), "moveto", remote_path(args.remote, old_entry), remote_path(args.remote, new_entry)],
         },
         {
             "type": f"bisync_{args.followup}",

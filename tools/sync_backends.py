@@ -26,6 +26,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    rclone_bin,
     CommandResult,
     legacy_filter_path,
     load_sync_filters,
@@ -602,7 +603,7 @@ class RcloneBackend(SyncBackend):
         target = f"{self.remote}:{remote_path}" if remote_path else f"{self.remote}:"
         try:
             proc = subprocess.run(
-                ["rclone", "lsf", target, "--dirs-only", "--max-depth", "1"],
+                [rclone_bin(), "lsf", target, "--dirs-only", "--max-depth", "1"],
                 capture_output=True,
                 text=True,
                 check=True,
@@ -668,11 +669,11 @@ def _default_policy_path() -> str:
 
 def rclone_remote_exists(remote: str) -> bool:
     """Check if a named rclone remote is configured."""
-    if shutil.which("rclone") is None:
+    if shutil.which(rclone_bin()) is None:
         return False
     try:
         proc = subprocess.run(
-            ["rclone", "listremotes"],
+            [rclone_bin(), "listremotes"],
             capture_output=True,
             text=True,
             check=False,

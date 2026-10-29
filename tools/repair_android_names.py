@@ -13,6 +13,7 @@ import argparse
 import os
 import sqlite3
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,10 @@ from typing import Iterable, List
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from ydm import rclone_bin  # noqa: E402
 ANDROID_NAME_MAP = str.maketrans({
     "<": "＜",
     ">": "＞",
@@ -100,7 +105,7 @@ def needs_copy(item: RepairItem, local_root: str, force: bool) -> bool:
 def copy_item(item: RepairItem, remote: str, local_root: str) -> int:
     local = item.local_path(local_root)
     os.makedirs(os.path.dirname(local), exist_ok=True)
-    cmd = ["rclone", "copyto", f"{remote}:{item.remote_rel}", local, "-P"]
+    cmd = [rclone_bin(), "copyto", f"{remote}:{item.remote_rel}", local, "-P"]
     result = subprocess.run(cmd)
     return result.returncode
 

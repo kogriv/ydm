@@ -34,7 +34,7 @@ from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.sync_common import var_path  # noqa: E402
+from tools.sync_common import rclone_bin, var_path  # noqa: E402
 from tools.trash_scan import resolve_token  # noqa: E402
 
 API = "https://cloud-api.yandex.net/v1/disk"
@@ -200,7 +200,7 @@ def _make_notify():
 def _make_refresh(remote: str):
     def refresh() -> None:
         try:
-            subprocess.run(["rclone", "about", f"{remote}:"],
+            subprocess.run([rclone_bin(), "about", f"{remote}:"],
                            capture_output=True, timeout=90)
         except (OSError, subprocess.SubprocessError):
             pass

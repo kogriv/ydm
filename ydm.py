@@ -59,6 +59,16 @@ signal.signal(signal.SIGTERM, handle_signal)
 signal.signal(signal.SIGUSR1, handle_signal)
 
 # --- Helper Functions ---
+def rclone_bin():
+    """The rclone binary ydm runs: `YDM_RCLONE` if set, else `rclone` from PATH.
+
+    A path rather than an upgrade of the system package, because rclone on a
+    machine is shared: other projects use it for copies and mounts, and a newer
+    binary for ydm's bisync should not silently become theirs too.
+    """
+    return os.environ.get("YDM_RCLONE") or "rclone"
+
+
 def load_token_from_env():
     """Load token from .env manually."""
     env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
@@ -1381,7 +1391,7 @@ class RcloneClient(CloudResourceClient):
 
     def get_disk_info(self):
         result = subprocess.run(
-            ["rclone", "about", f"{self.remote}:", "--json"],
+            [rclone_bin(), "about", f"{self.remote}:", "--json"],
             capture_output=True, text=True, check=True
         )
         data = json.loads(result.stdout)
@@ -1404,7 +1414,7 @@ class RcloneClient(CloudResourceClient):
         for _attempt in range(attempts):
             try:
                 result = subprocess.run(
-                    ["rclone", "lsjson", remote_path, "--hash", "--metadata"],
+                    [rclone_bin(), "lsjson", remote_path, "--hash", "--metadata"],
                     capture_output=True, text=True, check=True
                 )
                 entries = json.loads(result.stdout)
@@ -3700,8 +3710,8 @@ class YDM_CLI:
             client = None
             if self.args.scan_target in ("meta", "cloud"):
                 if self.args.backend == "rclone":
-                    if shutil.which("rclone") is None:
-                        self.render("Error: rclone not found in PATH (required for --backend rclone)", success=False)
+                    if shutil.which(rclone_bin()) is None:
+                        self.render(f"Error: {rclone_bin()} not found (required for --backend rclone; set YDM_RCLONE or PATH)", success=False)
                         return True
                     remote = self.args.config.get("rclone_remote", "yandex")
                     provider = self.target_context.provider if self.target_context else "yandex"

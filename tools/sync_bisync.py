@@ -39,6 +39,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    rclone_bin,
     acquire_lock,
     append_text_log,
     filter_file_hash,
@@ -316,7 +317,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         return payload
 
     preview_cmd = [
-        "rclone", "--max-delete", str(args.max_delete), "bisync",
+        rclone_bin(), "--max-delete", str(args.max_delete), "bisync",
         os.path.expanduser(args.local_root), f"{args.remote}:",
         "--filters-file", filter_path, "--resync",
     ]
@@ -498,7 +499,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
         return payload
 
     preview_cmd = [
-        "rclone", "--max-delete", str(args.max_delete), "bisync",
+        rclone_bin(), "--max-delete", str(args.max_delete), "bisync",
         os.path.expanduser(args.local_root), f"{args.remote}:",
         "--filters-file", filter_path,
     ]

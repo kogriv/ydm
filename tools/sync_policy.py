@@ -25,6 +25,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    rclone_bin,
     build_composite_snapshot,
     create_storage,
     legacy_filter_path,
@@ -222,6 +223,18 @@ def effective_bisync_paths(policy: dict) -> List[str]:
     return policy_paths_by_mode(policy, "bidirectional")
 
 
+def quarantine_paths(policy: Optional[dict]) -> List[str]:
+    """Files the sync leaves alone for now, each with the reason it was set aside.
+
+    For a file the cloud lists but will not hand over: on 2026-10-29 Yandex
+    answered 500/503 for a few percent of files, and bisync — before rclone
+    1.66 — aborts the whole run on one of them. Excluding them by hand in the
+    filter file worked until the next `render-filters`, which rewrites it from
+    the policy and silently put them back. Kept in the policy, they survive.
+    """
+    return sorted((policy or {}).get("quarantine", {}))
+
+
 def _is_disabled_ancestor(entry: str, target: str) -> bool:
     """Return True if entry is an ancestor path of target and would block it."""
     if not entry:
@@ -372,13 +385,32 @@ def _policy_coerce_for_daemon(
     return changes
 
 
-def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: bool = False) -> None:
+def filter_glob_escape(path: str) -> str:
+    """A path as a literal in an rclone filter rule.
+
+    Rules are globs: `[rutor.info]` in a name is a character class unless
+    escaped, and the rule then matches some other file or none.
+    """
+    return "".join("\\" + char if char in "\\*?[]{}" else char for char in path)
+
+
+def filter_lines(include_dirs: Iterable[str], *, check_access: bool = False,
+                 exclude: Iterable[str] = ()) -> List[str]:
+    """Rule lines, first match wins: quarantine, then includes, then the rest out."""
+    lines = [f"- /{filter_glob_escape(entry)}" for entry in sorted(set(exclude)) if entry]
+    lines += [f"+ /{filter_glob_escape(entry)}/**" for entry in sorted(set(include_dirs)) if entry]
+    if check_access:
+        lines.append(f"+ /{CHECK_ACCESS_FILENAME}")
+    lines.append("- **")
+    return lines
+
+
+def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: bool = False,
+                      exclude: Iterable[str] = ()) -> None:
     resolved = os.path.expanduser(path)
     os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
-    lines = [f"+ /{entry}/**\n" for entry in sorted(set(include_dirs)) if entry]
-    if check_access:
-        lines.append(f"+ /{CHECK_ACCESS_FILENAME}\n")
-    lines.append("- **\n")
+    lines = [line + "\n" for line in filter_lines(include_dirs, check_access=check_access,
+                                                   exclude=exclude)]
     if os.path.exists(resolved):
         backup = f"{resolved}.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         with open(resolved, "rb") as src, open(backup, "wb") as dst:
@@ -387,12 +419,9 @@ def write_filter_file(path: str, include_dirs: Iterable[str], *, check_access: b
         handle.writelines(lines)
 
 
-def render_filter_text(include_dirs: Iterable[str], *, check_access: bool = False) -> str:
-    lines = [f"+ /{entry}/**" for entry in sorted(set(include_dirs)) if entry]
-    if check_access:
-        lines.append(f"+ /{CHECK_ACCESS_FILENAME}")
-    lines.append("- **")
-    return "\n".join(lines) + "\n"
+def render_filter_text(include_dirs: Iterable[str], *, check_access: bool = False,
+                       exclude: Iterable[str] = ()) -> str:
+    return "\n".join(filter_lines(include_dirs, check_access=check_access, exclude=exclude)) + "\n"
 
 
 def cloud_files_for_path(db_path: str, path: str) -> Tuple[int, bool, List[CloudFile]]:
@@ -618,8 +647,10 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         "bisync_filter_path": bisync_path,
         "download_paths": download_paths,
         "bisync_paths": bisync_paths,
-        "download_filter": render_filter_text(download_paths),
-        "bisync_filter": render_filter_text(bisync_paths, check_access=True),
+        "quarantine": quarantine_paths(policy),
+        "download_filter": render_filter_text(download_paths, exclude=quarantine_paths(policy)),
+        "bisync_filter": render_filter_text(bisync_paths, check_access=True,
+                                            exclude=quarantine_paths(policy)),
         "error": validation_error,
     }
     if target_managed:
@@ -629,8 +660,9 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
         )
     if args.apply and validation_error is None:
         if not target_managed:
-            write_filter_file(download_path, download_paths)
-        write_filter_file(bisync_path, bisync_paths, check_access=True)
+            write_filter_file(download_path, download_paths, exclude=quarantine_paths(policy))
+        write_filter_file(bisync_path, bisync_paths, check_access=True,
+                          exclude=quarantine_paths(policy))
     return result
 
 
@@ -711,7 +743,7 @@ def download_apply(args: argparse.Namespace, policy: dict) -> dict:
     os.replace(temp_path, manifest_path)
     # Exact eligible object paths only. No delete, sync, move, purge, or
     # reverse-transfer flags are permitted in this command.
-    cmd = ["rclone", "copy", f"{args.remote}:", args.local_root,
+    cmd = [rclone_bin(), "copy", f"{args.remote}:", args.local_root,
            "--files-from-raw", manifest_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     plan.update({"command": cmd, "returncode": proc.returncode,
@@ -840,6 +872,7 @@ def status_payload(args: argparse.Namespace) -> dict:
         "bidirectional_paths": effective_bisync_paths(policy) if policy else [],
         "download_only_paths": policy_paths_by_mode(policy, "download_only") if policy else [],
         "disabled_paths": policy_paths_by_mode(policy, "disabled") if policy else [],
+        "quarantine": (policy or {}).get("quarantine", {}),
         "bisync_state": state,
         "resync_needed": (not state_hash or current_bisync_hash != state_hash),
         "error": None if policy else f"Policy not found: {args.policy_path}",
@@ -931,6 +964,54 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         policy["updated_at"] = datetime.now().isoformat()
         write_policy(args.policy_path, policy)
         result["policy"] = policy
+    return result
+
+
+def quarantine_policy_path(args: argparse.Namespace) -> dict:
+    """Set a file aside from sync, or put it back. Policy only: the filter files
+    change on the next `render-filters --apply`, and bisync then wants a resync,
+    because its baseline was built with the old rules."""
+    policy = load_policy(args.policy_path)
+    result = {"schema": SCHEMA, "action": "quarantine", "dry_run": not args.apply,
+              "policy_path": args.policy_path, "error": None}
+    if not policy:
+        result["error"] = f"Policy not found: {args.policy_path}"
+        return result
+    quarantine = dict(policy.get("quarantine", {}))
+    if args.path is None:
+        result["quarantine"] = quarantine
+        return result
+    entry = normalize_entry(args.path)
+    result["path"] = f"/{entry}"
+    if not entry:
+        result["error"] = "Refusing to quarantine the root"
+        return result
+    covering = [p for p in effective_download_paths(policy)
+                if entry == p or entry.startswith(p + "/")]
+    if args.remove:
+        if entry not in quarantine:
+            result["error"] = f"/{entry} is not in quarantine"
+            return result
+        result["removed"] = quarantine.pop(entry)
+    else:
+        if not args.reason:
+            result["error"] = "--reason is required: the entry has to say why, or nobody will know when to take it out"
+            return result
+        if not covering:
+            result["error"] = f"/{entry} is not inside any synced path; quarantining it changes nothing"
+            return result
+        quarantine[entry] = {"reason": args.reason, "since": datetime.now().isoformat(timespec="seconds")}
+        result["added"] = quarantine[entry]
+    result["quarantine"] = quarantine
+    result["next"] = ["sync_policy.py render-filters --apply",
+                      "sync_bisync.py resync --apply  (the filter changed)"]
+    if args.apply:
+        if quarantine:
+            policy["quarantine"] = quarantine
+        else:
+            policy.pop("quarantine", None)
+        policy["updated_at"] = datetime.now().isoformat()
+        write_policy(args.policy_path, policy)
     return result
 
 
@@ -1112,6 +1193,14 @@ def parse_args() -> argparse.Namespace:
     add.add_argument("--export-artifact-root", default=None)
     common_flags(add)
 
+    quarantine = subparsers.add_parser(
+        "quarantine", help="set a file aside from sync (the cloud will not hand it over), or put it back")
+    quarantine.add_argument("--path", default=None, help="omit to list the quarantine")
+    quarantine.add_argument("--reason", default=None)
+    quarantine.add_argument("--remove", action="store_true")
+    quarantine.add_argument("--apply", action="store_true")
+    common_flags(quarantine)
+
     remove = subparsers.add_parser("remove")
     remove.add_argument("--path", required=True)
     remove.add_argument("--apply", action="store_true")
@@ -1285,6 +1374,8 @@ def main() -> None:
             payload = (native_export_action(args, policy) if policy else {
                 "schema": "ydm_native_export_result:v1", "action": "native-export",
                 "dry_run": not args.apply, "error": f"Policy not found: {args.policy_path}"})
+        elif args.command == "quarantine":
+            payload = quarantine_policy_path(args)
         elif args.command == "add":
             export_object_id = getattr(args, "export_object_id", None)
             export_mime_type = getattr(args, "export_mime_type", None)
