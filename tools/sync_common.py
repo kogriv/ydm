@@ -894,11 +894,24 @@ def notify(title: str, message: str, notification_id: str = SYNC_NOTIFICATION_ID
     notification a statement about now rather than an entry in a log.
     """
     binary = shutil.which("termux-notification")
-    if not binary:
-        return
-    command = [binary, "--title", title, "--content", message]
-    if notification_id:
-        command += ["--id", notification_id, "--alert-once"]
+    if binary:
+        command = [binary, "--title", title, "--content", message]
+        if notification_id:
+            command += ["--id", notification_id, "--alert-once"]
+    else:
+        # A Linux desktop: the scheduled run is a systemd user service, which
+        # has the session bus, so notify-send reaches the desktop. Opt-in
+        # (the service sets YDM_NOTIFY_DESKTOP=1): a desktop has notify-send
+        # whether or not anyone asked, and tests or a manual run would
+        # otherwise put cards on the screen. It cannot take a card back the
+        # way termux-notification-remove does, so the once-per-problem rule
+        # in `notify_once` is what keeps it quiet.
+        if os.environ.get("YDM_NOTIFY_DESKTOP") != "1":
+            return
+        binary = shutil.which("notify-send")
+        if not binary:
+            return
+        command = [binary, "--app-name=ydm", title, message]
     try:
         subprocess.run(command, capture_output=True)
     except OSError:
