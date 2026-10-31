@@ -486,6 +486,7 @@ ydm-sync-add /Projects/2024
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples
 - **[Sync Tree v2](tasks/sync_tree/README.md)** - Policy-aware `ydm-tree` (`[B]`/`[D]`/`[L]` markers, orphan paths)
 - **[YDM Menu](tasks/ydm_menu/README.md)** - Interactive sync UI for humans (`ydm`; agents keep `ydm-sync-*` CLI)
+- **[Agent Interface](tasks/agent_interface/README.md)** - Gaps and backlog for the machine-facing CLI: exit codes, agent instructions, preflight, `doctor`
 - **[Sync Manager](tasks/sync_manager/README.md)** - Transitional sync_tree/sync_exclude tools and Sync Manager plans
 - **[Unified Sync Interface](tasks/sync_unification/README.md)** - One CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) for both the `yandex-disk` daemon and the `rclone` backend, with automatic backend detection
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Alternative to the `yandex-disk` daemon for environments without it (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup via rclone

@@ -473,6 +473,7 @@ ydm-sync-add /Projects/2024
 - **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Быстрый старт для AI-ассистентов и автоматизации
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Дополнительные примеры использования
 - **[ANDROID_SETUP.md](docs/ANDROID_SETUP.md)** - Всё устройство работы на Android: proot-Debian внутри Termux, bind-mount'ы, плановый bisync-job и то, что общее хранилище отказывается хранить
+- **[Agent Interface](tasks/agent_interface/README.md)** - Гэпы и бэклог машинного интерфейса: коды возврата, инструкции для агентов, предпроверка, `doctor`
 - **[Sync Manager](tasks/sync_manager/README.md)** - Переходные инструменты sync_tree/sync_exclude и планы Sync Manager
 - **[Единый интерфейс синхронизации](tasks/sync_unification/README.md)** - Один CLI (`ydm-menu`, `ydm-sync-add`, `ydm-tree`) и для демона `yandex-disk`, и для бэкенда `rclone`, с автоопределением бэкенда
 - **[Rclone Backend](tasks/rclone_backend/README.md)** - Альтернатива демону `yandex-disk` для окружений без него (arm64/Android): `RcloneBackend`, `sync_filters.py`, junk cleanup через rclone
