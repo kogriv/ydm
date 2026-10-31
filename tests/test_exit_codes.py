@@ -12,10 +12,12 @@ directory is redirected, and rclone is a stub.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -29,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools import sync_bisync, sync_common, sync_policy, sync_rename  # noqa: E402
+from tools import cloud_delta, sync_bisync, sync_common, sync_policy, sync_rename  # noqa: E402
 
 EXIT_ERROR, EXIT_BLOCKED = sync_common.EXIT_ERROR, sync_common.EXIT_BLOCKED
 
@@ -221,10 +223,15 @@ class TestJsonOnAnEmptyDatabase(CliCase):
                                                "--local-root", self.root, "--format", "json"))
 
     def test_cloud_delta(self):
-        self.empty_db()
-        proc = self.run_tool("tools/cloud_delta.py", "--format", "json", "changes", "--db-path", self.db)
-        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr[-300:])
-        self.assertIn("no such table", proc.stdout)
+        # Patched, not an empty database: how far `changes` gets before touching
+        # one depends on whether this machine has a token to read.
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["cloud_delta.py", "--format", "json", "changes", "--db", self.db]), \
+                patch("tools.cloud_delta.report_changes", side_effect=sqlite3.OperationalError("no such table")), \
+                patch("sys.stdout", out), patch("sys.stderr", io.StringIO()):
+            code = cloud_delta.main()
+        self.assertEqual(code, EXIT_ERROR)
+        self.assertIn("no such table", json.loads(out.getvalue())["data"]["error"])
 
     def test_text_format_keeps_the_traceback(self):
         proc = self.run_tool("ydm.py", "--db-path", self.empty_db(), "report", "status")
