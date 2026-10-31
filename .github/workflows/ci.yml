@@ -101,6 +101,19 @@ jobs:
       - name: Unit tests (Android job — what it does with the guard's verdict)
         run: python tests/test_job_run.py -v
 
+      # What a script or systemd sees: exit codes, and JSON even on a crash.
+      # rclone is a stub and the state directory is redirected.
+      - name: Unit tests (exit codes and the JSON contract)
+        run: python tests/test_exit_codes.py -v
+
+      # The PC's rclone, the quarantine and the systemd units. Written with the
+      # move off the daemon and, until 2026-10-31, listed nowhere here.
+      - name: Unit tests (rclone binary, quarantine, Linux timer)
+        run: |
+          python tests/test_rclone_binary.py -v
+          python tests/test_quarantine.py -v
+          python tests/test_linux_timer.py -v
+
       # The synthetic bench: a policy file, folders on disk and a database,
       # driven end to end. It is the only coverage the menu screens have, and
       # until 2026-08-25 it ran nowhere but a developer's machine — which is

@@ -882,6 +882,20 @@ def append_text_log(path: str, line: str) -> None:
 SYNC_NOTIFICATION_ID = "ydm-sync"
 
 
+#: What the sync tools exit with; 2 is argparse's. Until 2026-10-31 sync_policy,
+#: sync_bisync and the legacy editors exited 0 whatever happened: a failed resync
+#: looked like a clean one to a script, and a failed `run` to systemd.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_BLOCKED = 3    # a guard refused to run: nothing went wrong, nothing was done
+
+
+def exit_code(payload: dict) -> int:
+    if payload.get("error") is None:
+        return EXIT_OK
+    return EXIT_BLOCKED if payload.get("blocked") else EXIT_ERROR
+
+
 def notify(title: str, message: str, notification_id: str = SYNC_NOTIFICATION_ID) -> None:
     """Best-effort termux-notification wrapper — no-op (never raises) if the
     binary isn't available or the call fails.

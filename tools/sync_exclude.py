@@ -16,6 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    exit_code,
     build_composite_snapshot,
     create_storage,
     daemon_status,
@@ -421,7 +422,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     exclude_result = load_exclude_dirs()
     exclude_dirs = exclude_result.exclude_dirs
@@ -448,7 +449,7 @@ def main() -> None:
             error=None,
         )
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
 
     storage = create_storage(args.db_path)
     analyzer = Analyzer(storage)
@@ -478,7 +479,7 @@ def main() -> None:
             error=message,
         )
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
 
     if not path_exists_in_snapshot(analyzer, snapshot, args.path):
         result = ActionResult(
@@ -500,7 +501,7 @@ def main() -> None:
             error=f"Path not found in snapshot: {args.path}",
         )
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
 
     if args.command == "add":
         result = compute_add(analyzer, snapshot, args.path, exclude_dirs)
@@ -550,7 +551,8 @@ def main() -> None:
             result.local_scan_error = local_result.error
 
     render(result, args.format, args.text_header)
+    return exit_code({"error": result.error})
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+import traceback
 import time
 import urllib.error
 import urllib.parse
@@ -1095,26 +1096,36 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    if args.command == "scan":
-        payload = scan_trash(args)
-    elif args.command == "summary":
-        payload = summary(args)
-    elif args.command == "compare-monitor":
-        payload = compare_monitor(args)
-    elif args.command == "restore-plan":
-        payload = restore_plan(args)
-    elif args.command == "restore-files":
-        payload = restore_files(args)
-    elif args.command == "poll-ops":
-        payload = poll_ops(args)
-    elif args.command == "restore-root":
-        payload = restore_root(args)
-    else:
-        raise SystemExit(f"Unknown command: {args.command}")
+    try:
+        if args.command == "scan":
+            payload = scan_trash(args)
+        elif args.command == "summary":
+            payload = summary(args)
+        elif args.command == "compare-monitor":
+            payload = compare_monitor(args)
+        elif args.command == "restore-plan":
+            payload = restore_plan(args)
+        elif args.command == "restore-files":
+            payload = restore_files(args)
+        elif args.command == "poll-ops":
+            payload = poll_ops(args)
+        elif args.command == "restore-root":
+            payload = restore_root(args)
+        else:
+            raise SystemExit(f"Unknown command: {args.command}")
+    except (Exception, SystemExit) as exc:
+        if args.format != "json":
+            raise
+        if not isinstance(exc, SystemExit):
+            traceback.print_exc()
+        print(json.dumps({"success": False, "data": {"action": args.command, "error": str(exc)}},
+                         ensure_ascii=False, indent=2))
+        return 1
     render(payload, args.format)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

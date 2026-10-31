@@ -25,6 +25,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    exit_code,
     rclone_bin,
     build_composite_snapshot,
     create_storage,
@@ -1422,22 +1423,23 @@ def _target_managed_backend_skip(args: argparse.Namespace) -> dict:
     }
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     try:
         configure_target_args(args)
     except (TargetConfigError, OSError) as exc:
-        render({"schema": SCHEMA, "action": args.command, "dry_run": True,
-                "policy_path": getattr(args, "policy_path", None), "error": str(exc)}, args.format, args.text_header)
-        return
+        payload = {"schema": SCHEMA, "action": args.command, "dry_run": True,
+                   "policy_path": getattr(args, "policy_path", None), "error": str(exc)}
+        render(payload, args.format, args.text_header)
+        return exit_code(payload)
     args.local_root = require_local_root(args.local_root, tool="sync_policy.py")
     try:
         refusal = _policy_copy_on_live_daemon(args)
         if refusal:
-            render({"schema": SCHEMA, "action": args.command, "dry_run": True,
-                    "policy_path": args.policy_path, "error": refusal},
-                   args.format, args.text_header)
-            return
+            payload = {"schema": SCHEMA, "action": args.command, "dry_run": True,
+                       "policy_path": args.policy_path, "error": refusal}
+            render(payload, args.format, args.text_header)
+            return exit_code(payload)
         if args.command == "status":
             payload = status_payload(args)
         elif args.command == "inspect":
@@ -1538,7 +1540,8 @@ def main() -> None:
             "error": str(exc),
         }
     render(payload, args.format, args.text_header)
+    return exit_code(payload)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

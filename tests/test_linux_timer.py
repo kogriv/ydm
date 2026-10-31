@@ -44,6 +44,13 @@ class TestRender(unittest.TestCase):
                                   text=True, env=full)
             return proc, root, full["YDM_RCLONE"]
 
+    def test_a_failed_run_is_a_failed_unit(self):
+        # sync_bisync exits non-zero on failure and on a guard's refusal; any
+        # of these lines would hide that from systemd again.
+        proc, _root, _binary = self.render()
+        for hidden in ("SuccessExitStatus", "ExecStart=-", "Restart="):
+            self.assertNotIn(hidden, proc.stdout)
+
     def test_service_runs_the_named_rclone_on_the_mirror(self):
         proc, root, binary = self.render()
         self.assertEqual(proc.returncode, 0, proc.stderr)

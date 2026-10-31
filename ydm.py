@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import os
 import sys
+import traceback
 import json
 from datetime import datetime, timezone
 import shutil
@@ -4161,7 +4162,14 @@ class YDM_CLI:
 
 if __name__ == "__main__":
     cli = YDM_CLI()
-    handled = cli.run()
+    try:
+        handled = cli.run()
+    except Exception as exc:
+        if getattr(cli.args, "format", None) != "json":
+            raise
+        traceback.print_exc()
+        cli.render(f"{type(exc).__name__}: {exc}", success=False)
+        handled = True
     # Until 2026-08-24 this line was `cli.run()` with the result discarded, so
     # every command exited 0 — including "token not found" and "scan failed".
     # `ydm.py … && next-step` ran next-step regardless, and callers that

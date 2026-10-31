@@ -855,14 +855,16 @@ class TestBisyncFilterSelection(BenchTestCase):
             handle.write("+ /pro/**\n- **\n")
         return paths
 
-    def _bisync(self, *args):
+    def _bisync(self, *args, exit_code=0):
         proc = self.run_tool(
             "sync_bisync.py", *args,
             "--db-path", self.bench.db_path,
             "--local-root", self.bench.local_root,
             "--policy-path", self.bench.policy_path,
             "--remote", "cloud", "--format", "json",
+            expect_ok=False,
         )
+        self.assertEqual(proc.returncode, exit_code, proc.stderr[-3000:])
         body = proc.stdout[proc.stdout.index("{"):]
         payload = json.loads(body)
         return payload.get("data", payload)
@@ -874,14 +876,14 @@ class TestBisyncFilterSelection(BenchTestCase):
 
     def test_resync_refuses_a_download_filter(self):
         paths = self._filters()
-        data = self._bisync("resync", "--apply", "--filter-path", paths["download"])
+        data = self._bisync("resync", "--apply", "--filter-path", paths["download"], exit_code=3)
         self.assertIsNotNone(data["error"])
         self.assertIn("download filter", data["error"])
 
     def test_resync_refuses_the_pre_policy_filter_too(self):
         """`<root>.filters` is a download set as well — an older one."""
         paths = self._filters()
-        data = self._bisync("resync", "--apply", "--filter-path", paths["legacy"])
+        data = self._bisync("resync", "--apply", "--filter-path", paths["legacy"], exit_code=3)
         self.assertIsNotNone(data["error"])
         self.assertIn("download filter", data["error"])
 
@@ -894,7 +896,7 @@ class TestBisyncFilterSelection(BenchTestCase):
         """
         paths = self._filters()
         data = self._bisync(
-            "resync", "--apply", "--force-filter", "--filter-path", paths["download"],
+            "resync", "--apply", "--force-filter", "--filter-path", paths["download"], exit_code=1,
         )
         self.assertIsNotNone(data["error"])
         self.assertNotIn("download filter", data["error"])

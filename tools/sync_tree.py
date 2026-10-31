@@ -6,6 +6,7 @@ import bisect
 import json
 import os
 import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -814,8 +815,7 @@ def _resolve_backend_name(args) -> str:
     return backend
 
 
-def main() -> None:
-    args = parse_args()
+def run(args) -> None:
     args.local_root = require_local_root(args.local_root, tool="sync_tree.py")
     root_path = normalize_path(args.path)
     schema = args.schema
@@ -1024,5 +1024,19 @@ def main() -> None:
             print(line)
 
 
+def main() -> int:
+    args = parse_args()
+    try:
+        run(args)
+    except Exception as exc:
+        if args.format != "json":
+            raise
+        traceback.print_exc()
+        print(json.dumps({"success": False, "data": {"schema": args.schema, "error": str(exc)}},
+                         ensure_ascii=False, indent=2))
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

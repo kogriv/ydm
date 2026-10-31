@@ -26,6 +26,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    EXIT_OK,
+    exit_code,
     rclone_bin,
     CommandResult,
     filter_file_hash,
@@ -1565,16 +1567,17 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     try:
         configure_target_args(args)
         if getattr(args, "target_managed", False):
             args.bisync_filter_path = args.target_context.bisync_filter_path
     except Exception as exc:
-        render({"schema": SCHEMA, "action": args.command, "dry_run": True,
-                "error": str(exc)}, args.format)
-        return
+        payload = {"schema": SCHEMA, "action": args.command, "dry_run": True,
+                   "error": str(exc)}
+        render(payload, args.format)
+        return exit_code(payload)
     if args.command == "plan":
         payload = cmd_plan(args)
     elif args.command == "apply":
@@ -1592,7 +1595,14 @@ def main() -> None:
     else:
         payload = cmd_status(args)
     render(payload, args.format)
+    # A preflight that reached a decision has answered, even if the answer
+    # carries an error. job_run.sh reads a non-zero exit as "the guard is
+    # absent" and runs bisync without it, which must never override a
+    # block_bisync from the JSON.
+    if args.command == "preflight" and payload.get("decision"):
+        return EXIT_OK
+    return exit_code(payload)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

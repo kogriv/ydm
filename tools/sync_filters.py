@@ -28,6 +28,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    exit_code,
     build_composite_snapshot,
     create_storage,
     legacy_filter_path,
@@ -231,7 +232,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     # This legacy editor owns only legacy filter files.  Refuse a target
     # selection before opening a DB, writing a filter, or spawning rclone.
@@ -240,7 +241,7 @@ def main() -> None:
         result = ActionResult(action=args.command, path=getattr(args, "path", ""), dry_run=True,
                               before=[], after=[], error="target-managed invocation is unsupported; use sync_policy.py")
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
     args.local_root = require_local_root(args.local_root, tool="sync_filters.py")
     filter_path = args.filter_path or legacy_filter_path(args.local_root)
     filters_result = load_sync_filters(filter_path)
@@ -251,7 +252,7 @@ def main() -> None:
         result = ActionResult(action="list", path="", dry_run=True, before=include_dirs, after=include_dirs,
                                warnings=warnings, filter_path=filter_path)
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
 
     storage = create_storage(args.db_path)
     analyzer = Analyzer(storage)
@@ -266,7 +267,7 @@ def main() -> None:
                                before=include_dirs, after=include_dirs, warnings=warnings,
                                filter_path=filter_path, error=message)
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
 
     if not path_exists_in_snapshot(analyzer, snapshot, args.path):
         result = ActionResult(action=args.command, path=normalize_path(args.path), dry_run=True,
@@ -274,7 +275,7 @@ def main() -> None:
                                filter_path=filter_path, snapshot_base_scan_id=snapshot.base_scan_id,
                                error=f"Path not found in cloud snapshot: {args.path}")
         render(result, args.format, args.text_header)
-        return
+        return exit_code({"error": result.error})
 
     if args.command == "add":
         result = compute_add(args.path, include_dirs)
@@ -304,6 +305,8 @@ def main() -> None:
                 "stdout": materialize.stdout,
                 "stderr": materialize.stderr,
             }
+            if materialize.returncode != 0:
+                result.error = f"rclone copy failed (returncode={materialize.returncode})"
         elif args.command == "remove" and args.delete_local:
             entry = result.removed[0]
             check = rclone_check_entry(args.remote, entry, args.local_root)
@@ -321,7 +324,8 @@ def main() -> None:
                 }
 
     render(result, args.format, args.text_header)
+    return exit_code({"error": result.error})
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

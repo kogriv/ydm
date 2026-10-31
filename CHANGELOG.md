@@ -5,6 +5,14 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-10-31 — exit codes mean something
+
+- **`sync_policy`, `sync_bisync`, `sync_filters`, `sync_exclude` and `sync_rename` exit non-zero on failure.** They used to exit 0 whatever happened, so a failed resync looked clean to a script and a failed `run` looked clean to systemd. `0` is done, `1` failed, `3` a guard refused to run (`blocked: true` in the JSON); `2` stays argparse's.
+- **`sync_rename.py preflight` still exits 0 once it has a decision.** The Android job reads a non-zero preflight as "the guard is absent" and syncs without it, which must never override a `block_bisync`.
+- **`--format json` answers in JSON on a crash.** `ydm.py`, `cloud_delta.py`, `trash_scan.py` and `sync_tree.py` printed a traceback instead; it now goes to stderr.
+- **`sync_filters.py add --apply` reports a failed `rclone copy`** instead of succeeding with a non-zero `returncode` buried in its output.
+- **CI runs `test_rclone_binary`, `test_quarantine` and `test_linux_timer`.** They were written with the move to rclone and listed nowhere.
+
 ## 2026-10-29 — the PC syncs through rclone bisync, not the daemon
 
 The daemon (yandex-disk 0.1.6.1080, the newest Yandex ships for Linux) does

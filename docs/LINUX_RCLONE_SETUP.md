@@ -172,6 +172,15 @@ establishes a baseline, and refuses to sync when the filter changed since the
 last resync. When a run is blocked or fails, a desktop notification says so —
 once per problem, not once per run.
 
+The exit code tells the two apart, for systemd and for scripts: `0` done, `1`
+failed, `3` a guard refused to run (no baseline, changed filter, another run
+holds the lock). Either way the unit shows as `failed` until a later run
+succeeds, and the timer keeps firing:
+
+```bash
+systemctl --user is-failed ydm-bisync.service
+```
+
 ```bash
 YDM_RCLONE=~/.local/opt/rclone-v1.75.2/rclone bash tools/linux/install_timer.sh install
 bash tools/linux/install_timer.sh status

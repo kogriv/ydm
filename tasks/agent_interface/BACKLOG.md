@@ -14,18 +14,18 @@
 
 ---
 
-## Phase 1 — Честный результат (G1)
+## Phase 1 — Честный результат (G1) ✅
 
 *Estimate:* 4–5 h
 
 | ID | Task | Files | Acceptance |
 |----|------|-------|------------|
-| 1.1 | Ненулевой код при `error` / `success: false` во всех CLI на конверте | `tools/sync_bisync.py`, `tools/sync_policy.py`, `tools/sync_filters.py`, `tools/sync_exclude.py`, `tools/sync_rename.py` | Таблица из G1 даёт ненулевой код; успешные вызовы и dry-run — 0 |
-| 1.2 | Отделить отказ от сбоя: 1 — ошибка, отдельный код — заблокировано защитой (нужен resync, занята блокировка) | те же, `docs/` | Коды описаны; `run` при изменившемся фильтре даёт код блокировки |
-| 1.3 | Проверить вызывающих: меню, `ydm-sync-*`, скрипты Termux и `install_timer.sh` | `tools/ydm_menu*.py`, `tools/aliases.sh`, `tools/termux/` | Никто не ломается от ненулевого кода; разовый отказ не сбивает расписание |
-| 1.4 | Таймер: сбой виден в systemd | `tools/linux/install_timer.sh`, `tests/test_linux_timer.py` | Упавший `run` — `failed` в `systemctl --user`; следующий запуск по расписанию не отменяется |
-| 1.5 | Необработанные исключения при `--format json` превращаются в конверт с ошибкой | `ydm.py`, `tools/cloud_delta.py`, `tools/trash_scan.py`, `tools/sync_tree.py` | Пустая база даёт JSON и ненулевой код, без трассировки в stdout |
-| 1.6 | Тест на контракт кодов для всех CLI с `--format json` | `tests/` | Новый инструмент, нарушающий контракт, валит CI |
+| 1.1 | ✅ Ненулевой код при `error` / `success: false` во всех CLI на конверте | `tools/sync_bisync.py`, `tools/sync_policy.py`, `tools/sync_filters.py`, `tools/sync_exclude.py`, `tools/sync_rename.py` | Таблица из G1 даёт ненулевой код; успешные вызовы и dry-run — 0 |
+| 1.2 | ✅ Отделить отказ от сбоя: 1 — ошибка, 3 — заблокировано защитой (нужен resync, занята блокировка), `blocked: true` в JSON | те же, `docs/` | Коды описаны; `run` при изменившемся фильтре даёт 3 |
+| 1.3 | ✅ Проверить вызывающих. `job_run.sh` читает ненулевой код preflight как «защиты нет» и запускает bisync, поэтому `sync_rename.py preflight` с решением всегда даёт 0 | `tools/sync_rename.py`, `tests/test_exit_codes.py`, `tests/test_sync_bench.py` | Решение никогда не превращается в запуск без защиты; разовый отказ не сбивает расписание |
+| 1.4 | ✅ Таймер: сбой виден в systemd | `tests/test_linux_timer.py`, `docs/LINUX_RCLONE_SETUP.md` | Упавший `run` — `failed` в `systemctl --user`; проверено на временном юните: `OnUnitInactiveSec` срабатывает и после сбоя |
+| 1.5 | ✅ Необработанные исключения при `--format json` превращаются в конверт с ошибкой | `ydm.py`, `tools/cloud_delta.py`, `tools/trash_scan.py`, `tools/sync_tree.py` | Пустая база даёт JSON и ненулевой код, без трассировки в stdout |
+| 1.6 | ✅ Тест на контракт кодов для всех CLI с `--format json` | `tests/` | Новый инструмент, нарушающий контракт, валит CI; `tests/test_exit_codes.py` в CI, туда же добавлены `test_rclone_binary`, `test_quarantine`, `test_linux_timer` |
 
 **Exit:** ни один провал не выглядит успехом ни для агента, ни для systemd.
 

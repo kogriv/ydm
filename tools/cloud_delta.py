@@ -32,6 +32,7 @@ import json
 import os
 import sqlite3
 import sys
+import traceback
 import time
 import urllib.error
 import urllib.parse
@@ -636,7 +637,9 @@ def main() -> int:
             payload = check_revision(args)
         else:
             payload = report_changes(args)
-    except (CloudDeltaError, SystemExit) as exc:
+    except (CloudDeltaError, SystemExit, Exception) as exc:
+        if not isinstance(exc, (CloudDeltaError, SystemExit)):
+            traceback.print_exc()
         payload = {
             "schema": SCHEMA,
             "action": args.command,

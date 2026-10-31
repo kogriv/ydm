@@ -39,6 +39,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    exit_code,
     bisync_resilience_flags,
     rclone_version,
     rclone_bin,
@@ -301,6 +302,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         refusal = refuse_download_filter(filter_path, args.local_root, "resync")
         if refusal:
             payload["error"] = refusal
+            payload["blocked"] = True
             return payload
 
     filters_result = load_sync_filters(filter_path)
@@ -316,6 +318,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         args, load_sync_policy(getattr(args, "policy_path", None) or default_policy_path()))
     if eligibility_error:
         payload["error"] = eligibility_error
+        payload["blocked"] = True
         return payload
 
     preview_cmd = [
@@ -344,6 +347,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
             f"Another bisync run is already in progress (PID: {lock.holder_pid})."
             if lock.holder_pid else "Failed to acquire bisync lock."
         )
+        payload["blocked"] = True
         append_text_log(log_path, f"{datetime.now().isoformat()} resync SKIPPED {payload['error']}")
         return payload
 
@@ -485,6 +489,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
         )
 
     if payload["error"]:
+        payload["blocked"] = True
         if args.apply:
             append_text_log(log_path,
                              f"{datetime.now().isoformat()} run BLOCKED {payload['error']}")
@@ -496,6 +501,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
         args, load_sync_policy(getattr(args, "policy_path", None) or default_policy_path()))
     if eligibility_error:
         payload["error"] = eligibility_error
+        payload["blocked"] = True
         if args.apply:
             append_text_log(log_path,
                             f"{datetime.now().isoformat()} run BLOCKED {payload['error']}")
@@ -522,6 +528,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
             f"Another bisync run is already in progress (PID: {lock.holder_pid})."
             if lock.holder_pid else "Failed to acquire bisync lock."
         )
+        payload["blocked"] = True
         append_text_log(log_path,
                          f"{datetime.now().isoformat()} run SKIPPED {payload['error']}")
         return payload
@@ -775,14 +782,15 @@ def parse_args() -> argparse.Namespace:
     return build_parser().parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     try:
         configure_target(args)
     except Exception as exc:
-        render({"schema": "sync_bisync:v1", "action": args.command,
-                "dry_run": True, "error": str(exc)}, args.format, args.text_header)
-        return
+        payload = {"schema": "sync_bisync:v1", "action": args.command,
+                   "dry_run": True, "error": str(exc)}
+        render(payload, args.format, args.text_header)
+        return exit_code(payload)
     if args.command == "resync":
         payload = cmd_resync(args)
     elif args.command == "run":
@@ -790,7 +798,8 @@ def main() -> None:
     else:
         payload = cmd_status(args)
     render(payload, args.format, args.text_header)
+    return exit_code(payload)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
