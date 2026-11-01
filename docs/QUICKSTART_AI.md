@@ -9,8 +9,8 @@ to handle a long scan.
 | Tool | What it does | `--format` default | Where `--format` goes |
 |------|--------------|--------------------|-----------------------|
 | `ydm.py` | Database, cloud and local scans, reports | `text` | before the subcommand |
-| `tools/sync_policy.py` | The sync policy: `add`, `remove`, `quarantine`, `ignore`, `render-filters`, `download-plan`, `download-apply` | `text` | after the subcommand |
-| `tools/sync_bisync.py` | rclone bisync: `status`, `resync`, `run` | `json` | after the subcommand |
+| `tools/sync_policy.py` | The sync policy: `add`, `remove`, `quarantine`, `ignore`, `render-filters`, `download-plan`, `download-apply`, `import-file` | `text` | after the subcommand |
+| `tools/sync_bisync.py` | rclone bisync: `doctor`, `status`, `pause`, `resume`, `resync`, `run` | `json` | after the subcommand |
 | `tools/sync_rename.py` | Renames that do not re-upload: `plan`, `apply`, `preflight` | `text` | after the subcommand |
 | `tools/sync_tree.py` | The synced tree and its state, from the snapshot | `json` | anywhere |
 | `tools/cloud_delta.py` | Read-only: which folders went stale, in a few requests (needs the API token) | `text` | before the subcommand |
@@ -22,7 +22,8 @@ The defaults differ, so always pass `--format json`. Prefer `sync_policy.py` to
 the two legacy editors on any machine that has a policy.
 
 State lives in `monitor.db` (scans) and `var/` (`sync_policy.json`,
-`bisync_state.json`, `bisync.log`, `bisync_last.log`).
+`bisync_state.json`, `bisync_pause.json`, `bisync.log`, `bisync_last.log`,
+`rclone_binary`).
 
 ## Output contract
 
@@ -114,6 +115,7 @@ Progress is a stream of JSON lines:
 ```bash
 python3 ydm.py --format json report scan-list --limit 5 | jq '.data.scans[] | {id, type, status, files_count}'
 python3 ydm.py --format json report scan-progress --scan-id <ID> | jq '.data.scan.progress'
+python3 tools/sync_bisync.py doctor --format json | jq '.data | {healthy, failed, warned}'
 python3 tools/sync_policy.py status --format json | jq '.data | {bidirectional_paths, download_only_paths, quarantine, ignore, resync_needed}'
 python3 tools/sync_bisync.py status --format json | jq '.data | {state, current_filter_hash}'
 python3 tools/sync_tree.py --path /Folder --depth 2 --format json --show-all | jq '.schema'

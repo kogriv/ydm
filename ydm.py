@@ -61,13 +61,26 @@ signal.signal(signal.SIGUSR1, handle_signal)
 
 # --- Helper Functions ---
 def rclone_bin():
-    """The rclone binary ydm runs: `YDM_RCLONE` if set, else `rclone` from PATH.
+    """The rclone binary ydm runs: `YDM_RCLONE`, else the one recorded in
+    `var/rclone_binary`, else `rclone` from PATH.
 
     A path rather than an upgrade of the system package, because rclone on a
     machine is shared: other projects use it for copies and mounts, and a newer
-    binary for ydm's bisync should not silently become theirs too.
+    binary for ydm's bisync should not silently become theirs too. The file is
+    what `tools/linux/install_timer.sh install` leaves behind, so that a command
+    run by hand gets the binary the timer uses without anyone exporting anything.
     """
-    return os.environ.get("YDM_RCLONE") or "rclone"
+    binary = os.environ.get("YDM_RCLONE")
+    if binary:
+        return binary
+    base = os.environ.get("YDM_VAR_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "var")
+    try:
+        with open(os.path.join(base, "rclone_binary"), encoding="utf-8") as handle:
+            recorded = handle.read().strip()
+    except OSError:
+        return "rclone"
+    return recorded if recorded and os.access(recorded, os.X_OK) else "rclone"
 
 
 def load_token_from_env():

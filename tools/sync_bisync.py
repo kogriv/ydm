@@ -42,7 +42,9 @@ if str(ROOT_DIR) not in sys.path:
 
 from tools.sync_common import (  # noqa: E402
     exit_code,
+    bisync_environment_warnings,
     bisync_resilience_flags,
+    TIMEOUT_RETURNCODE,
     rclone_version,
     rclone_bin,
     acquire_lock,
@@ -311,6 +313,8 @@ def cmd_resync(args: argparse.Namespace) -> dict:
 
     filters_result = load_sync_filters(filter_path)
     payload["warnings"].extend(filters_result.warnings)
+    payload["warnings"].extend(bisync_environment_warnings(
+        rclone_version(), no_proxy=getattr(args, "no_proxy", False)))
     if not filters_result.include_dirs:
         payload["error"] = (
             "No folders included in the filter-file yet — add at least one "
@@ -369,7 +373,8 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         result = rclone_bisync_run(
             args.remote, args.local_root, filter_path,
             resync=True, max_delete=args.max_delete, check_access=args.check_access,
-            stream=stream,
+            stream=stream, timeout=getattr(args, "timeout_sec", None),
+            no_proxy=getattr(args, "no_proxy", False),
         )
         payload["bisync"] = {
             "cmd": result.cmd, "returncode": result.returncode,
@@ -424,6 +429,10 @@ def quarantine_reason(failure: str) -> str:
 
 def next_action(stderr: str, failed_paths: List[Dict[str, str]], args: argparse.Namespace) -> Dict[str, object]:
     """What the failure calls for. Advice only: nothing here is ever run for you."""
+    if getattr(args, "timed_out", False):
+        return {"kind": "timed_out", "commands": [],
+                "why": "rclone was stopped at --timeout-sec. Hanging on listings usually means a "
+                       "proxy in the environment; see the warnings, and --no-proxy."}
     if "too many deletes" in stderr:
         return {"kind": "stop", "commands": [],
                 "why": "One side lost more files than --max-delete allows. This is what a "
@@ -456,6 +465,7 @@ def record_failure(payload: dict, result, args: argparse.Namespace) -> None:
     """Turn rclone's log into fields a reader does not have to grep."""
     stderr = strip_ansi(result.stderr)
     payload["bisync"]["stderr"] = stderr
+    args.timed_out = result.returncode == TIMEOUT_RETURNCODE
     payload["failed_paths"] = rclone_failed_paths(stderr)
     payload["next_action"] = next_action(stderr, payload["failed_paths"], args)
 
@@ -531,6 +541,18 @@ def cmd_run(args: argparse.Namespace) -> dict:
         "error": None,
     }
 
+    paused = load_pause(_pause_path(args))
+    if paused:
+        payload["error"] = (f"Sync is paused since {paused.get('since')}: {paused.get('reason')}. "
+                            f"`sync_bisync.py resume --apply` ends it.")
+        payload["blocked"] = True
+        payload["paused"] = paused
+        if args.apply:
+            append_text_log(log_path, f"{datetime.now().isoformat()} run PAUSED {paused.get('reason')}")
+        return payload
+    payload["warnings"].extend(bisync_environment_warnings(
+        rclone_version(), no_proxy=getattr(args, "no_proxy", False)))
+
     current_hash = filter_file_hash(filter_path)
     if not state.get("last_resync_filter_hash"):
         payload["error"] = "No successful resync on record — run `sync_bisync.py resync --apply` first."
@@ -593,7 +615,8 @@ def cmd_run(args: argparse.Namespace) -> dict:
         result = rclone_bisync_run(
             args.remote, args.local_root, filter_path,
             resync=False, max_delete=args.max_delete, check_access=args.check_access,
-            stream=stream,
+            stream=stream, timeout=getattr(args, "timeout_sec", None),
+            no_proxy=getattr(args, "no_proxy", False),
         )
         payload["bisync"] = {
             "cmd": result.cmd, "returncode": result.returncode,
@@ -649,6 +672,64 @@ def cmd_run(args: argparse.Namespace) -> dict:
         release_lock(lock_path)
 
 
+def _pause_path(args: argparse.Namespace) -> str:
+    """A file of its own: a run in progress rewrites the state file when it ends,
+    and would take a pause set in the meantime with it."""
+    state_path = _runtime_paths(args)[0]
+    return f"{state_path}.pause" if state_path else var_path("bisync_pause.json")
+
+
+def load_pause(path: str) -> Dict[str, str]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            pause = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        return {"reason": "unreadable pause file", "since": None}
+    return pause if isinstance(pause, dict) else {"reason": "unreadable pause file", "since": None}
+
+
+def cmd_pause(args: argparse.Namespace) -> dict:
+    path = _pause_path(args)
+    pause = {"reason": args.reason, "since": datetime.now().isoformat(timespec="seconds")}
+    payload = {"schema": "sync_bisync:v1", "action": "pause", "dry_run": not args.apply,
+               "paused": pause, "pause_path": path, "previous": load_pause(path) or None,
+               "warnings": [], "error": None}
+    holder = lock_holder(_runtime_paths(args)[3])
+    if holder:
+        payload["warnings"].append(f"A run is in progress (PID: {holder}); it will finish. "
+                                   f"The pause stops the next one.")
+    if args.apply:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(pause, handle, ensure_ascii=False)
+        append_text_log(_runtime_paths(args)[1],
+                        f"{datetime.now().isoformat()} PAUSED {args.reason}")
+    return payload
+
+
+def cmd_resume(args: argparse.Namespace) -> dict:
+    path = _pause_path(args)
+    pause = load_pause(path)
+    payload = {"schema": "sync_bisync:v1", "action": "resume", "dry_run": not args.apply,
+               "was_paused": pause or None, "error": None}
+    if args.apply and pause:
+        os.remove(path)
+        append_text_log(_runtime_paths(args)[1], f"{datetime.now().isoformat()} RESUMED")
+    return payload
+
+
+def lock_holder(lock_path: str):
+    """PID of a live run, or None. A lock left by a dead one holds nothing."""
+    try:
+        with open(lock_path) as handle:
+            pid = int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if os.path.exists(f"/proc/{pid}") else None
+
+
 def cmd_status(args: argparse.Namespace) -> dict:
     filter_path = args.filter_path or default_bisync_filter_path(args.local_root)
     policy_path = getattr(args, "policy_path", None) or default_policy_path()
@@ -689,6 +770,7 @@ def cmd_status(args: argparse.Namespace) -> dict:
         "schema": "sync_bisync:v1",
         "action": "status",
         "dry_run": True,
+        "paused": load_pause(_pause_path(args)) or None,
         "local_root": args.local_root,
         "remote": args.remote,
         "filter_path": filter_path,
@@ -772,6 +854,12 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
         print(f"state_after: {json.dumps(payload['state_after'], ensure_ascii=False)}")
     if payload.get("resync_needed") is not None:
         print(f"resync_needed: {payload['resync_needed']}")
+    if payload.get("paused"):
+        print(f"paused: {json.dumps(payload['paused'], ensure_ascii=False)}")
+    for check in payload.get("checks") or []:
+        print(f"{check['status']:<7} {check['name']}: {check['detail']}")
+        if check.get("next"):
+            print(f"        next: {check['next']}")
     if payload.get("log_tail"):
         print("recent log:")
         for line in payload["log_tail"]:
@@ -808,12 +896,20 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--target", default=None)
         sub.add_argument("--targets-file", default=None)
 
+    def timing_flags(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--timeout-sec", type=float, default=0,
+                         help="stop rclone after this long, for listings that hang; "
+                              "off by default, because a first baseline can take hours")
+        sub.add_argument("--no-proxy", action="store_true",
+                         help="drop the proxy variables from rclone's environment, as the timer does")
+
     resync_parser = subparsers.add_parser(
         "resync", help="Establish/re-establish the bisync baseline (Path1 may overwrite Path2)"
     )
     common_flags(resync_parser)
     resync_parser.add_argument("--apply", action="store_true")
     resync_parser.add_argument("--max-delete", type=int, default=20)
+    timing_flags(resync_parser)
     resync_parser.add_argument("--check-access", action=argparse.BooleanOptionalAction, default=True)
     resync_parser.add_argument(
         "--force-filter", action="store_true",
@@ -827,6 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     common_flags(run_parser)
     run_parser.add_argument("--apply", action="store_true")
     run_parser.add_argument("--max-delete", type=int, default=20)
+    timing_flags(run_parser)
     run_parser.add_argument("--check-access", action=argparse.BooleanOptionalAction, default=True)
     run_parser.add_argument("--notify-on-error", action=argparse.BooleanOptionalAction, default=True)
 
@@ -834,6 +931,22 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Show bisync state, lock status, and recent log lines (read-only)"
     )
     common_flags(status_parser)
+
+    pause_parser = subparsers.add_parser(
+        "pause", help="stop scheduled runs until `resume`; a resync still works, on purpose")
+    common_flags(pause_parser)
+    pause_parser.add_argument("--reason", required=True)
+    pause_parser.add_argument("--apply", action="store_true")
+
+    resume_parser = subparsers.add_parser("resume", help="end a pause")
+    common_flags(resume_parser)
+    resume_parser.add_argument("--apply", action="store_true")
+
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="one read-only summary of this machine's sync: what is wrong and what to do")
+    common_flags(doctor_parser)
+    doctor_parser.add_argument("--check-network", action="store_true",
+                               help="also list the remote and look for RCLONE_TEST")
 
     return parser
 
@@ -855,6 +968,13 @@ def main() -> int:
         payload = cmd_resync(args)
     elif args.command == "run":
         payload = cmd_run(args)
+    elif args.command == "pause":
+        payload = cmd_pause(args)
+    elif args.command == "resume":
+        payload = cmd_resume(args)
+    elif args.command == "doctor":
+        from tools.sync_doctor import cmd_doctor
+        payload = cmd_doctor(args)
     else:
         payload = cmd_status(args)
     render(payload, args.format, args.text_header)

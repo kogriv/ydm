@@ -47,7 +47,8 @@ class TestWhichRclone(unittest.TestCase):
     def test_path_rclone_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("YDM_RCLONE", None)
-            self.assertEqual(sync_common.rclone_bin(), "rclone")
+            with tempfile.TemporaryDirectory() as var, patch.dict(os.environ, {"YDM_VAR_DIR": var}):
+                self.assertEqual(sync_common.rclone_bin(), "rclone")
 
     def test_ydm_rclone_names_the_binary(self):
         with patch.dict(os.environ, {"YDM_RCLONE": "/opt/rclone-v1.75.2/rclone"}):

@@ -95,8 +95,8 @@ done
 Run bisync straight to Yandex. A login session that exports `https_proxy`
 (a VPN exit abroad, here) hands it to rclone too, and on 2026-10-29 a resync
 sat on its listings for half an hour that way without moving a byte. The timer
-unsets the proxy variables; for a manual run, prefix the command with
-`env -u http_proxy -u https_proxy -u ALL_PROXY`.
+unsets the proxy variables. A manual `resync` or `run` warns about them in its
+plan; pass `--no-proxy` to drop them.
 
 A `--dry-run` does not write the `.md5`, so a missing one shows up only on the
 real resync — as `Bisync critical error: open …filters.md5: permission denied`,
@@ -188,6 +188,11 @@ succeeds, and the timer keeps firing:
 ```bash
 systemctl --user is-failed ydm-bisync.service
 ```
+
+Installing records the rclone in `var/rclone_binary`, so a command run by hand uses
+the same one without `YDM_RCLONE`. To hold the timer off, whether for maintenance
+or anything else, use `sync_bisync.py pause --reason … --apply`; `resume --apply`
+ends it, and `sync_bisync.py doctor` shows the machine's state in one go.
 
 ```bash
 YDM_RCLONE=~/.local/opt/rclone-v1.75.2/rclone bash tools/linux/install_timer.sh install

@@ -525,7 +525,7 @@ def run_command(cmd: List[str], *, timeout: Optional[float] = None,
     )
 
 
-def run_command_stream(cmd: List[str]) -> CommandResult:
+def run_command_stream(cmd: List[str], *, env: Optional[Dict[str, str]] = None) -> CommandResult:
     """Run a command and stream merged stdout/stderr to the terminal."""
     proc = subprocess.Popen(
         cmd,
@@ -533,6 +533,7 @@ def run_command_stream(cmd: List[str]) -> CommandResult:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env,
     )
     chunks: List[str] = []
     assert proc.stdout is not None
@@ -548,6 +549,32 @@ def run_command_stream(cmd: List[str]) -> CommandResult:
         stdout=combined,
         stderr="",
     )
+
+
+PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+
+
+def proxy_variables() -> List[str]:
+    """The proxy variables set here. A login session's proxy reaches rclone too."""
+    return [name for name in PROXY_VARIABLES if os.environ.get(name)]
+
+
+def env_without_proxy() -> Dict[str, str]:
+    return {name: value for name, value in os.environ.items() if name not in PROXY_VARIABLES}
+
+
+def bisync_environment_warnings(version: Optional[tuple], *, no_proxy: bool = False) -> List[str]:
+    """What a manual run inherits that the timer does not."""
+    warnings = []
+    if version is not None and version < BISYNC_RESILIENCE_SINCE:
+        have = ".".join(str(part) for part in version)
+        warnings.append(f"rclone {have} has no --resilient or --recover; one bad file aborts the "
+                        f"run. Set YDM_RCLONE to 1.66 or newer.")
+    found = proxy_variables()
+    if found and not no_proxy:
+        warnings.append(f"{', '.join(found)} set: rclone will use the proxy, and bisync can hang "
+                        f"on its listings that way. Pass --no-proxy to drop it for this run.")
+    return warnings
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -628,6 +655,64 @@ def probe_files(remote: str, files: List[tuple], *, workers: int = PROBE_WORKERS
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         return list(pool.map(
             lambda item: probe_file(remote, item[0], size=item[1], timeout=timeout), files))
+
+
+def cloud_file_info(remote: str, path: str, *, timeout: float = PROBE_TIMEOUT_SEC) -> Dict[str, object]:
+    """Size, md5 and modification time of one cloud file; `error` if it has none."""
+    cmd = [rclone_bin(), "lsjson", "--stat", "--hash", "--hash-type", "md5", "--retries", "1",
+           f"{remote}:{path.lstrip('/')}"]
+    result = run_command(cmd, timeout=timeout)
+    if result.returncode != 0:
+        return {"error": _probe_failure(result.stderr)}
+    try:
+        entry = json.loads(result.stdout)
+    except ValueError:
+        return {"error": "unreadable answer from rclone lsjson"}
+    if entry.get("IsDir"):
+        return {"error": "is a folder, not a file"}
+    return {"error": None, "size": entry.get("Size"), "modtime": entry.get("ModTime"),
+            "md5": (entry.get("Hashes") or {}).get("md5")}
+
+
+def file_md5(path: str) -> str:
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def fetch_verified(remote: str, path: str, destination: str, *,
+                   timeout: float = 1800) -> Dict[str, object]:
+    """Download one cloud file to `destination` and prove it arrived whole.
+
+    The first bytes say a file has started to be served; only the whole file
+    against the cloud's own md5 says it can come out of quarantine. Nothing is
+    left at `destination` unless the check passed.
+    """
+    info = cloud_file_info(remote, path)
+    if info["error"]:
+        return {"verified": False, "reason": info["error"]}
+    if not info["md5"]:
+        return {"verified": False, "reason": "the cloud gave no md5 to check against"}
+    cmd = [rclone_bin(), "copyto", "--retries", "1", "--low-level-retries", "2",
+           f"{remote}:{path.lstrip('/')}", destination]
+    result = run_command(cmd, timeout=timeout)
+
+    def discard():
+        try:
+            os.remove(destination)
+        except OSError:
+            pass
+
+    if result.returncode != 0:
+        discard()
+        return {"verified": False, "reason": _probe_failure(result.stderr)}
+    actual = file_md5(destination)
+    if actual != info["md5"].lower():
+        discard()
+        return {"verified": False, "reason": f"md5 mismatch: cloud {info['md5']}, downloaded {actual}"}
+    return {"verified": True, "reason": None, "md5": actual, "size": info["size"]}
 
 
 def stop_start_daemon() -> Dict[str, CommandResult]:
@@ -864,6 +949,8 @@ def rclone_bisync_run(
     check_access: bool = True,
     workdir: Optional[str] = None,
     stream: bool = False,
+    timeout: Optional[float] = None,
+    no_proxy: bool = False,
 ) -> CommandResult:
     """Runs `rclone bisync` between the local mirror and the cloud remote,
     scoped via bisync's own --filters-file (a distinct flag from `copy`'s
@@ -886,9 +973,10 @@ def rclone_bisync_run(
     if workdir:
         cmd.extend(["--workdir", os.path.expanduser(workdir)])
     cmd.append("-v")
+    env = env_without_proxy() if no_proxy else None
     if stream:
-        return run_command_stream(cmd)
-    return run_command(cmd)
+        return run_command_stream(cmd, env=env)
+    return run_command(cmd, timeout=timeout, env=env)
 
 
 def filter_file_hash(filter_path: str) -> Optional[str]:

@@ -91,6 +91,9 @@ install_units() {
     timer_unit > "$UNIT_DIR/$UNIT.timer"
     systemctl --user daemon-reload
     systemctl --user enable --now "$UNIT.timer"
+    # So that a command run by hand uses the same rclone as the timer.
+    mkdir -p "$YDM_DIR/var"
+    printf '%s\n' "$RCLONE" > "$YDM_DIR/var/rclone_binary"
     echo "Installed $UNIT.timer: every $PERIOD, rclone $("$RCLONE" version | head -1), mirror $LOCAL_ROOT"
     systemctl --user list-timers "$UNIT.timer" --no-pager
 }
@@ -98,7 +101,7 @@ install_units() {
 remove_units() {
     systemctl --user disable --now "$UNIT.timer" 2>/dev/null || true
     systemctl --user stop "$UNIT.service" 2>/dev/null || true
-    rm -f "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer"
+    rm -f "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$YDM_DIR/var/rclone_binary"
     systemctl --user daemon-reload
     if systemctl --user list-unit-files "$UNIT.timer" --no-legend 2>/dev/null | grep -q .; then
         echo "$UNIT.timer is still known to systemd" >&2; exit 1

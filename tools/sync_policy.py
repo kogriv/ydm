@@ -11,6 +11,8 @@ import argparse
 import fnmatch
 import json
 import os
+import re
+import shutil
 import sqlite3
 import sys
 import subprocess
@@ -26,8 +28,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.sync_common import (  # noqa: E402
+    acquire_lock,
+    cloud_file_info,
     exit_code,
+    fetch_verified,
+    file_md5,
     rclone_bin,
+    release_lock,
     build_composite_snapshot,
     create_storage,
     legacy_filter_path,
@@ -709,6 +716,12 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
     return result
 
 
+def expected_bisync_filter(policy: dict) -> str:
+    """The bisync filter this policy renders to, for comparing with the file."""
+    return render_filter_text(effective_bisync_paths(policy), check_access=True,
+                              exclude=quarantine_paths(policy), ignore=policy.get("ignore"))
+
+
 def quarantined_by(rel_path: str, quarantine: Optional[dict]) -> Optional[str]:
     """The quarantine entry that covers this path, if any."""
     for entry in quarantine or {}:
@@ -802,6 +815,9 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
         "error": error,
     }
 
+
+#: One file, whole. A file that does not come down in this long is not back.
+RECHECK_TIMEOUT_SEC = 1800
 
 #: A whole `rclone copy`, not one transfer: long enough for a large folder, and
 #: rclone's own idle timeout covers a single stalled connection.
@@ -1104,6 +1120,151 @@ def add_policy_path(args: argparse.Namespace) -> dict:
     return result
 
 
+def put_back_from_quarantine(args: argparse.Namespace, entry: str, row: dict) -> None:
+    """Fetch one quarantined file whole and set it in the mirror.
+
+    While the entry is in quarantine the filter hides the file from bisync, so
+    the copy cannot be picked up half-written. Setting it in place also means the
+    resync that follows does not depend on the cloud serving it a second time.
+    """
+    local = os.path.join(os.path.expanduser(args.local_root), entry)
+    os.makedirs(var_path(), exist_ok=True)
+    fetched = var_path(f"recheck_{os.getpid()}.part")
+    row.update(fetch_verified(args.remote, entry, fetched,
+                              timeout=getattr(args, "timeout_sec", RECHECK_TIMEOUT_SEC) or None))
+    row["readable"] = row.pop("verified")
+    row["verified"] = "md5" if row["readable"] else None
+    if not row["readable"]:
+        return
+    try:
+        if os.path.exists(local):
+            same = file_md5(local) == row["md5"]
+            row["local"] = "same" if same else "differs"
+            if not same:
+                row["readable"] = False
+                row["reason"] = "the local copy differs from the cloud; a person has to choose"
+            return
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        shutil.move(fetched, local)
+        row["local"] = "placed"
+    finally:
+        if os.path.exists(fetched):
+            os.remove(fetched)
+
+
+def recheck_quarantine(args: argparse.Namespace, policy: dict, result: dict) -> dict:
+    """Which quarantined files the cloud hands over now.
+
+    A dry run reads the first bytes, which says a file has started to be served.
+    `--apply` fetches each whole, checks it against the cloud's md5, and only then
+    takes it out of quarantine: on 2026-10-31 a probe passed files whose full
+    download was never confirmed.
+    """
+    quarantine = dict(policy.get("quarantine", {}))
+    result["action"] = "quarantine-recheck"
+    entries = sorted(quarantine)
+    if args.path is not None:
+        entry = normalize_entry(args.path)
+        if entry not in quarantine:
+            result["error"] = f"/{entry} is not in quarantine"
+            return result
+        entries = [entry]
+    rows: List[dict] = []
+    if args.apply:
+        for entry in entries:
+            row = {"path": f"/{entry}", "since": quarantine[entry].get("since")}
+            put_back_from_quarantine(args, entry, row)
+            rows.append(row)
+    else:
+        for entry, probe in zip(entries, probe_files(args.remote, [(entry, None) for entry in entries])):
+            rows.append({"path": f"/{entry}", "since": quarantine[entry].get("since"),
+                         "readable": probe["readable"], "reason": probe["reason"],
+                         "verified": "first_bytes" if probe["readable"] else None})
+    result["recheck"] = rows
+    result["readable"] = [row["path"] for row in rows if row["readable"]]
+    result["still_unreadable"] = [row["path"] for row in rows if not row["readable"]]
+    if not args.apply:
+        if result["readable"]:
+            result["next"] = ["sync_policy.py quarantine --recheck --backend rclone --apply"]
+        return result
+    if result["readable"]:
+        for path in result["readable"]:
+            quarantine.pop(path.lstrip("/"))
+        if quarantine:
+            policy["quarantine"] = quarantine
+        else:
+            policy.pop("quarantine", None)
+        policy["updated_at"] = datetime.now().isoformat()
+        write_policy(args.policy_path, policy)
+        result["next"] = ["sync_policy.py render-filters --apply",
+                          "sync_bisync.py resync --apply  (the filter changed)"]
+    result["quarantine"] = quarantine
+    return result
+
+
+def import_file(args: argparse.Namespace, policy: dict) -> dict:
+    """Set a file obtained elsewhere into the mirror, if it is the cloud's file.
+
+    For a file the cloud lists but will not serve, when another device still has
+    it. Getting it to this machine is the caller's business, and the design is in
+    tasks/agent_interface/DESIGN_IMPORT.md. Nothing here touches the cloud or any
+    other device, and a copy that does not match the cloud's md5 is refused.
+    """
+    entry = normalize_entry(args.path)
+    source = os.path.expanduser(args.source)
+    local = os.path.join(os.path.expanduser(args.local_root), entry)
+    result = {"schema": SCHEMA, "action": "import-file", "dry_run": not args.apply,
+              "policy_path": args.policy_path, "path": f"/{entry}", "source": source,
+              "destination": local, "error": None}
+    if not any(entry == p or entry.startswith(p + "/") for p in effective_download_paths(policy)):
+        result["error"] = f"/{entry} is not inside any synced path"
+        return result
+    if not os.path.isfile(source):
+        result["error"] = f"Source is not a file: {source}"
+        return result
+    info = cloud_file_info(args.remote, entry)
+    if info["error"]:
+        result["error"] = f"Cannot read the cloud's record of /{entry}: {info['error']}"
+        return result
+    if not info["md5"]:
+        result["error"] = f"The cloud gave no md5 for /{entry}; nothing to check against"
+        return result
+    actual = file_md5(source)
+    result.update({"md5": actual, "cloud_md5": info["md5"], "matches_cloud": actual == info["md5"].lower()})
+    if not result["matches_cloud"]:
+        result["error"] = f"Source is not the cloud's file: md5 {actual}, cloud {info['md5']}"
+        return result
+    if os.path.exists(local):
+        if file_md5(local) == actual:
+            result["already_there"] = True
+            return result
+        result["error"] = f"A different file is already at {local}; a person has to choose"
+        return result
+    if quarantined_by(entry, policy.get("quarantine")):
+        result["next"] = [f"sync_policy.py quarantine --path /{entry} --remove --backend rclone --apply",
+                          "sync_policy.py render-filters --apply",
+                          "sync_bisync.py resync --apply  (the filter changed)"]
+    if not args.apply:
+        return result
+    # bisync must not see this half-written, and outside quarantine no filter
+    # hides it, so the sync's own lock covers the copy.
+    from tools.sync_bisync import LOCK_PATH
+    lock = acquire_lock(LOCK_PATH)
+    if not lock.acquired:
+        result["error"] = f"A bisync run is in progress (PID: {lock.holder_pid}); try again after it"
+        result["blocked"] = True
+        return result
+    try:
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        shutil.copyfile(source, local)
+        stamp = datetime.fromisoformat(re.sub(r"(\.\d{6})\d*", r"\1", info["modtime"]).replace("Z", "+00:00"))
+        os.utime(local, (stamp.timestamp(), stamp.timestamp()))
+    finally:
+        release_lock(LOCK_PATH)
+    result["imported"] = True
+    return result
+
+
 def quarantine_policy_path(args: argparse.Namespace) -> dict:
     """Set a file aside from sync, or put it back. Policy only: the filter files
     change on the next `render-filters --apply`, and bisync then wants a resync,
@@ -1115,6 +1276,8 @@ def quarantine_policy_path(args: argparse.Namespace) -> dict:
         result["error"] = f"Policy not found: {args.policy_path}"
         return result
     quarantine = dict(policy.get("quarantine", {}))
+    if getattr(args, "recheck", False):
+        return recheck_quarantine(args, policy, result)
     if args.path is None:
         result["quarantine"] = quarantine
         return result
@@ -1415,8 +1578,21 @@ def parse_args() -> argparse.Namespace:
     quarantine.add_argument("--path", default=None, help="omit to list the quarantine")
     quarantine.add_argument("--reason", default=None)
     quarantine.add_argument("--remove", action="store_true")
+    quarantine.add_argument(
+        "--recheck", action="store_true",
+        help="does the cloud serve them now? Reads the first bytes; with --apply fetches "
+             "each whole, checks the md5, and only then puts it back")
+    quarantine.add_argument("--timeout-sec", type=float, default=RECHECK_TIMEOUT_SEC,
+                            help="--recheck --apply: seconds for one file; 0 for no limit")
     quarantine.add_argument("--apply", action="store_true")
     common_flags(quarantine)
+
+    import_parser = subparsers.add_parser(
+        "import-file", help="set a file obtained elsewhere into the mirror, if its md5 matches the cloud's")
+    import_parser.add_argument("--source", required=True, help="the file, on this machine")
+    import_parser.add_argument("--path", required=True, help="where it lives in the cloud")
+    import_parser.add_argument("--apply", action="store_true")
+    common_flags(import_parser)
 
     ignore = subparsers.add_parser(
         "ignore", help="leave generated files (build/, __pycache__/, *.log) under a synced path out of sync")
@@ -1615,6 +1791,11 @@ def main() -> int:
             payload = (native_export_action(args, policy) if policy else {
                 "schema": "ydm_native_export_result:v1", "action": "native-export",
                 "dry_run": not args.apply, "error": f"Policy not found: {args.policy_path}"})
+        elif args.command == "import-file":
+            policy = load_policy(args.policy_path)
+            payload = (import_file(args, policy) if policy else {
+                "schema": SCHEMA, "action": "import-file", "dry_run": not args.apply,
+                "error": f"Policy not found: {args.policy_path}"})
         elif args.command == "ignore":
             payload = ignore_policy_pattern(args)
         elif args.command == "quarantine":

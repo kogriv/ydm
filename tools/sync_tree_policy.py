@@ -62,9 +62,9 @@ def load_policy_context(
     bisync_hash = filter_file_hash(bisync_path) if bisync_path and os.path.exists(bisync_path) else None
     filter_mismatch = False
     if policy and bisync_hash:
-        from tools.sync_policy import render_filter_text
+        from tools.sync_policy import expected_bisync_filter
 
-        expected = render_filter_text(effective_bisync_paths(policy), check_access=True)
+        expected = expected_bisync_filter(policy)
         actual_path = bisync_path or ""
         if os.path.exists(actual_path):
             with open(actual_path, "r") as handle:

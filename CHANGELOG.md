@@ -5,6 +5,15 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-11-01 — pausing, recovering, and one view of a machine
+
+- **`sync_bisync.py pause --reason … --apply` and `resume --apply`.** `run` exits `3` during a pause on any machine, systemd or not; `resync` keeps working, which is what a pause is usually for. The pause has its own file, because a run in progress rewrites the state file when it ends.
+- **`sync_bisync.py doctor`**: one read-only summary with a status and a next step per check. No network unless `--check-network`. Exits `1` when a check fails.
+- **`sync_policy.py quarantine --recheck`** asks the cloud again. `--apply` takes a file out only after fetching it whole and matching the cloud's md5, and sets it in the mirror so the resync does not need the cloud to serve it twice.
+- **`sync_policy.py import-file`** sets a file from elsewhere into the mirror if its md5 matches the cloud's. It writes nothing to the cloud and reaches no other device. See [`tasks/agent_interface/DESIGN_IMPORT.md`](tasks/agent_interface/DESIGN_IMPORT.md).
+- **Manual runs use the timer's rclone.** `install_timer.sh install` records it in `var/rclone_binary`; `YDM_RCLONE` still wins. The plan warns about an rclone older than 1.66 and about proxy variables. `--no-proxy` and `--timeout-sec` work on `resync` and `run`.
+- **`sync_tree` no longer warns of a stale filter on a machine with a quarantine or ignore.** It compared the file with a render that left them out.
+
 ## 2026-11-01 — seeing a bad file before it stops the sync
 
 - **`sync_policy.py add --preflight`** reads the first bytes of every file under the path. In a dry run it lists what the cloud refuses in `content_probe.unreadable`; with `--apply` it refuses (exit `3`) before the policy changes. A timeout or a short read is not a pass.
