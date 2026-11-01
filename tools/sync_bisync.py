@@ -12,8 +12,8 @@ the filter-file has changed since the last successful resync (rclone itself
 would otherwise just block with an opaque internal error).
 
 `run` also always passes `--check-access` (RCLONE_TEST sentinel, ensured by
-`resync`) and an explicit `--max-delete` cap (global rclone flag, default
--1/unlimited in the installed rclone build if omitted) — both exist to catch
+`resync`) and an explicit `--max-delete` cap (for bisync, a percentage of the
+files, not a count: `20` aborts on 3 deletions of 12) — both exist to catch
 the case where /sdcard isn't mounted this session and the local root reads
 as empty, which would otherwise look like "delete everything in the cloud."
 
@@ -310,7 +310,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
     if not filters_result.include_dirs:
         payload["error"] = (
             "No folders included in the filter-file yet — add at least one "
-            "via `tools/sync_filters.py add --path ... --apply` before resync."
+            "via `tools/sync_policy.py add --path ... --apply` before resync."
         )
         return payload
 

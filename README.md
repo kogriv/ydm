@@ -480,7 +480,8 @@ ydm-sync-add /Projects/2024
 > worth reporting.
 
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Full project documentation, architecture, implementation details
-- **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Quick start for AI assistants and automation
+- **[AGENTS.md](AGENTS.md)** - Rules and step-by-step procedures for AI agents: what never to do, adding a folder, quarantine, what to do when a run fails
+- **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Reference behind it: the tools, the JSON and exit codes, long scans
 - **[ANDROID_SETUP.md](docs/ANDROID_SETUP.md)** - The whole Android arrangement: proot-Debian inside Termux, bind mounts, the scheduled bisync job, and what shared storage refuses to store
 - **[LINUX_RCLONE_SETUP.md](docs/LINUX_RCLONE_SETUP.md)** - A Linux desktop on rclone bisync instead of the `yandex-disk` daemon: a recent rclone for ydm only, an OAuth application of your own, ignore and quarantine, the systemd timer
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Additional usage examples
@@ -503,13 +504,14 @@ Main files:
 - `ydm.py` — the core CLI tool (DB init, scans, reports)
 - `ydm_config.json` — profile configuration (prod/test)
 - `monitor.db` — the main SQLite database (scan results)
+- `AGENTS.md` — rules and procedures for AI agents
 - `README.md`, `LICENSE`, `.env.example` — docs and a sample config
 
 Top-level folders:
 
 - `docs/` — general project documentation
   - `PROJECT_YD_MONITOR.md` — architecture and implementation details
-  - `QUICKSTART_AI.md` — quick start for AI/automation
+  - `QUICKSTART_AI.md` — reference for AI/automation
   - `ANDROID_SETUP.md` — running this on Android, end to end
   - `LINUX_RCLONE_SETUP.md` — a Linux desktop on rclone bisync instead of the daemon
   - `USAGE_EXAMPLES.md` — usage examples

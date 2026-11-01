@@ -132,10 +132,10 @@ until the policy says so:
 ```bash
 python3 ydm.py --backend rclone scan cloud --progress
 python3 tools/sync_policy.py add --path /Books/Math --mode bidirectional \
-  --local-root /sdcard/Download/ya_disk --apply
-python3 tools/sync_policy.py render-filters \
-  --local-root /sdcard/Download/ya_disk --apply
+  --backend rclone --local-root /sdcard/Download/ya_disk --apply
 ```
+
+`add --apply` writes the filters as well.
 
 Modes are `bidirectional`, `download_only` and `disabled`. The distinction is
 not decoration — see *Filenames* below for the case that forced it.
@@ -147,6 +147,12 @@ python3 tools/sync_bisync.py resync --local-root /sdcard/Download/ya_disk \
   --filter-path /sdcard/Download/ya_disk.bisync.filters
 # review the plan, then repeat with --apply
 ```
+
+On an account no bisync has ever touched, that first `--apply` fails the access
+check: `RCLONE_TEST` is not in the cloud yet, and the check runs before anything
+is copied. Once you have confirmed the remote lists correctly, run that one
+resync with `--no-check-access`. It puts the sentinel in the cloud, and later
+runs keep the check. The sentinel only arrives if that resync finishes.
 
 ### 5. The scheduled job
 
@@ -198,8 +204,8 @@ this script reported both as success. See
 syncing fails — a failing run is harmless, it aborts before transferring
 anything. The reason is the recovery. If the cloud comes back with part of the
 tree genuinely missing, bisync will faithfully reproduce that locally, deleting
-up to `--max-delete` files per run. `--check-access` and the delete cap stop the
-wholesale case; neither stops a small real loss. Before putting the job back,
+up to `--max-delete` percent of the files per run. `--check-access` and the
+delete cap stop the wholesale case; neither stops a small real loss. Before putting the job back,
 check a few policy folders with `rclone check … --size-only`.
 
 #### Knowing when the cloud is back

@@ -1,381 +1,115 @@
-# Quickstart для AI-ассистентов и автоматизации
+# Quickstart for AI assistants and automation
 
-## Важно: Безопасное прерывание сканирования
+Rules and step-by-step procedures are in [`AGENTS.md`](../AGENTS.md): read that
+first. This page is the reference behind it: the tools, what they print, and how
+to handle a long scan.
 
-**Утилита поддерживает graceful interruption!** При SIGTERM/SIGUSR1 сканирование безопасно сохраняется на диск и может быть продолжено позже.
+## The tools
+
+| Tool | What it does | `--format` default | Where `--format` goes |
+|------|--------------|--------------------|-----------------------|
+| `ydm.py` | Database, cloud and local scans, reports | `text` | before the subcommand |
+| `tools/sync_policy.py` | The sync policy: `add`, `remove`, `quarantine`, `ignore`, `render-filters`, `download-plan`, `download-apply` | `text` | after the subcommand |
+| `tools/sync_bisync.py` | rclone bisync: `status`, `resync`, `run` | `json` | after the subcommand |
+| `tools/sync_rename.py` | Renames that do not re-upload: `plan`, `apply`, `preflight` | `text` | after the subcommand |
+| `tools/sync_tree.py` | The synced tree and its state, from the snapshot | `json` | anywhere |
+| `tools/cloud_delta.py` | Read-only: which folders went stale, in a few requests (needs the API token) | `text` | before the subcommand |
+| `tools/trash_scan.py` | Scan and restore a Trash subtree | `json` | before the subcommand |
+| `tools/sync_filters.py` | Legacy: edits the filter file directly, without a policy | `json` | after the subcommand |
+| `tools/sync_exclude.py` | Legacy: edits the daemon's `exclude-dirs` directly | `json` | after the subcommand |
+
+The defaults differ, so always pass `--format json`. Prefer `sync_policy.py` to
+the two legacy editors on any machine that has a policy.
+
+State lives in `monitor.db` (scans) and `var/` (`sync_policy.json`,
+`bisync_state.json`, `bisync.log`, `bisync_last.log`).
+
+## Output contract
+
+```json
+{"success": true, "data": {"schema": "ydm_sync_policy:v2", "action": "add", "dry_run": true, "error": null}}
+```
+
+- `success` and the exit code agree: `0` done, `1` failed, `3` blocked by a guard
+  (`data.blocked: true`), `2` bad command line.
+- `data.error` says what happened in words, and for a guard, what to do next.
+- With `--format json` a crash still prints JSON, and the traceback goes to stderr.
+- `data.next` lists the follow-up commands on `quarantine` and `ignore`.
+- `data.bisync` on `resync` and `run` holds `cmd`, `returncode`, `stdout` and
+  `stderr`. The stderr has ANSI colour codes in it.
+
+`sync_tree.py` is the exception: it prints its own payload with a top-level
+`schema` when it works, and the envelope when it fails.
+
+## How a folder gets synced
+
+Three layers, each built from the one before:
+
+1. **Snapshot.** `monitor.db` holds one full scan of the disk and any number of
+   newer partial scans on top. Refresh a folder with `scan cloud --path`.
+2. **Policy.** `var/sync_policy.json` gives each path a mode: `bidirectional`,
+   `download_only` or `disabled`. `quarantine` holds single files set aside with
+   a reason, `ignore` holds patterns of generated files.
+3. **Filters.** `<mirror>.bisync.filters` and `<mirror>.download.filters` are
+   rendered from the policy. Never edit them.
+
+bisync then keeps a baseline. Any change to the filter invalidates it: `run` exits
+`3` until a `resync --apply` builds a new one. `add` and `remove` render the
+filters themselves; `quarantine` and `ignore` need `render-filters --apply`.
+
+`resync` is the dangerous one: the plan is free, the `--apply` writes to both
+sides. `run` is the routine pass the timer makes, and it aborts when one side lost
+more than `--max-delete` percent of the files (20 by default). That is a share,
+not a count: three deletions of twelve files trip it, and a thousand of a
+hundred thousand do not. `resync` deletes nothing: a file removed
+on one side comes back from the other.
+
+## Scanning
+
+A subtree scan is the normal case, and a full scan is rare and needs the
+person's agreement.
 
 ```bash
-# Сканирование в фоне
-python3 ydm.py scan cloud --progress 2>&1 | tee /tmp/scan.log &
+python3 ydm.py --backend rclone scan cloud --path /Folder
+python3 ydm.py --backend rclone scan cloud --path /Folder --depth 1
+python3 tools/cloud_delta.py --format json changes
+```
+
+Without a token, `ydm.py` needs `--backend rclone` on every cloud scan; the default
+backend is the REST API. `cloud_delta` finds what to rescan in a few requests. It
+misses moves and restores from Trash, because those keep their `modified` date.
+
+### Long scans
+
+A scan can be interrupted safely. On SIGTERM it saves to disk and can resume.
+
+```bash
+python3 ydm.py --backend rclone scan cloud --path /Folder --progress 2>&1 | tee var/scan.log &
 SCAN_PID=$!
 
-# Дождаться прогресса
-sleep 10
-
-# Безопасное прерывание (Ctrl+C эквивалент)
-kill -TERM $SCAN_PID
-
-# Результат:
-# ✓ Данные сохранены на диск
-# ✓ Можно продолжить с --resume позже
-# ✓ Ничего не потеряется
+kill -TERM "$SCAN_PID"                                  # never SIGKILL
+python3 ydm.py --format json report scan-list --limit 5
+python3 ydm.py --format json report scan-progress --scan-id <ID>
+python3 ydm.py --backend rclone scan cloud --resume --scan-id <ID> --progress
 ```
 
-## Выбор профиля конфигурации
+`status` is `success`, `started`, `interrupted` or `crashed`. Resume when it is one
+of the last three and `.data.scan.progress.pending` is above zero, otherwise scan
+again. `--config-profile test` checkpoints every 30 seconds instead of every
+5 minutes, which is useful when testing the interrupt and resume cycle.
 
-Утилита поддерживает два профиля для разных сценариев:
+Progress is a stream of JSON lines:
 
-### Production профиль (default)
-```bash
-# Стабильная работа с редкими checkpoints
-python3 ydm.py scan cloud --progress
-
-# Параметры (из ydm_config.json):
-# - batch_size: 500 (большие батчи)
-# - checkpoint_files_threshold: 10000 (редкие checkpoints)
-# - checkpoint_time_sec: 300 (5 минут между checkpoints)
-```
-
-### Test профиль (для разработки/быстрого тестирования)
-```bash
-# Быстрые checkpoints для быстрой обратной связи
-python3 ydm.py --config-profile test scan cloud --progress
-
-# Параметры (из ydm_config.json):
-# - batch_size: 100 (маленькие батчи)
-# - checkpoint_files_threshold: 500 (частые checkpoints)
-# - checkpoint_time_sec: 30 (30 сек между checkpoints)
-
-# Это позволяет быстро тестировать interrupt/resume цикл
-# без необходимости ждать 5 минут между checkpoints
-```
-
-## Минимальный набор команд
-
-### 1. Проверить статус сканов
-```bash
-python3 ydm.py --format json report scan-list --limit 5 | \
-  jq '.data.scans[] | select(.type=="cloud") | {id, status, timestamp}'
-```
-
-### 2. Определить действие
-**Если есть прерванный скан (status="started" или "interrupted"):**
-```bash
-# Проверить есть ли pending работа
-python3 ydm.py --format json report scan-progress --scan-id <ID> | \
-  jq '.data.scan.progress'
-
-# Если pending > 0 - можно продолжить
-python3 ydm.py scan cloud --resume --scan-id <ID> --progress 2>&1 | tee /tmp/scan.log &
-```
-
-**Если все завершены (status="success") - новый скан:**
-```bash
-python3 ydm.py scan cloud --progress 2>&1 | tee /tmp/scan_new.log &
-```
-
-### 3. Мониторить прогресс
-```bash
-# В реальном времени
-tail -f /tmp/scan.log | jq -r 'select(.status=="progress") | "\(.scanned) files - \(.current)"'
-
-# Из БД (в другом терминале)
-python3 ydm.py --format json report scan-progress --scan-id <ID> | \
-  jq '.data.scan.progress'
-```
-
-### 4. Остановить gracefully
-```bash
-# Найти PID
-ps aux | grep "python3 ydm.py scan cloud" | grep -v grep
-
-# Послать SIGTERM (Ctrl+C)
-kill -TERM <PID>  # или просто Ctrl+C
-
-# Данные будут сохранены на диск автоматически
-# Проверить статус
-python3 ydm.py --format json report scan-info --scan-id <ID> | jq '.data | {status, files_count}'
-```
-
----
-
-## Simple Sync Tools (переходные, CLI‑friendly)
-
-Эти утилиты работают **только по снимку БД** (`monitor.db`) и не запускают сканирование
-облака при выполнении. Подходят для автоматизации и ассистентов.
-
-### 1) Просмотр дерева синхронизации (`sync_tree`)
-```bash
-# Свернутое дерево (JSON по умолчанию)
-python3 tools/sync_tree.py --path /Projects --depth 2
-
-# Полное дерево с ветками (text)
-python3 tools/sync_tree.py --path /Projects --depth 2 --format text --text-tree --show-all
-
-# Без заголовка в text
-python3 tools/sync_tree.py --format text --text-tree --no-text-header
-
-# Отключить локальный скан и sync_percent
-python3 tools/sync_tree.py --no-local-scan --no-sync-percent
-```
-
-### 2) Управление `exclude-dirs` (`sync_exclude`)
-```bash
-# Список exclude-dirs
-python3 tools/sync_exclude.py list
-
-# Dry-run: включить подпапку
-python3 tools/sync_exclude.py add --path /Projects/2024
-
-# Применить изменения
-python3 tools/sync_exclude.py add --path /Projects/2024 --apply
-
-# Исключить папку
-python3 tools/sync_exclude.py remove --path /Projects/2024 --apply
-
-# Текстовый вывод без заголовка
-python3 tools/sync_exclude.py add --path /Projects/2024 --format text --no-text-header
-
-# Отключить рестарт демона и локальный скан
-python3 tools/sync_exclude.py add --path /Projects/2024 --apply --no-restart-daemon --no-local-scan
-```
-
-### 3) JSON‑контракты (для автоматизации)
-```bash
-# sync_tree JSON
-python3 tools/sync_tree.py --path /Projects --depth 2 --format json --show-all | jq '.schema, .root_path, .root_depth, .local_scan_started'
-
-# sync_exclude JSON (dry-run)
-python3 tools/sync_exclude.py add --path /Projects/2024 --format json | jq '.data.schema, .data.plan, .data.daemon'
-```
-
-JSON‑версии:
-- `sync_tree` → `"schema": "sync_tree:v1"`
-- `sync_exclude` → `"schema": "sync_exclude:v1"`
-
-## Handling Long Scans (Работа с долгими сканами)
-
-### Запуск долгого сканирования безопасно
-
-```bash
-# 1. Запустить в фоне с логированием
-python3 ydm.py scan cloud --progress 2>&1 | tee /tmp/scan_$(date +%s).log &
-SCAN_PID=$!
-
-# 2. Проверить что процесс работает
-ps -p $SCAN_PID
-
-# 3. В случае необходимости - gracefully остановить
-kill -TERM $SCAN_PID
-
-# 4. Проверить что данные сохранились
-python3 ydm.py --format json report scan-list --limit 1
-
-# 5. Позже - продолжить с нового терминала
-python3 ydm.py scan cloud --resume --progress 2>&1 | tee /tmp/scan_resume.log &
-```
-
-### Оценка времени выполнения
-
-```bash
-# После 30 сек работы проверить темп
-INFO=$(python3 ydm.py --format json report scan-info --scan-id <ID>)
-FILES=$(echo "$INFO" | jq -r '.files_count')
-DURATION=$(echo "$INFO" | jq -r '.duration')
-
-if [[ $DURATION -gt 0 && $FILES -gt 0 ]]; then
-    RATE=$(echo "scale=0; $FILES / $DURATION" | bc)
-    echo "Scanning at ~$RATE files/sec"
-    
-    # Если полный скан может быть 1 млн файлов
-    TOTAL_EST=$((1000000 / RATE))
-    echo "Est. total time: ~$((TOTAL_EST / 60)) minutes"
-fi
-```
-
-## Troubleshooting
-
-### Сканирование прервалось - как проверить и продолжить?
-
-```bash
-# 1. Проверить статус последнего скана
-STATUS=$(python3 ydm.py --format json report scan-list --limit 1 | jq -r '.data.scans[0].status')
-SCAN_ID=$(python3 ydm.py --format json report scan-list --limit 1 | jq -r '.data.scans[0].id')
-
-echo "Last scan: ID=$SCAN_ID, status=$STATUS"
-
-# 2. Если interrupted или crashed
-if [[ "$STATUS" == "interrupted" ]] || [[ "$STATUS" == "crashed" ]]; then
-    # Проверить сколько осталось работы
-    PROGRESS=$(python3 ydm.py --format json report scan-progress --scan-id "$SCAN_ID" | \
-               jq -r '.data.scan.progress')
-    echo "Progress: $PROGRESS"
-    
-    # Если pending > 0 - можно продолжить
-    PENDING=$(echo "$PROGRESS" | jq -r '.pending')
-    if [[ $PENDING -gt 0 ]]; then
-        echo "Resuming... (pending: $PENDING folders)"
-        python3 ydm.py scan cloud --resume --scan-id "$SCAN_ID" --progress
-    fi
-fi
-
-# 3. Если статус "success" - сканирование было завершено
-# Нужно новое сканирование
-```
-
-### Данные потеряны при перезагрузке?
-
-```bash
-# Нет! monitor.db сохранен и восстанавливается при resume
-# tmpfs теряется (это expected), но все важные данные на диске
-
-# Проверить
-ls -lh monitor.db        # Должен быть нормальный размер
-ls /dev/shm/ydm_scan.db  # Может не существовать (это OK)
-
-# Восстановить последний скан
-python3 ydm.py scan cloud --resume --progress
-```
-
-### Как использовать test профиль для быстрого feedback?
-
-```bash
-# Для разработки и быстрого тестирования
-python3 ydm.py --config-profile test scan cloud --path /Books --progress
-
-# Почему test профиль?
-# - checkpoint_time_sec: 30 (а не 300) - не ждете 5 минут в тестах
-# - checkpoint_files_threshold: 500 - видите checkpoint чаще
-# - batch_size: 100 - более тонкая логирование
-
-# Пример interrupt/resume цикла в test профиле:
-# 1. Запуск
-#    python3 ydm.py --config-profile test scan cloud --path /Books --progress &
-# 2. Через 10 сек Ctrl+C (данные уже на диске!)
-# 3. Проверка
-#    python3 ydm.py --format json report scan-info --scan-id <ID>
-# 4. Resume (быстро)
-#    python3 ydm.py --config-profile test scan cloud --resume --progress
-```
-
-## Важные форматы JSON
-
-### scan-list output
 ```json
-{
-  "success": true,
-  "data": {
-    "total": 5,
-    "scans": [
-      {
-        "id": 5,
-        "timestamp": "2026-01-03 06:59:23",
-        "type": "cloud",
-        "status": "interrupted",
-        "duration": 3654.5,
-        "files_count": 144089,
-        "progress": {
-          "total_folders": 217,
-          "completed": 150,
-          "in_progress": 5,
-          "pending": 62
-        }
-      }
-    ]
-  }
-}
+{"status": "progress", "scanned": 1250, "current": "/Folder/2024", "stats": {}}
 ```
 
-### scan-progress output
-```json
-{
-  "success": true,
-  "data": {
-    "scan": {
-      "id": 5,
-      "status": "interrupted",
-      "progress": {
-        "total_folders": 217,
-        "completed": 150,
-        "pending": 62
-      }
-    },
-    "pending_folders_sample": [
-      {"path": "/Books/Archive", "status": "pending", ...}
-    ]
-  }
-}
-```
-
-### Progress stream (--progress)
-```json
-{"status": "progress", "scanned": 1250, "current": "/Photos/2024", "stats": {...}}
-{"status": "progress", "scanned": 1300, "current": "/Photos/2025", "stats": {...}}
-```
-
-## Примеры jq фильтров
+## Reading the JSON
 
 ```bash
-# Последний cloud scan ID
-jq -r '.data.scans[] | select(.type=="cloud") | .id' | head -1
-
-# Статус конкретного скана
-jq -r ".data.scans[] | select(.id==$ID) | .status"
-
-# Прогресс в процентах
-jq -r '.data.scan.progress | "\((.completed / .total_folders * 100) | floor)%"'
-
-# Pending папки
-jq -r '.data.scan.progress.pending'
-
-# Только отсканированные файлы из прогресса
-jq -r 'select(.status=="progress") | .scanned'
+python3 ydm.py --format json report scan-list --limit 5 | jq '.data.scans[] | {id, type, status, files_count}'
+python3 ydm.py --format json report scan-progress --scan-id <ID> | jq '.data.scan.progress'
+python3 tools/sync_policy.py status --format json | jq '.data | {bidirectional_paths, download_only_paths, quarantine, ignore, resync_needed}'
+python3 tools/sync_bisync.py status --format json | jq '.data | {state, current_filter_hash}'
+python3 tools/sync_tree.py --path /Folder --depth 2 --format json --show-all | jq '.schema'
 ```
-
-## Полный автоматический workflow
-
-```bash
-#!/bin/bash
-# Умный resume или новый скан
-
-SCANS=$(python3 ydm.py --format json report scan-list --limit 5)
-LAST_ID=$(echo "$SCANS" | jq -r '.data.scans[] | select(.type=="cloud") | .id' | head -1)
-LAST_STATUS=$(echo "$SCANS" | jq -r ".data.scans[] | select(.id==$LAST_ID) | .status")
-
-if [[ "$LAST_STATUS" == "started" ]] || [[ "$LAST_STATUS" == "interrupted" ]]; then
-    PENDING=$(python3 ydm.py --format json report scan-progress --scan-id "$LAST_ID" | \
-              jq -r '.data.scan.progress.pending')
-    
-    if [[ "$PENDING" -gt 0 ]]; then
-        echo "Resuming scan $LAST_ID (pending: $PENDING folders)"
-        python3 ydm.py scan cloud --resume --scan-id "$LAST_ID" --progress 2>&1 | \
-          tee "/tmp/scan_${LAST_ID}.log" &
-    else
-        echo "Starting new scan"
-        python3 ydm.py scan cloud --progress 2>&1 | tee /tmp/scan_new.log &
-    fi
-else
-    echo "Starting new scan"
-    python3 ydm.py scan cloud --progress 2>&1 | tee /tmp/scan_new.log &
-fi
-
-echo "Scan started. Monitor with: tail -f /tmp/scan*.log"
-```
-
-## Ключевые принципы
-
-✅ **DO:**
-- Всегда `--format json` для report
-- Всегда `--progress` для scan
-- Логировать через `tee`
-- Запускать в фоне `&`
-- Использовать `jq` для парсинга
-- Gracefully останавливать через SIGTERM (kill -TERM)
-- Использовать test профиль для разработки/тестирования
-
-❌ **DON'T:**
-- Не использовать `timeout` для полных сканов
-- Не парсить текстовый вывод
-- Не надеяться на tmpfs после reboot
-- Не забывать про checkpoint (автоматический)
-- Не убивать процесс с SIGKILL (-9) - используйте graceful SIGTERM

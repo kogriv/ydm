@@ -470,7 +470,8 @@ ydm-sync-add /Projects/2024
 > потому что объяснение осталось только в `tasks/`, — это повод завести issue.
 
 - **[PROJECT_YD_MONITOR.md](docs/PROJECT_YD_MONITOR.md)** - Полная документация проекта, архитектура, детали реализации
-- **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Быстрый старт для AI-ассистентов и автоматизации
+- **[AGENTS.md](AGENTS.md)** - Правила и пошаговые процедуры для AI-агентов: что нельзя делать, добавление папки, карантин, разбор сбоя
+- **[QUICKSTART_AI.md](docs/QUICKSTART_AI.md)** - Справочник к ним: инструменты, JSON и коды возврата, долгие сканы
 - **[USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md)** - Дополнительные примеры использования
 - **[ANDROID_SETUP.md](docs/ANDROID_SETUP.md)** - Всё устройство работы на Android: proot-Debian внутри Termux, bind-mount'ы, плановый bisync-job и то, что общее хранилище отказывается хранить
 - **[Agent Interface](tasks/agent_interface/README.md)** - Гэпы и бэклог машинного интерфейса: коды возврата, инструкции для агентов, предпроверка, `doctor`
@@ -490,13 +491,14 @@ ydm-sync-add /Projects/2024
 - `ydm.py` — основной CLI-инструмент (инициализация БД, сканы, отчеты)
 - `ydm_config.json` — конфигурация профилей (prod/test)
 - `monitor.db` — основная SQLite-база (результаты сканирования)
+- `AGENTS.md` — правила и процедуры для AI-агентов
 - `README.md`, `LICENSE`, `.env.example` — документация и пример конфига
 
 Папки верхнего уровня:
 
 - `docs/` — общая документация по проекту
   - `PROJECT_YD_MONITOR.md` — архитектура и детали реализации
-  - `QUICKSTART_AI.md` — быстрый старт для AI/скриптов
+  - `QUICKSTART_AI.md` — справочник для AI/скриптов
   - `USAGE_EXAMPLES.md` — примеры использования
   - `ANDROID_SETUP.md` — запуск проекта на Android, от установки до планового job
   - `KNOWN_ISSUES.md` — текущие неисправленные ограничения

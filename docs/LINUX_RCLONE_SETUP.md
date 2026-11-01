@@ -72,7 +72,8 @@ tail of the creation output): it contains the token and the client secret.
 ## 3. The policy: what is synced
 
 Build it with `sync_policy.py add`, one folder at a time; each `add` checks the
-folder against a cloud scan first, so scan what you add:
+folder against a cloud scan first, so scan what you add. `add --apply` writes
+the filter files too:
 
 ```bash
 python3 ydm.py scan cloud --path /pro
@@ -124,7 +125,8 @@ Two further kinds of entry keep a bisync between several devices quiet:
 
 Both live in the policy, not in the filter file: `render-filters` rewrites the
 filter from the policy, and anything added to the filter by hand is gone after
-the next rewrite. Then:
+the next rewrite. Unlike `add`, these two change only the policy, so render
+afterwards:
 
 ```bash
 python3 tools/sync_policy.py render-filters --backend rclone --apply
@@ -159,6 +161,12 @@ python3 tools/sync_bisync.py resync --local-root /data/ya_disk            # plan
 python3 tools/sync_bisync.py resync --local-root /data/ya_disk --apply
 bash tools/linux/install_timer.sh install
 ```
+
+On an account no bisync has ever touched, that `--apply` fails the access check:
+`RCLONE_TEST` is not in the cloud yet, and the check runs before anything is
+copied. Once you have confirmed the remote lists correctly, run that one resync
+with `--no-check-access`; it puts the sentinel in the cloud, and later runs keep
+the check. The sentinel only arrives if that resync finishes.
 
 The daemon's own state (`/data/ya_disk/.sync`) stays where it is; the bisync
 filter does not include it.

@@ -72,10 +72,20 @@ if you're touching scan locking or checkpoint recovery.
 - Match the existing conventions in the file you're editing: dry-run by
   default + explicit `--apply` for anything that mutates state, a JSON
   envelope (`{"success": bool, "data": {...}}`) for machine-readable
-  output, never `sys.exit()` for expected error conditions (convey them
-  via `success: false` instead).
+  output, and `sys.exit(main())` with `exit_code(payload)` from
+  `tools/sync_common.py`, so a failure is `1` and a refusal by a guard is
+  `3`. `tests/test_exit_codes.py` holds new tools to this.
 - Keep commit messages descriptive and focused on the "why", not just the
   "what".
+
+## Agent instructions
+
+[`AGENTS.md`](AGENTS.md) is what an agent follows, to the letter. A new command,
+a renamed flag or a changed procedure updates it in the same commit, along with
+[`docs/QUICKSTART_AI.md`](docs/QUICKSTART_AI.md) if the tool table or the JSON
+changed. `tests/test_agents_doc.py` checks the quoted commands against `--help`;
+it cannot tell whether a procedure is still right, so walk any changed procedure
+through on a sandbox (*Rehearse on a copy* in `AGENTS.md`).
 
 ## Reporting bugs / proposing features
 

@@ -5,6 +5,13 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-11-01 — instructions for agents
+
+- **`AGENTS.md`**: the rules (what never to do without the person's say-so) and the procedures, as commands: adding a folder, quarantine, ignore, removing a folder, renaming, reading a failure. Every procedure was walked through with a real rclone against a local fake cloud.
+- **`docs/QUICKSTART_AI.md` rewritten.** It stopped in July and never mentioned rclone, bisync or quarantine. It is now the reference behind `AGENTS.md`: tools, output contract, how a folder gets synced, long scans.
+- **`tests/test_agents_doc.py`** checks every command quoted in those two files against the tool's `--help`, so a renamed flag fails CI rather than misleading an agent.
+- **Corrected.** `--max-delete` is a percentage for bisync, not a number of files as `ANDROID_SETUP.md` said. `add --apply` writes the filters itself; the extra `render-filters` is gone from that guide. Both setup guides now say that the first resync on a cloud with no `RCLONE_TEST` fails the access check. The "no folders" error of `resync` pointed at the legacy `sync_filters.py`.
+
 ## 2026-10-31 — exit codes mean something
 
 - **`sync_policy`, `sync_bisync`, `sync_filters`, `sync_exclude` and `sync_rename` exit non-zero on failure.** They used to exit 0 whatever happened, so a failed resync looked clean to a script and a failed `run` looked clean to systemd. `0` is done, `1` failed, `3` a guard refused to run (`blocked: true` in the JSON); `2` stays argparse's.

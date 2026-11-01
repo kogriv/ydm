@@ -9,7 +9,7 @@
 - Gap analysis: ✅ [`GAP.md`](./GAP.md)
 - Backlog: ✅ [`BACKLOG.md`](./BACKLOG.md)
 - Design: не требуется для Phase 1–2; для Phase 3–4 — по необходимости
-- Implementation: Phase 1 завершена, дальше Phase 2
+- Implementation: Phase 1–2 завершены, дальше Phase 3
 
 ## Границы
 
