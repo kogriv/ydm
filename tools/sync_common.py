@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -493,8 +494,29 @@ def bisync_resilience_flags(version: Optional[tuple]) -> List[str]:
     return ["--resilient", "--recover", "--max-lock", "2m"]
 
 
-def run_command(cmd: List[str]) -> CommandResult:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+#: What `run_command` reports for a command it had to stop, as coreutils'
+#: `timeout` does.
+TIMEOUT_RETURNCODE = 124
+
+
+def run_command(cmd: List[str], *, timeout: Optional[float] = None,
+                env: Optional[Dict[str, str]] = None) -> CommandResult:
+    kwargs = {}
+    if timeout:
+        kwargs["timeout"] = timeout
+    if env is not None:
+        kwargs["env"] = env
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        def text(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+        return CommandResult(
+            cmd=cmd,
+            returncode=TIMEOUT_RETURNCODE,
+            stdout=text(exc.stdout).strip(),
+            stderr=f"{text(exc.stderr).strip()}\nStopped: no result after {timeout:g}s".strip(),
+        )
     return CommandResult(
         cmd=cmd,
         returncode=result.returncode,
@@ -526,6 +548,86 @@ def run_command_stream(cmd: List[str]) -> CommandResult:
         stdout=combined,
         stderr="",
     )
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(text: Optional[str]) -> str:
+    """rclone colours its log even into a pipe; a machine reader wants none of it."""
+    return ANSI_ESCAPE.sub("", text or "")
+
+
+#: `2026/10/29 12:00:00 ERROR : Folder/file.ext: Failed to copy: failed to open
+#: source object: [500 - ]  (500 Internal Server Error)`. Bisync repeats the cause
+#: as `Bisync critical error: ...`, which names no file, hence the capital F.
+RCLONE_FILE_ERROR = re.compile(r"\bERROR\s*:\s*(?P<path>.+?): (?P<reason>Failed to .*)$")
+RCLONE_NOT_A_PATH = ("Bisync critical error", "Bisync aborted")
+
+
+def rclone_failed_paths(stderr: Optional[str]) -> List[Dict[str, str]]:
+    """The files rclone's log says failed, once each, in order of appearance.
+
+    An unknown log format yields an empty list, never a guess: the caller still
+    has the whole stderr.
+    """
+    failed: Dict[str, str] = {}
+    for line in strip_ansi(stderr).splitlines():
+        match = RCLONE_FILE_ERROR.search(line)
+        if not match or match.group("path").startswith(RCLONE_NOT_A_PATH):
+            continue
+        failed.setdefault(match.group("path"), match.group("reason").strip())
+    return [{"path": path, "reason": reason} for path, reason in failed.items()]
+
+
+#: A file is probed by its first bytes: enough to see whether the cloud serves it,
+#: little enough to run over a whole folder. It proves the file starts to come
+#: down, not that all of it will.
+PROBE_BYTES = 1024
+PROBE_TIMEOUT_SEC = 60
+PROBE_WORKERS = 4
+
+
+def _probe_failure(stderr: str) -> str:
+    lines = [line.strip() for line in strip_ansi(stderr).splitlines() if line.strip()]
+    errors = [line for line in lines if "ERROR" in line or "Failed" in line]
+    text = (errors or lines or ["rclone exited non-zero with no message"])[-1]
+    return re.sub(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d\s+)?((NOTICE|ERROR)\s*:\s*)?", "", text)
+
+
+def probe_file(remote: str, path: str, *, size: Optional[int] = None,
+               count: int = PROBE_BYTES, timeout: float = PROBE_TIMEOUT_SEC) -> Dict[str, object]:
+    """Does the cloud hand this file over? Reads the first bytes, writes nothing.
+
+    A timeout is not a pass, and neither is a short read: the file stays
+    `readable: false` until it has actually come down.
+    """
+    cmd = [rclone_bin(), "cat", "--count", str(count), "--retries", "1",
+           "--low-level-retries", "1", f"{remote}:{path.lstrip('/')}"]
+    result: Dict[str, object] = {"path": path, "readable": False, "reason": None}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        result["reason"] = f"no answer in {timeout:g}s"
+        return result
+    if proc.returncode != 0:
+        result["reason"] = _probe_failure(proc.stderr.decode(errors="replace"))
+        return result
+    expected = min(size, count) if size is not None else None
+    if expected is not None and len(proc.stdout) < expected:
+        result["reason"] = f"short read: {len(proc.stdout)} of {expected} bytes"
+        return result
+    result["readable"] = True
+    return result
+
+
+def probe_files(remote: str, files: List[tuple], *, workers: int = PROBE_WORKERS,
+                timeout: float = PROBE_TIMEOUT_SEC) -> List[Dict[str, object]]:
+    """`probe_file` over (path, size) pairs, a few at a time: Yandex answers a
+    burst of downloads with 429s, which would read as unreadable files."""
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        return list(pool.map(
+            lambda item: probe_file(remote, item[0], size=item[1], timeout=timeout), files))
 
 
 def stop_start_daemon() -> Dict[str, CommandResult]:

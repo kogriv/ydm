@@ -34,9 +34,14 @@ State lives in `monitor.db` (scans) and `var/` (`sync_policy.json`,
   (`data.blocked: true`), `2` bad command line.
 - `data.error` says what happened in words, and for a guard, what to do next.
 - With `--format json` a crash still prints JSON, and the traceback goes to stderr.
-- `data.next` lists the follow-up commands on `quarantine` and `ignore`.
+- `data.next` lists the follow-up commands on `add`, `remove`, `quarantine` and
+  `ignore`.
 - `data.bisync` on `resync` and `run` holds `cmd`, `returncode`, `stdout` and
-  `stderr`. The stderr has ANSI colour codes in it.
+  `stderr`. On failure the stderr has its ANSI colour codes removed, and
+  `data.failed_paths` and `data.next_action` say what went wrong and what to do.
+- `add --preflight` adds `data.content_probe`: `checked`, `readable`, and
+  `unreadable` as `[{"path", "reason"}]`. It is separate from
+  `risk.safe_for_bidirectional`, which is about names and policy.
 
 `sync_tree.py` is the exception: it prints its own payload with a top-level
 `schema` when it works, and the envelope when it fails.

@@ -27,6 +27,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -51,9 +53,11 @@ from tools.sync_common import (  # noqa: E402
     load_sync_filters,
     notify,
     rclone_bisync_run,
+    rclone_failed_paths,
     release_lock,
     run_local_scan,
     save_bisync_state,
+    strip_ansi,
     var_path,
 )
 from tools.sync_policy import (  # noqa: E402
@@ -352,10 +356,11 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         return payload
 
     try:
-        if args.check_access:
-            ensure_check_access_filter(filter_path)
-            if not getattr(args, "target_managed", False):
-                ensure_check_access_file(args.local_root)
+        # Whether or not this resync checks access: the next `run` will, and a
+        # resync that skips the check is how the sentinel first reaches a cloud.
+        ensure_check_access_filter(filter_path)
+        if not getattr(args, "target_managed", False):
+            ensure_check_access_file(args.local_root)
 
         stream = bool(getattr(args, "stream", False))
         if stream:
@@ -374,6 +379,7 @@ def cmd_resync(args: argparse.Namespace) -> dict:
 
         if result.returncode != 0:
             payload["error"] = f"rclone bisync --resync failed (returncode={result.returncode})"
+            record_failure(payload, result, args)
             append_text_log(log_path,
                             f"{datetime.now().isoformat()} resync FAILED rc={result.returncode}")
             return payload
@@ -405,6 +411,53 @@ def cmd_resync(args: argparse.Namespace) -> dict:
         return payload
     finally:
         release_lock(lock_path)
+
+
+ACCESS_NEVER_SEEN = re.compile(r"Access test failed: Path1 count \d+, Path2 count 0\b")
+
+
+def quarantine_reason(failure: str) -> str:
+    status = re.search(r"\((\d{3}) ", failure)
+    cause = f"{status.group(1)} on download" if status else "unreadable"
+    return f"{cause} since {datetime.now().date().isoformat()}"
+
+
+def next_action(stderr: str, failed_paths: List[Dict[str, str]], args: argparse.Namespace) -> Dict[str, object]:
+    """What the failure calls for. Advice only: nothing here is ever run for you."""
+    if "too many deletes" in stderr:
+        return {"kind": "stop", "commands": [],
+                "why": "One side lost more files than --max-delete allows. This is what a "
+                       "wiped side looks like: find out what happened before anything else."}
+    if ACCESS_NEVER_SEEN.search(stderr):
+        return {"kind": "missing_sentinel",
+                "why": "RCLONE_TEST is not in the cloud. On a cloud that has never seen bisync "
+                       "that is expected; if this one has, the remote may be wrong. Check the "
+                       "listing first.",
+                "commands": [f"{rclone_bin()} lsf {args.remote}: --max-depth 1",
+                             "sync_bisync.py resync --no-check-access --apply"]}
+    if failed_paths:
+        resync = "sync_bisync.py resync --apply"
+        if not args.check_access:
+            resync = "sync_bisync.py resync --no-check-access --apply"
+        quarantine = [
+            "sync_policy.py quarantine --path "
+            f"{shlex.quote('/' + row['path'].lstrip('/'))} "
+            f"--reason {shlex.quote(quarantine_reason(row['reason']))} --backend rclone --apply"
+            for row in failed_paths]
+        return {"kind": "quarantine", "commands": quarantine + [
+                    "sync_policy.py render-filters --backend rclone --apply", resync],
+                "why": "The files in failed_paths could not be transferred. If the cloud "
+                       "refuses them, set them aside; the rest of the sync goes on."}
+    return {"kind": "read_stderr", "commands": [],
+            "why": "No known cause in rclone's output: read data.bisync.stderr."}
+
+
+def record_failure(payload: dict, result, args: argparse.Namespace) -> None:
+    """Turn rclone's log into fields a reader does not have to grep."""
+    stderr = strip_ansi(result.stderr)
+    payload["bisync"]["stderr"] = stderr
+    payload["failed_paths"] = rclone_failed_paths(stderr)
+    payload["next_action"] = next_action(stderr, payload["failed_paths"], args)
 
 
 #: What a person can actually do about an error, said in terms of the menu they
@@ -550,6 +603,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
         if result.returncode != 0:
             payload["error"] = f"rclone bisync failed (returncode={result.returncode})"
+            record_failure(payload, result, args)
             # rclone keeps its own state — the two listings it diffs — and can
             # lose it independently of anything ydm records. When it does, it
             # says so and every later run aborts on the same line. Caught here
@@ -694,6 +748,12 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
         print(f"rclone bisync: returncode={payload['bisync']['returncode']}")
         if payload["bisync"]["stderr"]:
             print(payload["bisync"]["stderr"])
+    for row in payload.get("failed_paths") or []:
+        print(f"failed: {row['path']} ({row['reason']})")
+    if payload.get("next_action"):
+        print(f"next: {payload['next_action']['why']}")
+        for command in payload["next_action"]["commands"]:
+            print(f"  {command}")
     if payload.get("local_scan") is not None:
         print(f"local scan: {payload['local_scan']}")
     if payload.get("state") is not None:

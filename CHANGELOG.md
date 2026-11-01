@@ -5,6 +5,15 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-11-01 — seeing a bad file before it stops the sync
+
+- **`sync_policy.py add --preflight`** reads the first bytes of every file under the path. In a dry run it lists what the cloud refuses in `content_probe.unreadable`; with `--apply` it refuses (exit `3`) before the policy changes. A timeout or a short read is not a pass.
+- **`add --quarantine-unreadable --apply`** adds the folder with those files already in quarantine, so the resync that follows does not stop on them.
+- **A failed `resync` or `run` says why in fields:** `failed_paths`, and `next_action` with a kind and ready commands, which are never run for you. The stderr in the JSON loses its ANSI codes.
+- **`resync --no-check-access` carries `RCLONE_TEST` to a clean cloud.** It used to skip creating the local sentinel, so the next `run` failed the check.
+- **`download-plan` leaves out quarantined and ignored files**, listing them in `excluded`. The manifest goes to `var/` when the mirror's parent is not writable. `download-apply` names the files that failed and has a `--timeout-sec`.
+- **`add` and `remove` return `next`**, like `quarantine` and `ignore`.
+
 ## 2026-11-01 — instructions for agents
 
 - **`AGENTS.md`**: the rules (what never to do without the person's say-so) and the procedures, as commands: adding a folder, quarantine, ignore, removing a folder, renaming, reading a failure. Every procedure was walked through with a real rclone against a local fake cloud.

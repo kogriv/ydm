@@ -150,9 +150,9 @@ python3 tools/sync_bisync.py resync --local-root /sdcard/Download/ya_disk \
 
 On an account no bisync has ever touched, that first `--apply` fails the access
 check: `RCLONE_TEST` is not in the cloud yet, and the check runs before anything
-is copied. Once you have confirmed the remote lists correctly, run that one
-resync with `--no-check-access`. It puts the sentinel in the cloud, and later
-runs keep the check. The sentinel only arrives if that resync finishes.
+is copied. Once you have confirmed the remote lists correctly, run the resync
+with `--no-check-access` until one finishes; that carries the sentinel to the
+cloud, and later runs keep the check.
 
 ### 5. The scheduled job
 

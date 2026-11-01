@@ -8,6 +8,7 @@ in scheduled bidirectional bisync". It is intentionally dry-run by default.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import sqlite3
@@ -36,6 +37,10 @@ from tools.sync_common import (  # noqa: E402
     load_sync_filters,
     normalize_path,
     path_exists_in_snapshot,
+    PROBE_TIMEOUT_SEC,
+    PROBE_WORKERS,
+    probe_files,
+    rclone_failed_paths,
     require_local_root,
     select_scan_id_for_path,
     var_path,
@@ -704,6 +709,38 @@ def render_filters(args: argparse.Namespace, policy: dict) -> dict:
     return result
 
 
+def quarantined_by(rel_path: str, quarantine: Optional[dict]) -> Optional[str]:
+    """The quarantine entry that covers this path, if any."""
+    for entry in quarantine or {}:
+        if rel_path == entry or rel_path.startswith(entry + "/"):
+            return entry
+    return None
+
+
+def ignored_by(rel_path: str, ignore: Optional[Dict[str, List[str]]]) -> Optional[str]:
+    """The ignore pattern that covers this path, if any; `ignore_rules` in Python."""
+    for base, patterns in (ignore or {}).items():
+        if not rel_path.startswith(base + "/"):
+            continue
+        parts = rel_path[len(base) + 1:].split("/")
+        for pattern in patterns:
+            if pattern.endswith("/"):
+                if any(fnmatch.fnmatchcase(part, pattern[:-1]) for part in parts[:-1]):
+                    return pattern
+            elif fnmatch.fnmatchcase(parts[-1], pattern):
+                return pattern
+    return None
+
+
+def download_manifest_path(args: argparse.Namespace) -> str:
+    """Beside the filter, or in var/ when the mirror's parent is not ours. The
+    filters are rewritten in place there, but a manifest is replaced by rename."""
+    path = (args.download_filter_path or download_filter_path(args.local_root)) + ".files-from"
+    if os.access(os.path.dirname(path) or ".", os.W_OK):
+        return path
+    return var_path(os.path.basename(path))
+
+
 def download_plan(args: argparse.Namespace, policy: dict) -> dict:
     """Exact, non-mutating plan for selective download-only materialization."""
     error = validate_policy_binding(args, policy) or validate_native_policy(args, policy)
@@ -724,7 +761,11 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
             excluded.append({"path": entry, "reason": "incomplete_or_missing_inventory"})
             continue
         for item in files:
-            if item.is_native:
+            if quarantined_by(item.rel_path, policy.get("quarantine")):
+                excluded.append({"path": item.rel_path, "reason": "quarantined", "scan_id": scan_id})
+            elif ignored_by(item.rel_path, policy.get("ignore")):
+                excluded.append({"path": item.rel_path, "reason": "ignored", "scan_id": scan_id})
+            elif item.is_native:
                 excluded.append({"path": item.rel_path, "reason": "native_document", "scan_id": scan_id})
             elif item.is_shortcut:
                 excluded.append({"path": item.rel_path, "reason": "shortcut", "scan_id": scan_id})
@@ -749,7 +790,7 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
         error = "download inventory is incomplete or missing"
     if error is None and getattr(args, "target_managed", False) and args.sync_kind != "rclone":
         error = "download-apply requires a target with rclone sync"
-    manifest_path = (args.download_filter_path or download_filter_path(args.local_root)) + ".files-from"
+    manifest_path = download_manifest_path(args)
     return {
         "schema": "ydm_download_plan:v1", "action": "download-plan", "dry_run": True,
         "target": policy.get("target"), "provider": policy.get("provider"),
@@ -760,6 +801,11 @@ def download_plan(args: argparse.Namespace, policy: dict) -> dict:
         "eligible": eligibility, "excluded": excluded,
         "error": error,
     }
+
+
+#: A whole `rclone copy`, not one transfer: long enough for a large folder, and
+#: rclone's own idle timeout covers a single stalled connection.
+DOWNLOAD_TIMEOUT_SEC = 6 * 3600
 
 
 def download_apply(args: argparse.Namespace, policy: dict) -> dict:
@@ -783,10 +829,21 @@ def download_apply(args: argparse.Namespace, policy: dict) -> dict:
     # reverse-transfer flags are permitted in this command.
     cmd = [rclone_bin(), "copy", f"{args.remote}:", args.local_root,
            "--files-from-raw", manifest_path]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    timeout = getattr(args, "timeout_sec", DOWNLOAD_TIMEOUT_SEC) or None
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        def text(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+        plan.update({"command": cmd, "returncode": None, "stdout": text(exc.stdout),
+                     "stderr": text(exc.stderr), "failed_paths": rclone_failed_paths(text(exc.stderr)),
+                     "error": f"rclone copy stopped: no result after {timeout:g}s"})
+        return plan
     plan.update({"command": cmd, "returncode": proc.returncode,
                  "stdout": proc.stdout, "stderr": proc.stderr,
                  "error": None if proc.returncode == 0 else f"rclone copy failed (rc={proc.returncode})"})
+    if proc.returncode != 0:
+        plan["failed_paths"] = rclone_failed_paths(proc.stderr)
     return plan
 
 
@@ -918,6 +975,26 @@ def status_payload(args: argparse.Namespace) -> dict:
     }
 
 
+def content_probe(args: argparse.Namespace, policy: dict, entry: str) -> dict:
+    """Which files under a path the cloud will not hand over, as of the snapshot.
+
+    Reads the first bytes of each file. Native documents, shortcuts and what the
+    policy already leaves out are not fetched by a sync, so they are not probed.
+    """
+    _scan_id, _exists, files = cloud_files_for_path(args.db_path, f"/{entry}" if entry else "/")
+    wanted = [(item.rel_path, item.size) for item in files
+              if not (item.is_native or item.is_shortcut
+                      or quarantined_by(item.rel_path, policy.get("quarantine"))
+                      or ignored_by(item.rel_path, policy.get("ignore")))]
+    results = probe_files(args.remote, wanted,
+                          workers=getattr(args, "probe_workers", PROBE_WORKERS),
+                          timeout=getattr(args, "probe_timeout", PROBE_TIMEOUT_SEC))
+    unreadable = [{"path": f"/{row['path']}", "reason": row["reason"]}
+                  for row in results if not row["readable"]]
+    return {"checked": len(results), "readable": len(results) - len(unreadable),
+            "unreadable": unreadable}
+
+
 def add_policy_path(args: argparse.Namespace) -> dict:
     policy = load_policy(args.policy_path) or empty_policy(
         args.local_root, args.remote, target=getattr(args, "target", None),
@@ -972,6 +1049,20 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         "risk": risk,
         "error": error,
     }
+    set_aside = getattr(args, "quarantine_unreadable", False)
+    if error is None and requested_mode != "disabled" and (getattr(args, "preflight", False) or set_aside):
+        probe = content_probe(args, policy, entry)
+        result["content_probe"] = probe
+        if probe["unreadable"] and args.apply and not set_aside:
+            # Before the policy changes: a filter that names a file the cloud
+            # refuses stops the sync of every folder until a resync gets through.
+            result["error"] = (
+                f"{len(probe['unreadable'])} of {probe['checked']} files under /{entry} "
+                f"cannot be read from the cloud; nothing changed. Add with "
+                f"--quarantine-unreadable to set them aside, or try again later."
+            )
+            result["blocked"] = True
+            return result
     if args.apply and error is None:
         meta = {"mode": requested_mode}
         if export_plan:
@@ -982,6 +1073,13 @@ def add_policy_path(args: argparse.Namespace) -> dict:
         if requested_mode == "bidirectional" and args.force_risk:
             meta["forced_risk"] = True
         policy["paths"][entry] = meta
+        if set_aside and result.get("content_probe", {}).get("unreadable"):
+            since = datetime.now().isoformat(timespec="seconds")
+            quarantine = dict(policy.get("quarantine", {}))
+            for row in result["content_probe"]["unreadable"]:
+                quarantine[row["path"].lstrip("/")] = {"reason": f"preflight: {row['reason']}", "since": since}
+            policy["quarantine"] = quarantine
+            result["quarantined"] = [row["path"] for row in result["content_probe"]["unreadable"]]
 
         # Resolve ancestor conflicts on daemon backend
         backend_name = getattr(args, "backend", None)
@@ -1211,12 +1309,19 @@ def render(payload: dict, fmt: str, text_header: bool) -> None:
             print(f"mode: {payload['mode']}")
         if payload.get("risk"):
             print(f"safe_for_bidirectional: {payload['risk']['safe_for_bidirectional']}")
+        probe = payload.get("content_probe")
+        if probe:
+            print(f"content_probe: {probe['readable']} of {probe['checked']} readable")
+            for row in probe["unreadable"]:
+                print(f"  unreadable: {row['path']} ({row['reason']})")
         backend_apply = payload.get("backend_apply")
         if backend_apply:
             print(f"backend: {backend_apply.get('backend')}")
             print(f"backend_action: {backend_apply.get('action')}")
             if backend_apply.get("error"):
                 print(f"backend_error: {backend_apply['error']}")
+        for step in payload.get("next", []):
+            print(f"next: {step}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1272,6 +1377,9 @@ def parse_args() -> argparse.Namespace:
     apply_download = subparsers.add_parser("download-apply")
     common_flags(apply_download)
     apply_download.add_argument("--apply", action="store_true")
+    apply_download.add_argument(
+        "--timeout-sec", type=float, default=DOWNLOAD_TIMEOUT_SEC,
+        help="stop the whole rclone copy after this long; 0 for no limit")
 
     native_export = subparsers.add_parser("native-export")
     native_export.add_argument("--path", required=True)
@@ -1290,6 +1398,16 @@ def parse_args() -> argparse.Namespace:
     add.add_argument("--export-object-id", default=None)
     add.add_argument("--export-mime-type", default=None)
     add.add_argument("--export-artifact-root", default=None)
+    add.add_argument(
+        "--preflight", action="store_true",
+        help="read the first bytes of every file under the path before changing "
+             "anything; with --apply, refuse if any cannot be read")
+    add.add_argument(
+        "--quarantine-unreadable", action="store_true",
+        help="preflight, and quarantine what cannot be read instead of refusing")
+    add.add_argument("--probe-workers", type=int, default=PROBE_WORKERS)
+    add.add_argument("--probe-timeout", type=float, default=PROBE_TIMEOUT_SEC,
+                     help="seconds to wait for one file")
     common_flags(add)
 
     quarantine = subparsers.add_parser(
@@ -1411,6 +1529,21 @@ class restoring_policy:
         return False
 
 
+def next_after_policy_change(args: argparse.Namespace, payload: dict) -> List[str]:
+    """What `add` and `remove` leave to do on an rclone machine. The filters are
+    already rendered; the daemon needs no second step at all."""
+    if payload.get("error") or getattr(args, "target_managed", False):
+        return []
+    try:
+        if _resolve_backend_name(args) != "rclone":
+            return []
+    except Exception:
+        return []
+    if payload.get("action") == "add" and payload.get("mode") == "download_only":
+        return ["sync_policy.py download-plan", "sync_policy.py download-apply --apply"]
+    return ["sync_bisync.py resync --apply  (the filter changed)"]
+
+
 def _target_managed_backend_skip(args: argparse.Namespace) -> dict:
     """Explain why policy edits do not implicitly mutate a managed backend."""
     return {
@@ -1518,6 +1651,9 @@ def main() -> int:
                             payload["backend_apply"] = backend_payload
                             if backend_payload.get("error") and not backend_payload.get("index_backup"):
                                 saved.restore()
+                steps = next_after_policy_change(args, payload)
+                if steps:
+                    payload["next"] = steps
         else:
             with restoring_policy(args.policy_path) as saved:
                 payload = remove_policy_path(args)
@@ -1531,6 +1667,9 @@ def main() -> int:
                             payload["backend_apply"] = backend_payload
                             if backend_payload.get("error") and not backend_payload.get("index_backup"):
                                 saved.restore()
+                steps = next_after_policy_change(args, payload)
+                if steps:
+                    payload["next"] = steps
     except Exception as exc:
         payload = {
             "schema": SCHEMA,

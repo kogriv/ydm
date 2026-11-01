@@ -94,8 +94,8 @@ systemctl --user start ydm-bisync.timer
 ```bash
 python3 ydm.py --backend rclone scan cloud --path /Folder
 python3 tools/sync_policy.py inspect --path /Folder --format json
-python3 tools/sync_policy.py add --path /Folder --mode bidirectional --backend rclone --format json
-python3 tools/sync_policy.py add --path /Folder --mode bidirectional --backend rclone --apply --format json
+python3 tools/sync_policy.py add --path /Folder --mode bidirectional --backend rclone --preflight --format json
+python3 tools/sync_policy.py add --path /Folder --mode bidirectional --backend rclone --preflight --apply --format json
 python3 tools/sync_bisync.py resync --format json
 python3 tools/sync_bisync.py resync --apply --format json
 python3 tools/sync_bisync.py run --apply --format json
@@ -104,14 +104,22 @@ python3 tools/sync_bisync.py run --apply --format json
 - `inspect` needs a base scan of the whole disk. Its absence is the error *No
   cloud scan covers the disk root*; see the first rule.
 - `safe_for_bidirectional: false` means use `--mode download_only`.
-- `safe_for_bidirectional` does not mean the cloud will hand the files over. A
-  file it answers 500 for shows up only in the resync.
-- `add --apply` renders the filters itself. `render-filters` is not a step here.
+- `safe_for_bidirectional` does not mean the cloud will hand the files over.
+  `--preflight` checks that: it reads the first bytes of every file in the
+  snapshot and lists failures in `data.content_probe.unreadable`. With `--apply`
+  it refuses (exit `3`) and changes nothing if any file fails. That catches a
+  file the cloud refuses outright, not one that breaks halfway, and it takes a
+  while on a large folder.
+- If the probe found files the cloud refuses, replace `--preflight` with
+  `--quarantine-unreadable`: the folder goes in with those files already set
+  aside. A timeout counts as unreadable, so try once more before quarantining.
+- `add --apply` renders the filters itself. `render-filters` is not a step here;
+  `data.next` says what is.
 - Compare before the `resync --apply` when the folder already exists on both
   sides.
 - `resync --apply` can exit `1` here for two ordinary reasons: a file the cloud
-  will not hand over (*Quarantine*), or a cloud that has never seen bisync (*When
-  something fails*). One can hide the other, so read the error each time.
+  will not hand over, or a cloud that has never seen bisync. `data.next_action`
+  tells them apart; see *When something fails*.
 
 The resync is finished when it exits `0`; a `run` afterwards exits `0` as well.
 
@@ -132,9 +140,10 @@ them to the person if they are not obviously yours.
 
 ## Quarantine a file the cloud will not hand over
 
-The `resync` exits `1` and rclone names the file in `data.bisync.stderr`. Put what
-the cloud answered and the date (`YYYY-MM-DD`) in the reason, or nobody will know
-when to take it out.
+A `resync` or `run` that stopped on such a file exits `1`, lists it in
+`data.failed_paths`, and gives the commands in `data.next_action.commands`. They
+are not run for you. Put what the cloud answered and the date (`YYYY-MM-DD`) in
+the reason, or nobody will know when to take it out.
 
 ```bash
 python3 tools/sync_policy.py quarantine --path "/Folder/file.ext" --reason "500 on download since 2026-01-31" --backend rclone --format json
@@ -202,11 +211,20 @@ python3 tools/sync_policy.py download-plan --format json
 python3 tools/sync_policy.py download-apply --apply --format json
 ```
 
-`download-plan` does not honour quarantine or ignore yet, and `download-apply`
-stops at nothing for a file the cloud will not hand over. Use it for the one-way
-paths it was built for, not to pre-load a folder that will become bidirectional.
+`download-plan` leaves out quarantined and ignored files and lists them in
+`data.excluded`. A file that fails is named in `data.failed_paths`; the rest are
+still copied. `--timeout-sec` caps the whole copy (6 hours by default). This is
+for one-way paths, not for pre-loading a folder that will become bidirectional.
 
 ## When something fails
+
+A failed `resync` or `run` carries the diagnosis in its JSON:
+
+- `data.failed_paths`: `[{"path", "reason"}]`, the files rclone says failed. Empty
+  when the log has no such line.
+- `data.next_action`: `kind` (`quarantine`, `missing_sentinel`, `stop` or
+  `read_stderr`), `why`, and `commands`, ready to read and run yourself. A rule
+  above still outranks a suggested command.
 
 | `data.error` or rclone's message | Cause | Next step |
 |---|---|---|
@@ -228,9 +246,8 @@ go-ahead. Find out why it aborted first.
 
 **A cloud that has never seen bisync.** `--check-access` looks for `RCLONE_TEST`
 on both sides before it copies anything, so the first baseline on a clean account
-fails. That failed attempt is needed: only a resync with the check on creates the
-local sentinel. Confirm the cloud really is reachable and only the sentinel is
-missing, then run the resync without the check:
+fails (`next_action.kind: missing_sentinel`). Confirm the cloud really is reachable
+and only the sentinel is missing, then run the resync without the check:
 
 ```bash
 "$YDM_RCLONE" lsf yandex: --max-depth 1

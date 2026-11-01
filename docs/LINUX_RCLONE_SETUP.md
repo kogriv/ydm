@@ -164,9 +164,9 @@ bash tools/linux/install_timer.sh install
 
 On an account no bisync has ever touched, that `--apply` fails the access check:
 `RCLONE_TEST` is not in the cloud yet, and the check runs before anything is
-copied. Once you have confirmed the remote lists correctly, run that one resync
-with `--no-check-access`; it puts the sentinel in the cloud, and later runs keep
-the check. The sentinel only arrives if that resync finishes.
+copied. Once you have confirmed the remote lists correctly, run the resync with
+`--no-check-access` until one finishes; that carries the sentinel to the cloud,
+and later runs keep the check.
 
 The daemon's own state (`/data/ya_disk/.sync`) stays where it is; the bisync
 filter does not include it.

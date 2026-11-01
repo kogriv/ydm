@@ -49,23 +49,23 @@
 
 ---
 
-## Phase 3 — Предпроверка и разбор сбоев (G3, G4)
+## Phase 3 — Предпроверка и разбор сбоев (G3, G4) ✅
 
 *Estimate:* 5–7 h
 
 | ID | Task | Files | Acceptance |
 |----|------|-------|------------|
-| 3.1 | Проба содержимого: `rclone cat --count` первых байт с таймаутом и ограниченным параллелизмом; чтение, без записи | `tools/sync_common.py`, `tests/` | Файл, отвечающий 500, определяется на фейковом rclone; таймаут не считается «файл цел» |
-| 3.2 | `sync_policy.py add --preflight`: проба всех файлов пути, в JSON — `unreadable` с причинами | `tools/sync_policy.py` | Без `--preflight` вывод прежний; `safe_for_bidirectional` не меняет смысл, доступность — отдельным полем |
-| 3.3 | `add --quarantine-unreadable --apply`: новая папка добавляется с уже записанным карантином | `tools/sync_policy.py`, `tests/test_quarantine.py` | resync после этого не падает на известных файлах |
-| 3.4 | Разбор stderr rclone: поля `failed_paths` и `next_action`, ANSI убран | `tools/sync_bisync.py` | На реальном образце вывода имена файлов разбираются; при несовпадении формата — пустой список и исходный stderr |
-| 3.5 | Подсказка при сбое resync: готовая команда карантина | `tools/sync_bisync.py` | Команда не выполняется автоматически |
+| 3.1 | ✅ Проба содержимого: `rclone cat --count` первых байт с таймаутом и ограниченным параллелизмом; чтение, без записи | `tools/sync_common.py`, `tests/` | Файл, отвечающий 500, определяется на фейковом rclone; таймаут не считается «файл цел» |
+| 3.2 | ✅ `sync_policy.py add --preflight`: проба всех файлов пути, в JSON — `unreadable` с причинами | `tools/sync_policy.py` | Без `--preflight` вывод прежний; `safe_for_bidirectional` не меняет смысл, доступность — отдельным полем |
+| 3.3 | ✅ `add --quarantine-unreadable --apply`: новая папка добавляется с уже записанным карантином | `tools/sync_policy.py`, `tests/test_quarantine.py` | resync после этого не падает на известных файлах |
+| 3.4 | ✅ Разбор stderr rclone: поля `failed_paths` и `next_action`, ANSI убран | `tools/sync_bisync.py` | На реальном образце вывода имена файлов разбираются; при несовпадении формата — пустой список и исходный stderr |
+| 3.5 | ✅ Подсказка при сбое resync: готовая команда карантина | `tools/sync_bisync.py` | Команда не выполняется автоматически |
 | 3.6 | ✅ Проверить `download-plan` / `download-apply` для предзагрузки | [`GAP.md`](./GAP.md), G8 | Проверено: для предзагрузки не используем, этот путь закрывают 3.1–3.3 |
-| 3.7 | `download-plan` учитывает карантин и ignore; исключённое показывает в `excluded` с причиной | `tools/sync_policy.py`, `tests/test_quarantine.py` | Файл в карантине не попадает в манифест |
-| 3.8 | Манифест загрузки пишется в `var/`, если каталог фильтра недоступен | `tools/sync_policy.py`, `tests/test_quarantine.py` | `download-apply --apply` работает при родителе зеркала, принадлежащем root |
-| 3.9 | `download-apply`: `failed_paths`, таймаут вызова rclone | `tools/sync_policy.py` | Частичный отказ называет файлы; зависший rclone не держит команду бесконечно |
-| 3.10 | Первый `resync` на облаке без `RCLONE_TEST`: определить случай и дать подсказку или положить метку осознанно | `tools/sync_bisync.py` | Сбой называет причину; проверка доступа не отключается молча |
-| 3.11 | `next` в ответе `add` и `remove` | `tools/sync_policy.py` | Агент видит следующий шаг в JSON, как у `quarantine` |
+| 3.7 | ✅ `download-plan` учитывает карантин и ignore; исключённое показывает в `excluded` с причиной | `tools/sync_policy.py`, `tests/test_quarantine.py` | Файл в карантине не попадает в манифест |
+| 3.8 | ✅ Манифест загрузки пишется в `var/`, если каталог фильтра недоступен | `tools/sync_policy.py`, `tests/test_quarantine.py` | `download-apply --apply` работает при родителе зеркала, принадлежащем root |
+| 3.9 | ✅ `download-apply`: `failed_paths`, таймаут вызова rclone | `tools/sync_policy.py` | Частичный отказ называет файлы; зависший rclone не держит команду бесконечно |
+| 3.10 | ✅ Первый `resync` на облаке без `RCLONE_TEST`: `next_action.kind = missing_sentinel`; `resync` готовит метку и с `--no-check-access` | `tools/sync_bisync.py` | Сбой называет причину; проверка доступа не отключается молча |
+| 3.11 | ✅ `next` в ответе `add` и `remove` | `tools/sync_policy.py` | Агент видит следующий шаг в JSON, как у `quarantine` |
 
 **Exit:** файл, который облако не отдаёт, виден до изменения фильтра и не
 останавливает синк остальных папок; `download-apply` не трогает файлы в карантине.

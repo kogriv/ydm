@@ -114,6 +114,7 @@ jobs:
           python tests/test_quarantine.py -v
           python tests/test_linux_timer.py -v
           python tests/test_agents_doc.py -v
+          python tests/test_preflight.py -v
 
       # The synthetic bench: a policy file, folders on disk and a database,
       # driven end to end. It is the only coverage the menu screens have, and
