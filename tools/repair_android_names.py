@@ -10,10 +10,12 @@ to full-width Unicode lookalikes in the local mirror.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -102,12 +104,13 @@ def needs_copy(item: RepairItem, local_root: str, force: bool) -> bool:
     return not os.path.exists(local) or os.path.getsize(local) != item.size
 
 
-def copy_item(item: RepairItem, remote: str, local_root: str) -> int:
+def copy_item(item: RepairItem, remote: str, local_root: str, *, quiet: bool = False) -> int:
     local = item.local_path(local_root)
     os.makedirs(os.path.dirname(local), exist_ok=True)
-    cmd = [rclone_bin(), "copyto", f"{remote}:{item.remote_rel}", local, "-P"]
-    result = subprocess.run(cmd)
-    return result.returncode
+    cmd = [rclone_bin(), "copyto", f"{remote}:{item.remote_rel}", local]
+    if quiet:
+        return subprocess.run(cmd, capture_output=True).returncode
+    return subprocess.run(cmd + ["-P"]).returncode
 
 
 def render_plan(items: Iterable[RepairItem], local_root: str, force: bool) -> List[RepairItem]:
@@ -131,11 +134,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scan-id", type=int, default=None)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--force", action="store_true", help="Copy even when sanitized local file already matches size")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
     return parser.parse_args()
 
 
-def main() -> None:
+def main_json(args: argparse.Namespace) -> int:
+    payload = {"schema": "repair_android_names:v1", "action": "repair", "dry_run": not args.apply,
+               "path": args.path, "error": None}
+    try:
+        payload["scan_id"] = scan_id = args.scan_id or latest_cloud_scan_id(args.db_path)
+        items = load_items(args.db_path, scan_id, args.path)
+        selected = [item for item in items if needs_copy(item, args.local_root, args.force)]
+        payload.update(problem_paths=len(items), to_copy=[item.remote_rel for item in selected])
+        if args.apply:
+            failed = [item.remote_rel for item in selected
+                      if copy_item(item, args.remote, args.local_root, quiet=True) != 0]
+            payload["failed_paths"] = failed
+            if failed:
+                payload["error"] = f"{len(failed)} of {len(selected)} copies failed"
+    except SystemExit as exc:
+        payload["error"] = str(exc.code)
+    except Exception as exc:
+        traceback.print_exc()
+        payload["error"] = str(exc)
+    print(json.dumps({"success": payload["error"] is None, "data": payload},
+                     ensure_ascii=False, indent=2))
+    return 1 if payload["error"] else 0
+
+
+def main() -> int:
     args = parse_args()
+    if args.format == "json":
+        return main_json(args)
     scan_id = args.scan_id or latest_cloud_scan_id(args.db_path)
     print(f"schema: repair_android_names:v1")
     print(f"scan_id: {scan_id}")
@@ -150,7 +180,7 @@ def main() -> None:
     print(f"to_copy: {len(selected)}")
 
     if not args.apply:
-        return
+        return 0
 
     failures = 0
     for item in selected:
@@ -160,9 +190,8 @@ def main() -> None:
             print(f"failed: rc={rc} {item.remote_rel}")
     print(f"finished_at: {datetime.now().isoformat()}")
     print(f"failures: {failures}")
-    if failures:
-        raise SystemExit(1)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

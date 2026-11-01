@@ -1,94 +1,83 @@
 #!/usr/bin/env python3
-import urllib.request
+"""Print an `exclude-dirs=` line that leaves only the given root folders synced.
+
+For the yandex-disk daemon's config: every folder in the disk root except those
+named with --keep. It reads the token from `YANDEX_DISK_TOKEN` or `.env` and never
+from a command-line argument, where it would land in the shell history and in
+`ps`. It used to take the first argument as the token, so `--help` went out to
+the API as one.
+"""
+from __future__ import annotations
+
+import argparse
 import json
-import sys
 import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
 
-# Настройки
-KEEP_FOLDERS = ['pro']  # Папки, которые НУЖНО оставить (не исключать)
-API_URL = "https://cloud-api.yandex.net/v1/disk/resources?path=/&limit=1000&fields=_embedded.items.name,_embedded.items.type"
-ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-def load_token_from_env():
-    """Читает токен из .env файла вручную, без внешних библиотек."""
-    token = None
-    if os.path.exists(ENV_FILE):
-        try:
-            with open(ENV_FILE, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    # Пропускаем комментарии и пустые строки
-                    if not line or line.startswith('#'):
-                        continue
-                    if line.startswith('YANDEX_DISK_TOKEN='):
-                        token = line.split('=', 1)[1].strip()
-                        # Удаляем кавычки, если они есть
-                        if (token.startswith('"') and token.endswith('"')) or \
-                           (token.startswith("'" ) and token.endswith("'" )):
-                            token = token[1:-1]
-                        return token
-        except Exception as e:
-            print(f"Ошибка чтения .env файла: {e}")
-    return token
+from ydm import load_token_from_env  # noqa: E402
 
-def get_folders(token):
-    headers = {
-        "Authorization": f"OAuth {token}",
-        "Accept": "application/json"
-    }
-    
-    req = urllib.request.Request(API_URL, headers=headers)
-    
+API_URL = ("https://cloud-api.yandex.net/v1/disk/resources?path=/&limit=1000"
+           "&fields=_embedded.items.name,_embedded.items.type")
+SCHEMA = "ydm_exclude_list:v1"
+
+
+def root_folders(token: str) -> list:
+    request = urllib.request.Request(API_URL, headers={
+        "Authorization": f"OAuth {token}", "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        items = json.loads(response.read().decode("utf-8")).get("_embedded", {}).get("items", [])
+    return [item["name"] for item in items if item["type"] == "dir"]
+
+
+def build(keep: list) -> dict:
+    payload = {"schema": SCHEMA, "action": "gen-exclude-list", "dry_run": True, "keep": keep,
+               "error": None}
+    token = os.environ.get("YANDEX_DISK_TOKEN") or load_token_from_env()
+    if not token:
+        payload["error"] = "No token: set YANDEX_DISK_TOKEN, or put it in .env"
+        return payload
     try:
-        with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            items = data.get('_embedded', {}).get('items', [])
-            
-            # Фильтруем: оставляем только папки
-            all_folders = [item['name'] for item in items if item['type'] == 'dir']
-            
-            # Формируем список исключений
-            folders_to_exclude = set(all_folders) - set(KEEP_FOLDERS)
-            return sorted(list(folders_to_exclude))
-            
-    except urllib.error.HTTPError as e:
-        print(f"Ошибка API: {e.code} {e.reason}")
-        if e.code == 401:
-            print("Неверный токен. Проверьте файл .env")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        sys.exit(1)
+        folders = root_folders(token)
+    except urllib.error.HTTPError as exc:
+        hint = ": check the token" if exc.code == 401 else ""
+        payload["error"] = f"Yandex Disk answered {exc.code} {exc.reason}{hint}"
+        return payload
+    except (OSError, ValueError) as exc:
+        payload["error"] = f"Could not reach Yandex Disk: {exc}"
+        return payload
+    excluded = sorted(set(folders) - set(keep))
+    payload.update(root_folders=len(folders), exclude=excluded,
+                   exclude_dirs_line=f"exclude-dirs={','.join(excluded)}")
+    return payload
 
-def main():
-    # 1. Пробуем найти токен в .env
-    token = load_token_from_env()
 
-    # 2. Если нет в .env, смотрим аргументы командной строки (как запасной вариант)
-    if not token and len(sys.argv) > 1:
-        token = sys.argv[1]
-
-    if not token or token == "вставь_свой_токен_сюда":
-        print("ОШИБКА: Токен не найден.")
-        print(f"\n1. Откройте файл: {ENV_FILE}")
-        print("2. Вставьте туда токен: YANDEX_DISK_TOKEN=ваш_токен")
-        print("3. Или передайте токен аргументом: python3 gen_exclude_list.py <TOKEN>")
-        print("\nПолучить токен: https://yandex.ru/dev/disk/poligon/ (кнопка 'Получить OAuth-токен')")
-        return
-
-    print("✅ Токен найден, запрашиваем список папок...")
-    exclude_list = get_folders(token)
-    
-    if exclude_list:
-        config_str = ",".join(exclude_list)
-        print("\n--- СКОПИРУЙТЕ ЭТУ СТРОКУ В КОНФИГ ---")
-        print(f"exclude-dirs={config_str}")
-        print("--------------------------------------")
-        print(f"\nВсего папок в корне: {len(exclude_list) + len(KEEP_FOLDERS)}")
-        print(f"Будет исключено: {len(exclude_list)}")
-        print(f"Останется: {KEEP_FOLDERS}")
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--keep", action="append", default=None, metavar="FOLDER",
+                        help="a root folder to keep synced; repeat for several (default: pro)")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    args = parser.parse_args(argv)
+    payload = build(args.keep or ["pro"])
+    if args.format == "json":
+        print(json.dumps({"success": payload["error"] is None, "data": payload},
+                         ensure_ascii=False, indent=2))
+    elif payload["error"]:
+        print(f"ERROR: {payload['error']}", file=sys.stderr)
+    elif payload["exclude"]:
+        print(payload["exclude_dirs_line"])
+        print(f"root folders: {payload['root_folders']}, excluded: {len(payload['exclude'])}, "
+              f"kept: {', '.join(args.keep or ['pro'])}", file=sys.stderr)
     else:
-        print("Папок для исключения не найдено (или все папки в белом списке).")
+        print("Nothing to exclude: every root folder is kept.", file=sys.stderr)
+    return 1 if payload["error"] else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

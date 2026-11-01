@@ -44,7 +44,7 @@ from tools.sync_policy import (  # noqa: E402
     load_policy,
     normalize_entry,
 )
-from ydm import DEFAULT_CONFIG  # noqa: E402
+from ydm import DEFAULT_CONFIG, place_format_flag  # noqa: E402
 from tools.providers import provider_for  # noqa: E402
 from tools.sync_policy import configure_target_args  # noqa: E402
 
@@ -1561,7 +1561,7 @@ def parse_args() -> argparse.Namespace:
     policy_set_parser.add_argument("--mode", choices=["observe", "guard", "auto"], required=True)
     policy_set_parser.add_argument("--path", default=None, help="Optional policy root path override")
 
-    args = parser.parse_args()
+    args = parser.parse_args(place_format_flag(sys.argv[1:], before_subcommand=False))
     if args.bisync_filter_path is None:
         args.bisync_filter_path = default_bisync_filter_path(args.local_root)
     return args

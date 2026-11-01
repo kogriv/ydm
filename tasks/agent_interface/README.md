@@ -9,7 +9,7 @@
 - Gap analysis: ✅ [`GAP.md`](./GAP.md)
 - Backlog: ✅ [`BACKLOG.md`](./BACKLOG.md)
 - Design: [`DESIGN_IMPORT.md`](./DESIGN_IMPORT.md) (импорт файла с другого устройства, 4.6)
-- Implementation: Phase 1–4 завершены, дальше Phase 5
+- Implementation: Phase 1–5 завершены
 
 ## Границы
 

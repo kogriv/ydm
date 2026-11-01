@@ -83,6 +83,32 @@ def rclone_bin():
     return recorded if recorded and os.access(recorded, os.X_OK) else "rclone"
 
 
+def place_format_flag(argv, *, before_subcommand):
+    """Put `--format X` where this tool's argparse wants it.
+
+    `ydm.py` takes it before the subcommand and `sync_policy.py` after, and the
+    wrong order was an argparse error. Each tool keeps its parser and accepts
+    both, without restating the flag on every subcommand.
+    """
+    args, found = list(argv), []
+    for index, token in enumerate(args):
+        if token == "--format" and index + 1 < len(args):
+            found = args[index:index + 2]
+            del args[index:index + 2]
+            break
+        if token.startswith("--format="):
+            found = [args.pop(index)]
+            break
+    if not found:
+        return list(argv)
+    if before_subcommand:
+        return found + args
+    for index, token in enumerate(args):
+        if not token.startswith("-"):
+            return args[:index + 1] + found + args[index + 1:]
+    return list(argv)
+
+
 def load_token_from_env():
     """Load token from .env manually."""
     env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
@@ -3481,7 +3507,7 @@ class YDM_CLI:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
 
     def run(self):
-        self.args = self.parser.parse_args()
+        self.args = self.parser.parse_args(place_format_flag(sys.argv[1:], before_subcommand=True))
         # These commands deliberately avoid StorageManager: they must remain
         # useful on an unconfigured/offline host and must not create state.
         if self.args.command == "targets":

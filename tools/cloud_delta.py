@@ -48,7 +48,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from tools.sync_common import create_storage, normalize_path, var_path  # noqa: E402
 from tools.trash_scan import resolve_token  # noqa: E402
-from ydm import Analyzer  # noqa: E402
+from ydm import Analyzer, place_format_flag  # noqa: E402
 
 
 SCHEMA = "ydm_cloud_delta:v1"
@@ -627,7 +627,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--no-save", action="store_true",
         help="Do not record this revision as the reference for the next run",
     )
-    return parser.parse_args(argv)
+    return parser.parse_args(place_format_flag(sys.argv[1:] if argv is None else argv, before_subcommand=True))
 
 
 def main() -> int:

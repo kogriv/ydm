@@ -42,6 +42,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from tools.sync_common import (  # noqa: E402
     exit_code,
+    place_format_flag,
     bisync_environment_warnings,
     bisync_resilience_flags,
     TIMEOUT_RETURNCODE,
@@ -952,7 +953,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args() -> argparse.Namespace:
-    return build_parser().parse_args()
+    return build_parser().parse_args(place_format_flag(sys.argv[1:], before_subcommand=False))
 
 
 def main() -> int:

@@ -9,6 +9,7 @@ from unittest.mock import patch
 from tools import sync_policy
 from tools import sync_filters
 from tools.sync_common import delete_local_entry_contents
+from ydm import rclone_bin  # noqa: E402
 
 
 class Phase6CompletionTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class Phase6CompletionTests(unittest.TestCase):
                 }
                 with patch("tools.sync_policy.download_plan", return_value=safe_plan):
                     result = sync_policy.download_apply(args, policy)
-                self.assertEqual(result["command"][:3], ["rclone", "copy", "synthetic:"])
+                self.assertEqual(result["command"][:3], [rclone_bin(), "copy", "synthetic:"])
                 self.assertIn("--files-from-raw", result["command"])
                 self.assertNotIn("delete", " ".join(result["command"]))
 

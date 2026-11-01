@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ydm import StorageManager, load_token_from_env  # noqa: E402
+from ydm import StorageManager, load_token_from_env, place_format_flag  # noqa: E402
 
 
 DEFAULT_DB_PATH = str(ROOT / "var" / "trash_scan.db")
@@ -1093,7 +1093,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     root_restore.add_argument("--progress", action="store_true")
     root_restore.add_argument("--apply", action="store_true")
     root_restore.add_argument("--yes", default="")
-    return parser.parse_args(argv)
+    return parser.parse_args(place_format_flag(sys.argv[1:] if argv is None else argv, before_subcommand=True))
 
 
 def main() -> int:

@@ -7,6 +7,7 @@ from tools import sync_policy
 from tools.native_export import ExportSafetyError, execute_export
 from tools.providers import provider_for
 from tools.targets import TargetConfig, context_for
+from ydm import rclone_bin  # noqa: E402
 
 
 class NativeExportTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class NativeExportTests(unittest.TestCase):
             result = execute_export(plan, self.context(root))
             self.assertTrue(result["dry_run"])
             self.assertEqual(result["cmd"][:5], [
-                "rclone", "backend", "copyid", "synthetic:", "synthetic-id",
+                rclone_bin(), "backend", "copyid", "synthetic:", "synthetic-id",
             ])
             self.assertIn("--drive-export-formats", result["cmd"])
             self.assertFalse(os.path.exists(plan["artifact_path"]))
@@ -56,7 +57,7 @@ class NativeExportTests(unittest.TestCase):
             result = execute_export(plan, self.context(root), apply=True)
             self.assertEqual(result["error"], "native export failed")
             self.assertEqual(run.call_args.args[0][:5], [
-                "rclone", "backend", "copyid", "synthetic:", "synthetic-id",
+                rclone_bin(), "backend", "copyid", "synthetic:", "synthetic-id",
             ])
             self.assertNotIn("delete", " ".join(result["cmd"]))
 

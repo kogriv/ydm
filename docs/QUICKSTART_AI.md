@@ -6,17 +6,22 @@ to handle a long scan.
 
 ## The tools
 
-| Tool | What it does | `--format` default | Where `--format` goes |
-|------|--------------|--------------------|-----------------------|
-| `ydm.py` | Database, cloud and local scans, reports | `text` | before the subcommand |
-| `tools/sync_policy.py` | The sync policy: `add`, `remove`, `quarantine`, `ignore`, `render-filters`, `download-plan`, `download-apply`, `import-file` | `text` | after the subcommand |
-| `tools/sync_bisync.py` | rclone bisync: `doctor`, `status`, `pause`, `resume`, `resync`, `run` | `json` | after the subcommand |
-| `tools/sync_rename.py` | Renames that do not re-upload: `plan`, `apply`, `preflight` | `text` | after the subcommand |
-| `tools/sync_tree.py` | The synced tree and its state, from the snapshot | `json` | anywhere |
-| `tools/cloud_delta.py` | Read-only: which folders went stale, in a few requests (needs the API token) | `text` | before the subcommand |
-| `tools/trash_scan.py` | Scan and restore a Trash subtree | `json` | before the subcommand |
-| `tools/sync_filters.py` | Legacy: edits the filter file directly, without a policy | `json` | after the subcommand |
-| `tools/sync_exclude.py` | Legacy: edits the daemon's `exclude-dirs` directly | `json` | after the subcommand |
+`--format` works before or after the subcommand on every tool.
+
+| Tool | What it does | `--format` default |
+|------|--------------|--------------------|
+| `ydm.py` | Database, cloud and local scans, reports | `text` |
+| `tools/sync_policy.py` | The sync policy: `add`, `remove`, `quarantine`, `ignore`, `render-filters`, `download-plan`, `download-apply`, `import-file` | `text` |
+| `tools/sync_bisync.py` | rclone bisync: `doctor`, `status`, `pause`, `resume`, `resync`, `run` | `json` |
+| `tools/sync_rename.py` | Renames that do not re-upload: `plan`, `apply`, `preflight` | `text` |
+| `tools/sync_tree.py` | The synced tree and its state, from the snapshot | `json` |
+| `tools/cloud_delta.py` | Read-only: which folders went stale, in a few requests (needs the API token) | `text` |
+| `tools/cloud_probe.py` | Is Yandex's file API answering? `check`, `watch`. Exit `0` open, `10` closed, `11` unknown, `12` the watcher failed | `text` |
+| `tools/trash_scan.py` | Scan and restore a Trash subtree | `json` |
+| `tools/repair_android_names.py` | Fetch files whose names Android cannot store | `text` |
+| `tools/gen_exclude_list.py` | Print an `exclude-dirs=` line for the daemon | `text` |
+| `tools/sync_filters.py` | Legacy: edits the filter file directly, without a policy | `json` |
+| `tools/sync_exclude.py` | Legacy: edits the daemon's `exclude-dirs` directly | `json` |
 
 The defaults differ, so always pass `--format json`. Prefer `sync_policy.py` to
 the two legacy editors on any machine that has a policy.
@@ -44,8 +49,8 @@ State lives in `monitor.db` (scans) and `var/` (`sync_policy.json`,
   `unreadable` as `[{"path", "reason"}]`. It is separate from
   `risk.safe_for_bidirectional`, which is about names and policy.
 
-`sync_tree.py` is the exception: it prints its own payload with a top-level
-`schema` when it works, and the envelope when it fails.
+`sync_tree.py` is the one variation: when it works, `success` sits beside its
+payload at the top level, with no `data` wrapper.
 
 ## How a folder gets synced
 

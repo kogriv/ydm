@@ -985,7 +985,7 @@ def run(args) -> None:
                 "local_scan_started": local_scan_started,
                 "local_scan_error": local_scan_error,
             }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps({"success": True, **payload}, ensure_ascii=False, indent=2))
     else:
         if args.text_header:
             if schema == SCHEMA_V2:

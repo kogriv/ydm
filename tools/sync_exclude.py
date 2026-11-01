@@ -30,7 +30,7 @@ from tools.sync_common import (  # noqa: E402
     sleep_sec,
     stop_start_daemon,
 )
-from ydm import Analyzer, DEFAULT_CONFIG  # noqa: E402
+from ydm import Analyzer, DEFAULT_CONFIG, place_format_flag  # noqa: E402
 
 
 @dataclass
@@ -419,7 +419,7 @@ def parse_args() -> argparse.Namespace:
         help="Include metadata header in text output (default)",
     )
 
-    return parser.parse_args()
+    return parser.parse_args(place_format_flag(sys.argv[1:], before_subcommand=False))
 
 
 def main() -> int:

@@ -27,7 +27,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -215,15 +215,25 @@ def main(argv=None) -> int:
         "--token-source", default="rclone", choices=["auto", "env", "rclone"],
         help="rclone by default: it refreshes its own token, a copy in .env may not",
     )
+    parser.add_argument("--format", choices=["text", "json"], default="text")
     args = parser.parse_args(argv)
+
+    def answer(result: Probe) -> int:
+        """The same exit codes either way: the job reads them, not the output."""
+        code = EXIT_CODES[result.status]
+        if args.format == "json":
+            print(json.dumps({"success": code == 0, "data": {
+                "schema": "ydm_cloud_probe:v1", "action": args.command, **asdict(result),
+                "error": None if code == 0 else describe(result)}}, ensure_ascii=False, indent=2))
+        else:
+            print(describe(result))
+        return code
 
     def token_for() -> str:
         return resolve_token(args.token_source, args.remote)
 
     if args.command == "check":
-        result = probe(token_for())
-        print(describe(result))
-        return EXIT_CODES[result.status]
+        return answer(probe(token_for()))
 
     notify, dismiss = _make_notify()
     log_path = var_path("cloud_watch.log")
@@ -247,10 +257,14 @@ def main(argv=None) -> int:
                 log.write(f"{_now()} error {reason}\n")
         except OSError:
             pass
-        print(f"error {reason}")
+        if args.format == "json":
+            print(json.dumps({"success": False, "data": {
+                "schema": "ydm_cloud_probe:v1", "action": args.command, "error": str(reason)}},
+                ensure_ascii=False, indent=2))
+        else:
+            print(f"error {reason}")
         return EXIT_FAILED
-    print(describe(result))
-    return EXIT_CODES[result.status]
+    return answer(result)
 
 
 if __name__ == "__main__":

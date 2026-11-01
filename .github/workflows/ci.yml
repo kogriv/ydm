@@ -62,6 +62,10 @@ jobs:
           python tools/ydm_menu.py --help
           python tools/trash_scan.py --help
           python tools/cloud_delta.py --help
+          python tools/cloud_probe.py --help
+          python tools/gen_exclude_list.py --help
+          python tools/repair_android_names.py --help
+          python tools/sync_rename.py --help
           python tasks/junk/plan_cleanup.py --help
           python tasks/junk/run_cleanup.py --help
 
@@ -116,6 +120,7 @@ jobs:
           python tests/test_agents_doc.py -v
           python tests/test_preflight.py -v
           python tests/test_recovery.py -v
+          python tests/test_cli_contract.py -v
 
       # The synthetic bench: a policy file, folders on disk and a database,
       # driven end to end. It is the only coverage the menu screens have, and

@@ -32,7 +32,7 @@ from tools.sync_common import load_sync_filters  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests"))
 from test_sync_policy_daemon import seed_cloud_db  # noqa: E402
 
-ODD = "Books/Deti/Фото/16 В ремесленном училище [1].jpg"
+ODD = "Books/Example/Фото/16 Пример [1].jpg"
 
 
 class QuarantineCase(unittest.TestCase):
@@ -42,12 +42,12 @@ class QuarantineCase(unittest.TestCase):
         os.makedirs(self.local_root)
         self.policy_path = os.path.join(self.tmp, "sync_policy.json")
         policy = sync_policy.empty_policy(self.local_root, "yandex")
-        policy["paths"] = {"Books/Deti": {"mode": "bidirectional"},
+        policy["paths"] = {"Books/Example": {"mode": "bidirectional"},
                            "pro/physon": {"mode": "download_only"},
                            "Books": {"mode": "disabled"}}
         sync_policy.write_policy(self.policy_path, policy)
         seed_cloud_db(os.path.join(self.tmp, "monitor.db"), tree={
-            "": ["Books", "pro"], "/Books": ["Deti", "Stargardt_FB2_[rutor.info]"],
+            "": ["Books", "pro"], "/Books": ["Example", "Sample_FB2_[source.example]"],
             "/pro": ["physon"]})
 
     def tearDown(self):
@@ -110,8 +110,8 @@ class TestQuarantineInFilters(QuarantineCase):
     def test_render_puts_exclusions_first_and_escaped(self):
         self.quarantine(path=f"/{ODD}", reason="r")
         text = self.render()["bisync_filter"].splitlines()
-        self.assertEqual(text[0], "- /Books/Deti/Фото/16 В ремесленном училище \\[1\\].jpg")
-        self.assertLess(text.index(text[0]), text.index("+ /Books/Deti/**"))
+        self.assertEqual(text[0], "- /Books/Example/Фото/16 Пример \\[1\\].jpg")
+        self.assertLess(text.index(text[0]), text.index("+ /Books/Example/**"))
         self.assertEqual(text[-1], "- **")
 
     def test_survives_a_rewrite(self):
@@ -130,21 +130,21 @@ class TestQuarantineInFilters(QuarantineCase):
         self.quarantine(path=f"/{ODD}", reason="r")
         self.render()
         parsed = load_sync_filters(os.path.join(self.tmp, "ya_disk.bisync.filters"))
-        self.assertEqual(parsed.include_dirs, ["Books/Deti"])
+        self.assertEqual(parsed.include_dirs, ["Books/Example"])
         self.assertEqual(parsed.warnings, [])
 
     def test_include_with_glob_characters_round_trips(self):
         policy = sync_policy.load_policy(self.policy_path)
-        policy["paths"]["Books/Stargardt_FB2_[rutor.info]"] = {"mode": "bidirectional"}
+        policy["paths"]["Books/Sample_FB2_[source.example]"] = {"mode": "bidirectional"}
         sync_policy.write_policy(self.policy_path, policy)
         self.render()
         parsed = load_sync_filters(os.path.join(self.tmp, "ya_disk.bisync.filters"))
-        self.assertIn("Books/Stargardt_FB2_[rutor.info]", parsed.include_dirs)
+        self.assertIn("Books/Sample_FB2_[source.example]", parsed.include_dirs)
 
     def test_no_quarantine_renders_exactly_as_before(self):
         # The device's filter hash must not change just because the code did.
         self.assertEqual(self.render()["bisync_filter"],
-                         "+ /Books/Deti/**\n+ /RCLONE_TEST\n- **\n")
+                         "+ /Books/Example/**\n+ /RCLONE_TEST\n- **\n")
 
 
 class TestIgnoreBuildOutput(QuarantineCase):

@@ -32,6 +32,7 @@ from tools.sync_common import (  # noqa: E402
     cloud_file_info,
     exit_code,
     fetch_verified,
+    place_format_flag,
     file_md5,
     rclone_bin,
     release_lock,
@@ -1611,7 +1612,7 @@ def parse_args() -> argparse.Namespace:
              "a path it still remembers is downloaded instead of deleted in the cloud")
     common_flags(remove)
 
-    return parser.parse_args()
+    return parser.parse_args(place_format_flag(sys.argv[1:], before_subcommand=False))
 
 
 def _resolve_backend_name(args: argparse.Namespace) -> str:

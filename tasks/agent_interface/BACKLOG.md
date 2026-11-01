@@ -89,16 +89,16 @@
 
 ---
 
-## Phase 5 — Согласованность CLI (G7)
+## Phase 5 — Согласованность CLI (G7) ✅
 
 *Estimate:* 3–4 h
 
 | ID | Task | Files | Acceptance |
 |----|------|-------|------------|
 | 5.1 | ✅ Инвентаризация: инструменты, `--format`, умолчания | [`GAP.md`](./GAP.md), G7 | Таблица есть; конверт `cloud_delta.py`, `trash_scan.py`, `sync_tree.py`, `sync_exclude.py` проверяется в 5.3 |
-| 5.2 | `--format` принимается и до, и после подкоманды | `ydm.py`, `tools/cloud_delta.py`, `tools/trash_scan.py`, `tools/sync_policy.py`, `tools/sync_rename.py`, `tools/sync_bisync.py`, `tools/sync_exclude.py`, `tools/sync_filters.py` | Старый порядок работает; оба порядка покрыты тестом |
-| 5.3 | Один конверт и `--format json` там, где его нет | `tools/cloud_probe.py`, `tools/repair_android_names.py`, инструменты из 5.1 | Тест конверта |
+| 5.2 | ✅ `--format` принимается и до, и после подкоманды | `ydm.py`, `tools/cloud_delta.py`, `tools/trash_scan.py`, `tools/sync_policy.py`, `tools/sync_rename.py`, `tools/sync_bisync.py`, `tools/sync_exclude.py`, `tools/sync_filters.py` | Старый порядок работает; оба порядка покрыты тестом |
+| 5.3 | ✅ Один конверт и `--format json` там, где его нет | `tools/cloud_probe.py`, `tools/repair_android_names.py`, инструменты из 5.1 | Тест конверта |
 | 5.4 | ✅ Описать умолчания формата; менять их только с проверкой вызывающих | `AGENTS.md`, `docs/QUICKSTART_AI.md` | Рекомендация агенту: всегда передавать `--format json` |
-| 5.5 | `gen_exclude_list.py`: argparse вместо токена в первом аргументе, `--help` без сети; решить, нужен ли инструмент | `tools/gen_exclude_list.py`, `.github/workflows/ci.yml` | `--help` даёт код 0 и не ходит в сеть; токен не передаётся через аргументы |
+| 5.5 | ✅ `gen_exclude_list.py`: argparse вместо токена в первом аргументе, `--help` без сети; инструмент остаётся для демона | `tools/gen_exclude_list.py`, `.github/workflows/ci.yml` | `--help` даёт код 0 и не ходит в сеть; токен не передаётся через аргументы |
 
 **Exit:** один способ вызова и один формат ответа для всех инструментов.

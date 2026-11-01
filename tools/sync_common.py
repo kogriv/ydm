@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CONFIG, rclone_bin  # noqa: F401  (rclone_bin re-exported)
+from ydm import Analyzer, LocalScanner, StorageManager, load_config, DEFAULT_CONFIG, place_format_flag, rclone_bin  # noqa: F401  (re-exported)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

@@ -5,6 +5,12 @@ releases, so entries are grouped by date. Detailed design/acceptance logs
 for larger workstreams live in their own docs (linked below) — this file
 is a scannable index, not a copy of them.
 
+## 2026-11-01 — one way to call the tools
+
+- **`--format` works before or after the subcommand on every tool.** Each one used to accept only its own position.
+- **Every tool answers in the envelope.** `cloud_probe.py`, `repair_android_names.py` and `gen_exclude_list.py` gained `--format json`; `cloud_probe` keeps its exit codes. `sync_tree.py` adds `success` beside its payload, whose top level stays as it was.
+- **`gen_exclude_list.py` takes no token on the command line.** The first argument used to be the token, so `--help` went to the API as one and a real token landed in the shell history. It reads `YANDEX_DISK_TOKEN` or `.env`, `--keep` names the folders to keep, and only the line goes to stdout.
+
 ## 2026-11-01 — pausing, recovering, and one view of a machine
 
 - **`sync_bisync.py pause --reason … --apply` and `resume --apply`.** `run` exits `3` during a pause on any machine, systemd or not; `resync` keeps working, which is what a pause is usually for. The pause has its own file, because a run in progress rewrites the state file when it ends.
