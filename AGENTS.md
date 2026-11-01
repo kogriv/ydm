@@ -69,6 +69,8 @@ decision from its JSON.
 
 ## Before you start
 
+Run everything from the repository root.
+
 ```bash
 python3 tools/sync_bisync.py doctor --format json
 python3 tools/sync_policy.py status --format json
@@ -85,6 +87,10 @@ pause, lock, timer, daemon, quarantine. Each entry in `data.checks` has a `statu
 Pause the sync for anything that ends in a resync, and resume afterwards. `run`
 exits `3` during a pause, on the timer and on a phone's job alike, while `resync`
 keeps working. A run already in progress finishes, and `pause` warns about it.
+
+A pause you did not set belongs to whoever set it. Read its reason in `doctor`, and
+resume only if you were told to or the person confirms it is over. While any pause
+stands, the final `run` of the procedures below exits `3`; that is not a failure.
 
 ```bash
 python3 tools/sync_bisync.py pause --reason "adding /Folder" --apply --format json
@@ -112,9 +118,10 @@ python3 tools/sync_bisync.py run --apply --format json
   it refuses (exit `3`) and changes nothing if any file fails. That catches a
   file the cloud refuses outright, not one that breaks halfway, and it takes a
   while on a large folder.
-- If the probe found files the cloud refuses, replace `--preflight` with
-  `--quarantine-unreadable`: the folder goes in with those files already set
-  aside. A timeout counts as unreadable, so try once more before quarantining.
+- If the probe found files the cloud refuses, run the `add --apply` with
+  `--quarantine-unreadable` in place of `--preflight`: the folder goes in with
+  those files already set aside, each with a dated reason. A timeout counts as
+  unreadable, so try once more before quarantining.
 - `add --apply` renders the filters itself. `render-filters` is not a step here;
   `data.next` says what is.
 - Compare before the `resync --apply` when the folder already exists on both
@@ -132,13 +139,16 @@ CHECK=$(mktemp)
 "$YDM_RCLONE" check "$YDM_LOCAL_ROOT" yandex: \
   --filter-from "$YDM_LOCAL_ROOT.bisync.filters" --combined "$CHECK" --checkers 8
 cut -c1 "$CHECK" | sort | uniq -c    # = same  + only local  - only cloud  * differ  ! error
+grep '^[*!]' "$CHECK"
 ```
 
 `rclone check` exits `1` and counts "errors" whenever the sides differ, so `+` and
 `-` lines on a new folder are not a failure. Read the file, not the exit code.
 
 Read every `*` line: the resync settles them by date, and nobody is asked. Show
-them to the person if they are not obviously yours.
+them to the person if they are not obviously yours. A `!` line is a file that could
+not be compared, which is expected for one the cloud refuses. For any other file,
+find out why before the resync.
 
 ## Quarantine a file the cloud will not hand over
 

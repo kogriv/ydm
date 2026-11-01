@@ -1094,7 +1094,8 @@ def add_policy_path(args: argparse.Namespace) -> dict:
             since = datetime.now().isoformat(timespec="seconds")
             quarantine = dict(policy.get("quarantine", {}))
             for row in result["content_probe"]["unreadable"]:
-                quarantine[row["path"].lstrip("/")] = {"reason": f"preflight: {row['reason']}", "since": since}
+                quarantine[row["path"].lstrip("/")] = {
+                    "reason": f"preflight {since[:10]}: {row['reason']}", "since": since}
             policy["quarantine"] = quarantine
             result["quarantined"] = [row["path"] for row in result["content_probe"]["unreadable"]]
 

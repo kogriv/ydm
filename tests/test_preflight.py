@@ -304,7 +304,9 @@ class TestAddPreflight(AddCase):
         self.assertIsNone(result["error"])
         policy = self.policy()
         self.assertIn("Folder", policy["paths"])
-        self.assertIn("500", policy["quarantine"]["Folder/b"]["reason"])
+        reason = policy["quarantine"]["Folder/b"]["reason"]
+        self.assertIn("500", reason)
+        self.assertRegex(reason, r"\d{4}-\d\d-\d\d", "says when, like a reason written by hand")
         self.assertEqual(result["quarantined"], ["/Folder/b"])
         rendered = "\n".join(sync_policy.filter_lines(["Folder"], exclude=policy["quarantine"]))
         self.assertIn("- /Folder/b", rendered)
